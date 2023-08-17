@@ -21,6 +21,7 @@ use std::convert::TryFrom;
     Encode,
     Decode,
 )]
+#[rs_ffi_macro_derive::impl_ffi_conv]
 pub enum Purpose {
     /// at least one authentication key must be registered for all security levels
     AUTHENTICATION = 0,

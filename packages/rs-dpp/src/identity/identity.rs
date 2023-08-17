@@ -55,6 +55,7 @@ pub const IDENTIFIER_FIELDS_RAW_OBJECT: [&str; 1] = [property_names::ID_RAW_OBJE
 #[platform_deserialize_limit(15000)]
 #[platform_serialize_limit(15000)]
 #[serde(rename_all = "camelCase")]
+#[rs_ffi_macro_derive::impl_ffi_conv]
 pub struct Identity {
     pub protocol_version: u32,
     #[bincode(with_serde)]

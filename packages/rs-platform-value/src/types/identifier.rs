@@ -15,6 +15,7 @@ use crate::{string_encoding, Error, Value};
 pub const IDENTIFIER_MEDIA_TYPE: &str = "application/x.dash.dpp.identifier";
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Copy, Encode, Decode)]
+//#[rs_ffi_macro_derive::impl_ffi_conv]
 pub struct IdentifierBytes32(pub [u8; 32]);
 
 #[derive(
@@ -32,6 +33,7 @@ pub struct IdentifierBytes32(pub [u8; 32]);
     Encode,
     Decode,
 )]
+//#[rs_ffi_macro_derive::impl_ffi_conv]
 pub struct Identifier(pub IdentifierBytes32);
 
 impl AsRef<[u8]> for Identifier {

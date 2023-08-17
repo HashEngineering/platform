@@ -1187,6 +1187,7 @@ dependencies = [
  "bls-signatures",
  "bs58",
  "byteorder",
+ "cbindgen",
  "chrono",
  "ciborium",
  "dashcore",
@@ -1212,6 +1213,8 @@ dependencies = [
  "pretty_assertions",
  "rand",
  "regex",
+ "rs-ffi-interfaces",
+ "rs-ffi-macro-derive",
  "serde",
  "serde-big-array",
  "serde_cbor",
@@ -2804,6 +2807,8 @@ dependencies = [
  "lazy_static",
  "rand",
  "regex",
+ "rs-ffi-interfaces",
+ "rs-ffi-macro-derive",
  "serde",
  "serde_bytes",
  "serde_json",
@@ -3283,6 +3288,24 @@ dependencies = [
  "cbindgen",
  "drive",
  "hex",
+]
+
+[[package]]
+name = "rs-ffi-interfaces"
+version = "0.1.0"
+source = "git+https://github.com/pankcuf/rs-ffi-macro?branch=master#0c828f764482c91dc719ea9ed3ee2b01ca93e939"
+dependencies = [
+ "cbindgen",
+ "rs-ffi-macro-derive",
+]
+
+[[package]]
+name = "rs-ffi-macro-derive"
+version = "0.1.0"
+source = "git+https://github.com/pankcuf/rs-ffi-macro?branch=master#0c828f764482c91dc719ea9ed3ee2b01ca93e939"
+dependencies = [
+ "quote",
+ "syn 1.0.109",
 ]
 
 [[package]]

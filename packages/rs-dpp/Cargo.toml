@@ -5,6 +5,9 @@ edition = "2018"
 authors = ["Anton Suprunchuk <anton.suprunchuk@gmail.com>", "Samuel Westrich <sam@dash.org>", "Ivan Shumkov <ivan@shumkov.ru>", "Djavid Gabibiyan <djavid@dash.org>", "Igor Markin <igor.markin@dash.org>"]
 
 [dependencies]
+rs-ffi-interfaces = { git = "https://github.com/pankcuf/rs-ffi-macro", branch = "master" }
+rs-ffi-macro-derive = { git = "https://github.com/pankcuf/rs-ffi-macro", branch = "master" }
+
 anyhow = { version = "1.0.70" }
 async-trait = { version = "0.1.68" }
 base64 = "0.20.0"
@@ -64,3 +67,6 @@ pretty_assertions = { version = "1.3.0" }
 default = ["fixtures-and-mocks",  "cbor"]
 cbor = ["ciborium"]
 fixtures-and-mocks = ["mockall"]
+
+[build-dependencies]
+cbindgen = "0.24.3"

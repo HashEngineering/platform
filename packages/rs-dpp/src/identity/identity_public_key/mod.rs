@@ -32,7 +32,7 @@ use dashcore::hashes::Hash;
 use crate::identity::state_transition::identity_public_key_transitions::IdentityPublicKeyInCreation;
 use crate::util::vec;
 use platform_serialization::{PlatformDeserialize, PlatformSerialize};
-
+#[rs_ffi_macro_derive::impl_ffi_conv]
 pub type KeyID = u32;
 pub type TimestampMillis = u64;
 
@@ -57,6 +57,7 @@ pub const BINARY_DATA_FIELDS: [&str; 1] = ["data"];
 #[platform_error_type(ProtocolError)]
 #[platform_deserialize_limit(2000)]
 #[platform_serialize_limit(2000)]
+#[rs_ffi_macro_derive::impl_ffi_conv]
 pub struct IdentityPublicKey {
     pub id: KeyID,
     pub purpose: Purpose,

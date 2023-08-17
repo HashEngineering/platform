@@ -22,6 +22,7 @@ use dashcore::consensus::encode::Error as DashCoreError;
 use platform_value::{Error as ValueError, Value};
 
 #[derive(Error, Debug)]
+#[rs_ffi_macro_derive::impl_ffi_conv]
 pub enum ProtocolError {
     #[error("Identifier Error: {0}")]
     IdentifierError(String),
