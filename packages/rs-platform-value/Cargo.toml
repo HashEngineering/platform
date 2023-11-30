@@ -24,6 +24,12 @@ lazy_static = "1.4.0"
 platform-serialization = { path = "../rs-platform-serialization" }
 platform-version = { path = "../rs-platform-version" }
 indexmap = "2.0.2"
+ferment-macro = { path = "../../../ferment/ferment-macro" }
+ferment-interfaces = { path = "../../../ferment/ferment-interfaces" }
+
+[build-dependencies]
+cbindgen = "0.24.3"
+ferment = { path = "../../../ferment/ferment" }
 
 ### FEATURES #################################################################
 

@@ -43,6 +43,7 @@ use super::DocumentQuery;
 /// let identity = Identity::fetch(&mut sdk, query);
 /// ```
 #[async_trait::async_trait]
+#[ferment_macro::export]
 pub trait Fetch
 where
     Self: Sized
@@ -122,7 +123,7 @@ where
         Self::fetch(sdk, id).await
     }
 }
-
+#[ferment_macro::export]
 impl Fetch for Identity {
     type Request = IdentityRequest;
 }

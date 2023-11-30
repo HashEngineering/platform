@@ -34,6 +34,8 @@ futures = { version = "0.3.28" }
 derive_more = { version = "0.99.16" }
 # dashcore-rpc is only needed for core rpc; TODO remove once we have correct core rpc impl
 dashcore-rpc = { git = "https://github.com/dashpay/rust-dashcore-rpc", branch = "master" }
+ferment-macro = { path = "../../../ferment/ferment-macro" }
+ferment-interfaces = { path = "../../../ferment/ferment-interfaces" }
 
 [dev-dependencies]
 rs-dapi-client = { path = "../rs-dapi-client", features = ["mocks"] }
@@ -46,6 +48,10 @@ dpp = { path = "../rs-dpp", features = [
 ] }
 data-contracts = { path = "../data-contracts" }
 tokio-test = { version = "0.4.3" }
+
+[build-dependencies]
+ferment = { path = "../../../ferment/ferment" }
+cbindgen = "0.24.3"
 
 [features]
 default = ["mocks", "offline-testing"]

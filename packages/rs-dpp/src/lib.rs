@@ -59,7 +59,9 @@ pub mod prelude {
     pub use crate::identity::IdentityPublicKey;
     #[cfg(feature = "validation")]
     pub use crate::validation::ConsensusValidationResult;
+    #[ferment_macro::export]
     pub type TimestampMillis = u64;
+    #[ferment_macro::export]
     pub type Revision = u64;
 }
 
