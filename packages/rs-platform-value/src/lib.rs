@@ -22,7 +22,7 @@ mod pointer;
 mod replace;
 pub mod string_encoding;
 pub mod system_bytes;
-mod types;
+pub mod types;
 mod value_map;
 mod value_serialization;
 

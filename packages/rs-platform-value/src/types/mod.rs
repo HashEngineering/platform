@@ -4,7 +4,7 @@ pub(crate) mod binary_data;
 pub(crate) mod bytes_20;
 pub(crate) mod bytes_32;
 pub(crate) mod bytes_36;
-pub(crate) mod identifier;
+pub mod identifier;
 
 fn encoding_string_to_encoding(encoding_string: Option<&str>) -> Encoding {
     match encoding_string {

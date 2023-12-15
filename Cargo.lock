@@ -1583,7 +1583,7 @@ dependencies = [
 
 [[package]]
 name = "ferment"
-version = "0.1.1"
+version = "0.1.4"
 dependencies = [
  "quote",
  "syn 1.0.109",
@@ -1591,11 +1591,11 @@ dependencies = [
 
 [[package]]
 name = "ferment-interfaces"
-version = "0.1.1"
+version = "0.1.4"
 
 [[package]]
 name = "ferment-macro"
-version = "0.1.1"
+version = "0.1.4"
 dependencies = [
  "quote",
  "syn 1.0.109",
