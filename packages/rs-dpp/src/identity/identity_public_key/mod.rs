@@ -6,9 +6,9 @@ use bincode::{Decode, Encode};
 use derive_more::From;
 use serde::{Deserialize, Serialize};
 
-mod key_type;
-mod purpose;
-mod security_level;
+pub mod key_type;
+pub mod purpose;
+pub mod security_level;
 pub use key_type::KeyType;
 pub use purpose::Purpose;
 pub use security_level::SecurityLevel;
@@ -26,9 +26,11 @@ pub use methods::*;
 pub mod contract_bounds;
 #[cfg(feature = "random-public-keys")]
 mod random;
-
+#[ferment_macro::export]
 pub type KeyID = u32;
+#[ferment_macro::export]
 pub type KeyCount = KeyID;
+#[ferment_macro::export]
 pub type TimestampMillis = u64;
 
 #[derive(
@@ -49,6 +51,7 @@ pub type TimestampMillis = u64;
 )]
 #[platform_serialize(limit = 2000, unversioned)] //This is not platform versioned automatically
 #[serde(tag = "$version")]
+#[ferment_macro::export]
 pub enum IdentityPublicKey {
     #[serde(rename = "0")]
     V0(IdentityPublicKeyV0),

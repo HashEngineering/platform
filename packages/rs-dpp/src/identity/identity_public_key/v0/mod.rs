@@ -4,20 +4,20 @@ mod methods;
 #[cfg(feature = "random-public-keys")]
 mod random;
 
-pub use crate::identity::KeyType;
-pub use crate::identity::Purpose;
-pub use crate::identity::SecurityLevel;
+pub use crate::identity::identity_public_key::key_type::KeyType;
+pub use crate::identity::identity_public_key::purpose::Purpose;
+pub use crate::identity::identity_public_key::security_level::SecurityLevel;
 
 use bincode::{Decode, Encode};
 
-use platform_value::BinaryData;
+use platform_value::types::binary_data::BinaryData;
 use serde::{Deserialize, Serialize};
 
 use crate::identity::identity_public_key::contract_bounds::ContractBounds;
 use crate::identity::identity_public_key::key_type::KEY_TYPE_MAX_SIZE_TYPE;
 use crate::identity::Purpose::AUTHENTICATION;
 use crate::identity::SecurityLevel::MASTER;
-use crate::identity::{KeyID, TimestampMillis};
+use crate::identity::{identity_public_key::KeyID, identity_public_key::TimestampMillis};
 #[cfg(feature = "state-transitions")]
 use crate::state_transition::public_key_in_creation::v0::IdentityPublicKeyInCreationV0;
 
@@ -36,6 +36,7 @@ use crate::state_transition::public_key_in_creation::v0::IdentityPublicKeyInCrea
     Hash,
 )]
 #[serde(rename_all = "camelCase")]
+#[ferment_macro::export]
 pub struct IdentityPublicKeyV0 {
     pub id: KeyID,
     pub purpose: Purpose,

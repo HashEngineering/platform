@@ -36,6 +36,7 @@ use std::collections::{BTreeMap, BTreeSet};
     derive(Encode, Decode, PlatformDeserialize, PlatformSerialize),
     platform_serialize(limit = 15000, unversioned)
 )]
+#[ferment_macro::export]
 pub enum Identity {
     #[cfg_attr(feature = "identity-serde-conversion", serde(rename = "0"))]
     V0(IdentityV0),

@@ -50,6 +50,7 @@ use std::convert::TryFrom;
     Default,
     strum::EnumIter,
 )]
+#[ferment_macro::export]
 pub enum KeyType {
     #[default]
     ECDSA_SECP256K1 = 0,

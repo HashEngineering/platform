@@ -12,12 +12,12 @@ use platform_value::Value;
 #[cfg(feature = "identity-serde-conversion")]
 use serde::{Deserialize, Serialize};
 
-use crate::identity::{IdentityPublicKey, KeyID, PartialIdentity};
+use crate::identity::{identity_public_key::IdentityPublicKey, identity_public_key::KeyID, PartialIdentity};
 use crate::prelude::Revision;
 
 #[cfg(feature = "identity-value-conversion")]
 use crate::errors::ProtocolError;
-use crate::identifier::Identifier;
+use platform_value::types::identifier::Identifier;
 #[cfg(feature = "identity-serialization")]
 use bincode::{Decode, Encode};
 
@@ -30,7 +30,7 @@ use bincode::{Decode, Encode};
     derive(Serialize, Deserialize),
     serde(rename_all = "camelCase")
 )]
-
+#[ferment_macro::export]
 pub struct IdentityV0 {
     pub id: Identifier,
     #[cfg_attr(

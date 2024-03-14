@@ -64,6 +64,11 @@ rust_decimal = "1.29.1"
 rust_decimal_macros = "1.29.1"
 indexmap = { version = "2.0.2", features = ["serde"] }
 strum = { version = "0.25.0", features = ["derive"] }
+ferment-interfaces = { path = "../../../ferment/ferment-interfaces" }
+ferment-macro = { path = "../../../ferment/ferment-macro" }
+
+[build-dependencies]
+ferment = { path = "../../../ferment/ferment" }
 
 [dev-dependencies]
 test-case = { version = "2.0" }

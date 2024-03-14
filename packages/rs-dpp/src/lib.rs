@@ -63,6 +63,7 @@ pub mod prelude {
     #[cfg(feature = "validation")]
     pub use crate::validation::ConsensusValidationResult;
     pub type TimestampMillis = u64;
+    #[ferment_macro::export]
     pub type Revision = u64;
     pub type IdentityNonce = u64;
 
