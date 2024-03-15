@@ -3056,6 +3056,9 @@ dependencies = [
 name = "platform-version"
 version = "1.0.0-dev.7"
 dependencies = [
+ "ferment",
+ "ferment-interfaces",
+ "ferment-macro",
  "thiserror",
 ]
 
@@ -3608,6 +3611,9 @@ dependencies = [
  "backon",
  "chrono",
  "dapi-grpc",
+ "ferment",
+ "ferment-interfaces",
+ "ferment-macro",
  "futures",
  "hex",
  "http",
@@ -3638,6 +3644,9 @@ dependencies = [
  "drive",
  "drive-proof-verifier",
  "envy",
+ "ferment",
+ "ferment-interfaces",
+ "ferment-macro",
  "futures",
  "hex",
  "http",

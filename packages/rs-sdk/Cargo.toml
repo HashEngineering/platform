@@ -31,7 +31,11 @@ derive_more = { version = "0.99.16" }
 dashcore-rpc = { git = "https://github.com/dashpay/rust-dashcore-rpc", tag = "v0.15.2" }
 lru = { version = "0.12.2", optional = true }
 bip37-bloom-filter = { git = "https://github.com/dashpay/rs-bip37-bloom-filter", branch = "develop" }
+ferment-interfaces = { path = "../../../ferment/ferment-interfaces" }
+ferment-macro = { path = "../../../ferment/ferment-macro" }
 
+[build-dependencies]
+ferment = { path = "../../../ferment/ferment" }
 
 [dev-dependencies]
 rs-dapi-client = { path = "../rs-dapi-client", features = ["mocks"] }

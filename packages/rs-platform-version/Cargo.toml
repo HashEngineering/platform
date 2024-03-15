@@ -9,6 +9,11 @@ license = "MIT"
 
 [dependencies]
 thiserror = { version = "1.0" }
+ferment-interfaces = { path = "../../../ferment/ferment-interfaces" }
+ferment-macro = { path = "../../../ferment/ferment-macro" }
+
+[build-dependencies]
+ferment = { path = "../../../ferment/ferment" }
 
 [features]
 mock-versions = []
