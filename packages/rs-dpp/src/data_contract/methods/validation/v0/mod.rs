@@ -1,9 +1,10 @@
 use crate::data_contract::accessors::v0::DataContractV0Getters;
 use crate::data_contract::document_type::accessors::DocumentTypeV0Getters;
-use crate::data_contract::document_type::schema::enrich_with_base_schema;
-use crate::data_contract::document_type::DocumentTypeRef;
+use crate::data_contract::document_type::{DocumentType, DocumentTypeRef};
 
 use crate::consensus::basic::document::{InvalidDocumentTypeError, MissingDocumentTypeError};
+use crate::consensus::basic::BasicError;
+use crate::consensus::ConsensusError;
 use crate::data_contract::schema::DataContractSchemaMethodsV0;
 use crate::data_contract::DataContract;
 use crate::document::{property_names, Document, DocumentV0Getters};
@@ -30,6 +31,7 @@ pub trait DataContractValidationMethodsV0 {
 }
 
 impl DataContract {
+    #[inline(always)]
     pub(super) fn validate_document_properties_v0(
         &self,
         name: &str,
@@ -48,7 +50,9 @@ impl DataContract {
 
         // Compile json schema validator if it's not yet compiled
         if !validator.is_compiled(platform_version)? {
-            let root_schema = enrich_with_base_schema(
+            // It is normal that we get a protocol error here, since the document type is coming
+            // from the state
+            let root_schema = DocumentType::enrich_with_base_schema(
                 // TODO: I just wondering if we could you references here
                 //  instead of cloning
                 document_type.schema().clone(),
@@ -63,14 +67,16 @@ impl DataContract {
             validator.compile(&root_json_schema, platform_version)?;
         }
 
-        let json_value = value
-            .try_into_validating_json()
-            .map_err(ProtocolError::ValueError)?;
-
-        validator.validate(&json_value, platform_version)
+        match value.try_into_validating_json() {
+            Ok(json_value) => validator.validate(&json_value, platform_version),
+            Err(e) => Ok(SimpleConsensusValidationResult::new_with_error(
+                ConsensusError::BasicError(BasicError::ValueError(e.into())),
+            )),
+        }
     }
 
     // TODO: Move to document
+    #[inline(always)]
     pub(super) fn validate_document_v0(
         &self,
         name: &str,
