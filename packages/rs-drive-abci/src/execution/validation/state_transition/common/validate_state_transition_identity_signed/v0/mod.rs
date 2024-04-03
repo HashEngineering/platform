@@ -9,13 +9,12 @@ use dpp::consensus::signature::{
 use dpp::identity::PartialIdentity;
 
 use crate::execution::types::execution_operation::signature_verification_operation::SignatureVerificationOperation;
-use crate::execution::types::execution_operation::ValidationOperation;
+use crate::execution::types::execution_operation::{RetrieveIdentityInfo, ValidationOperation};
 use crate::execution::types::state_transition_execution_context::{
     StateTransitionExecutionContext, StateTransitionExecutionContextMethodsV0,
 };
 use dpp::consensus::ConsensusError;
 
-use crate::error::execution::ExecutionError;
 use dpp::identity::identity_public_key::accessors::v0::IdentityPublicKeyGettersV0;
 use dpp::state_transition::StateTransition;
 use dpp::validation::ConsensusValidationResult;
@@ -32,7 +31,6 @@ use drive::dpp::identity::KeyType;
 use drive::drive::identity::key::fetch::IdentityKeysRequest;
 use drive::drive::Drive;
 use drive::grovedb::TransactionArg;
-use drive::state_transition_action::StateTransitionAction;
 use lazy_static::lazy_static;
 use std::collections::HashSet;
 
@@ -50,7 +48,6 @@ pub(super) trait ValidateStateTransitionIdentitySignatureV0<'a> {
     fn validate_state_transition_identity_signed_v0(
         &self,
         drive: &Drive,
-        action: Option<&StateTransitionAction>,
         request_revision: bool,
         transaction: TransactionArg,
         execution_context: &mut StateTransitionExecutionContext,
@@ -62,7 +59,6 @@ impl<'a> ValidateStateTransitionIdentitySignatureV0<'a> for StateTransition {
     fn validate_state_transition_identity_signed_v0(
         &self,
         drive: &Drive,
-        action: Option<&StateTransitionAction>,
         request_identity_revision: bool,
         transaction: TransactionArg,
         execution_context: &mut StateTransitionExecutionContext,
@@ -78,34 +74,11 @@ impl<'a> ValidateStateTransitionIdentitySignatureV0<'a> for StateTransition {
 
         let owner_id = self.owner_id();
 
-        let security_levels = match self {
-            StateTransition::DocumentsBatch(_) => {
-                // We will have an action during consensus validation, but not on mempool check_tx
-                if let Some(action) = action {
-                    let StateTransitionAction::DocumentsBatchAction(documents_batch_action) =
-                        action
-                    else {
-                        return Err(Error::Execution(ExecutionError::CorruptedCodeExecution(
-                                "we expect a documents batch state transition action when validating the signature of the documents batch transition",
-                            )));
-                    };
-                    documents_batch_action.contract_based_security_level_requirement()
-                } else {
-                    // In this case we just validate the transition
-                    // If it is not valid during consensus validation because the key wasn't the
-                    // right level then we will disable the key as it most likely is an attack
-                    self.security_level_requirement()
-                        .ok_or(ProtocolError::CorruptedCodeExecution(
-                            "state_transition does not have security level".to_string(),
-                        ))
-                }
-            }
-            _ => self
-                .security_level_requirement()
+        let security_levels =
+            self.security_level_requirement()
                 .ok_or(ProtocolError::CorruptedCodeExecution(
                     "state_transition does not have security level".to_string(),
-                )),
-        }?;
+                ))?;
 
         let purpose = self
             .purpose_requirement()
@@ -116,12 +89,18 @@ impl<'a> ValidateStateTransitionIdentitySignatureV0<'a> for StateTransition {
         let key_request = IdentityKeysRequest::new_specific_key_query(owner_id.as_bytes(), key_id);
 
         let maybe_partial_identity = if request_identity_revision {
+            execution_context.add_operation(ValidationOperation::RetrieveIdentity(
+                RetrieveIdentityInfo::one_key_and_balance_and_revision(),
+            ));
             drive.fetch_identity_balance_with_keys_and_revision(
                 key_request,
                 transaction,
                 platform_version,
             )?
         } else {
+            execution_context.add_operation(ValidationOperation::RetrieveIdentity(
+                RetrieveIdentityInfo::one_key_and_balance(),
+            ));
             drive.fetch_identity_balance_with_keys(key_request, transaction, platform_version)?
         };
 
@@ -143,6 +122,7 @@ impl<'a> ValidateStateTransitionIdentitySignatureV0<'a> for StateTransition {
             return Ok(validation_result);
         }
 
+        // This is very cheap because there will only be 1 key
         let Some(public_key) = partial_identity.loaded_public_keys.get(&key_id) else {
             validation_result.add_error(SignatureError::MissingPublicKeyError(
                 MissingPublicKeyError::new(key_id),
@@ -150,6 +130,7 @@ impl<'a> ValidateStateTransitionIdentitySignatureV0<'a> for StateTransition {
             return Ok(validation_result);
         };
 
+        // Todo: is this needed?
         if !SUPPORTED_KEY_TYPES.contains(&public_key.key_type()) {
             validation_result.add_error(SignatureError::InvalidIdentityPublicKeyTypeError(
                 InvalidIdentityPublicKeyTypeError::new(public_key.key_type()),
