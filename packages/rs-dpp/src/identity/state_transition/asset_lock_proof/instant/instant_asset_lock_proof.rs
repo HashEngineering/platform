@@ -131,7 +131,7 @@ impl InstantAssetLockProof {
             ProtocolError::IdentifierError(String::from("No output at a given index"))
         })?;
 
-        let outpoint_bytes: [u8; 36] = outpoint.into();
+        let outpoint_bytes: [u8; 36] = outpoint.try_into().unwrap();
 
         let hash = hash_double(outpoint_bytes.as_slice());
 

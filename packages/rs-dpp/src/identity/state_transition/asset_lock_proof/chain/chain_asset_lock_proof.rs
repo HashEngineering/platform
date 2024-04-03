@@ -44,7 +44,7 @@ impl ChainAssetLockProof {
 
     /// Create identifier
     pub fn create_identifier(&self) -> Identifier {
-        let outpoint_bytes: [u8; 36] = self.out_point.into();
+        let outpoint_bytes: [u8; 36] = self.out_point.try_into().unwrap();
 
         let hash = hash_double(outpoint_bytes.as_slice());
 
