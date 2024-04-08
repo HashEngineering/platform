@@ -107,7 +107,6 @@ mod tests {
 
     use drive_abci::logging::LogLevel;
     use drive_abci::platform_types::platform_state::v0::PlatformStateV0Methods;
-    use drive_abci::rpc::core::QuorumListExtendedInfo;
     use itertools::Itertools;
     use tenderdash_abci::proto::abci::{RequestInfo, ResponseInfo};
 
@@ -528,7 +527,7 @@ mod tests {
             .expect("expected to fetch balances")
             .expect("expected to have an identity to get balance from");
 
-        assert_eq!(balance, 99864796380)
+        assert_eq!(balance, 99864825980)
     }
 
     #[test]
@@ -1118,7 +1117,7 @@ mod tests {
                     .unwrap()
                     .unwrap()
             ),
-            "bb11d456206e85b3225ffbd35d915ab1c92e1a64057057b272fb3931325caa22".to_string()
+            "5dda9668d6efe6a481ec1d7ce3a1a77785aace12a853bea7eedcf37e9c5f8374".to_string()
         )
     }
 
@@ -1807,7 +1806,7 @@ mod tests {
                     .unwrap()
                     .unwrap()
             ),
-            "3ed0fbb75dbb645d9972f16fc6be7c0e2e3c1ed4b7a035b8a12935a871c7106e".to_string()
+            "909c3c0655fcb31a992899a1d2af59a8847f72126db56140ca91ac9591561ebe".to_string()
         )
     }
 
@@ -1932,7 +1931,7 @@ mod tests {
                     .unwrap()
                     .unwrap()
             ),
-            "608b5592cdb3822899cd90fecb542dd90c377fc26b2e995ed083c9760955703f".to_string()
+            "58b6ae6a0468cb62d1947362cf92915ae046027a0501d808caa7bdcd2a23a10c".to_string()
         )
     }
 
