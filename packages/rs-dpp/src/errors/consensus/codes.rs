@@ -90,6 +90,9 @@ impl ErrorWithCode for BasicError {
             Self::ContractError(DataContractError::InvalidURI(_)) => 10240,
             Self::ContractError(DataContractError::KeyWrongBounds(_)) => 10241,
             Self::ContractError(DataContractError::KeyValueMustExist(_)) => 10242,
+            Self::UnknownTransferableTypeError { .. } => 10243,
+            Self::UnknownTradeModeError { .. } => 10244,
+            Self::UnknownDocumentCreationRestrictionModeError { .. } => 10245,
 
             // Document Errors: 10400-10499
             Self::DataContractNotPresentError { .. } => 10400,
@@ -108,6 +111,7 @@ impl ErrorWithCode for BasicError {
             Self::DocumentTransitionsAreAbsentError { .. } => 10413,
             Self::NonceOutOfBoundsError(_) => 10414,
             Self::InvalidDocumentTypeNameError(_) => 10415,
+            Self::DocumentCreationNotAllowedError(_) => 10416,
 
             // Identity Errors: 10500-10599
             Self::DuplicatedIdentityPublicKeyBasicError(_) => 10500,
@@ -141,6 +145,7 @@ impl ErrorWithCode for BasicError {
             Self::IdentityCreditTransferToSelfError(_) => 10528,
             Self::MasterPublicKeyUpdateError(_) => 10529,
             Self::IdentityAssetLockTransactionOutPointNotEnoughBalanceError(_) => 10530,
+            Self::IdentityAssetLockStateTransitionReplayError(_) => 10531,
 
             // State Transition Errors: 10600-10699
             Self::InvalidStateTransitionTypeError { .. } => 10600,
@@ -194,6 +199,8 @@ impl ErrorWithCode for StateError {
             Self::DuplicateUniqueIndexError { .. } => 40105,
             Self::InvalidDocumentRevisionError { .. } => 40106,
             Self::DocumentTimestampsAreEqualError(_) => 40107,
+            Self::DocumentNotForSaleError(_) => 40108,
+            Self::DocumentIncorrectPurchasePriceError(_) => 40109,
 
             // Identity Errors: 40200-40299
             Self::IdentityAlreadyExistsError(_) => 40200,

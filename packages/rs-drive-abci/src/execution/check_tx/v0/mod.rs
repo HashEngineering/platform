@@ -179,7 +179,7 @@ where
 mod tests {
     use crate::config::PlatformConfig;
     use crate::platform_types::event_execution_result::EventExecutionResult::{
-        SuccessfulPaidExecution, UnsuccessfulPaidExecution,
+        SuccessfulPaidExecution, UnpaidConsensusExecutionError, UnsuccessfulPaidExecution,
     };
     use crate::platform_types::platform_state::v0::PlatformStateV0Methods;
     use crate::platform_types::system_identity_public_keys::v0::SystemIdentityPublicKeysV0;
@@ -434,7 +434,7 @@ mod tests {
             )
             .expect("expected to process state transition");
 
-        assert_eq!(processing_result.aggregated_fees().processing_fee, 2970480);
+        assert_eq!(processing_result.aggregated_fees().processing_fee, 2985330);
 
         let check_result = platform
             .check_tx(
@@ -549,6 +549,7 @@ mod tests {
             },
             keep_history_chance: 0.0,
             documents_mutable_chance: 0.0,
+            documents_can_be_deleted_chance: 0.0,
         };
 
         let mut rng = StdRng::seed_from_u64(6);
@@ -625,7 +626,7 @@ mod tests {
         // We have one invalid paid for state transition
         assert_eq!(processing_result.invalid_paid_count(), 1);
 
-        assert_eq!(processing_result.aggregated_fees().processing_fee, 909500);
+        assert_eq!(processing_result.aggregated_fees().processing_fee, 909520);
 
         let check_result = platform
             .check_tx(
@@ -767,7 +768,7 @@ mod tests {
         // since a fee multiplier of 100 means 100% more of 1 (gives 2)
         assert_eq!(
             processing_result.aggregated_fees().processing_fee,
-            2970480 * 2
+            2985330 * 2
         );
 
         let check_result = platform
@@ -1005,7 +1006,7 @@ mod tests {
             )
             .expect("expected to process state transition");
 
-        assert_eq!(processing_result.aggregated_fees().processing_fee, 2970480);
+        assert_eq!(processing_result.aggregated_fees().processing_fee, 2985330);
 
         platform
             .drive
@@ -1089,7 +1090,7 @@ mod tests {
 
         assert_eq!(
             update_processing_result.aggregated_fees().processing_fee,
-            7066460
+            7125710
         );
 
         let check_result = platform
@@ -1201,7 +1202,7 @@ mod tests {
             )
             .expect("expected to process state transition");
 
-        assert_eq!(processing_result.aggregated_fees().processing_fee, 2970480);
+        assert_eq!(processing_result.aggregated_fees().processing_fee, 2985330);
 
         platform
             .drive
@@ -1250,6 +1251,7 @@ mod tests {
             },
             keep_history_chance: 0.0,
             documents_mutable_chance: 0.0,
+            documents_can_be_deleted_chance: 0.0,
         };
 
         let mut rng = StdRng::seed_from_u64(6);
@@ -1320,7 +1322,7 @@ mod tests {
         // We have one invalid paid for state transition
         assert_eq!(processing_result.invalid_paid_count(), 1);
 
-        assert_eq!(processing_result.aggregated_fees().processing_fee, 1231110);
+        assert_eq!(processing_result.aggregated_fees().processing_fee, 1231130);
 
         let check_result = platform
             .check_tx(
@@ -1395,9 +1397,10 @@ mod tests {
             .random_public_and_private_key_data(&mut rng, platform_version)
             .unwrap();
 
-        let asset_lock_proof = instant_asset_lock_proof_fixture(Some(
-            PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap(),
-        ));
+        let asset_lock_proof = instant_asset_lock_proof_fixture(
+            Some(PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap()),
+            None,
+        );
 
         let identifier = asset_lock_proof
             .create_identifier()
@@ -1418,6 +1421,7 @@ mod tests {
                 pk.as_slice(),
                 &signer,
                 &NativeBlsModule,
+                0,
                 platform_version,
             )
             .expect("expected an identity create transition");
@@ -1580,9 +1584,10 @@ mod tests {
             .random_public_and_private_key_data(&mut rng, platform_version)
             .unwrap();
 
-        let asset_lock_proof = instant_asset_lock_proof_fixture(Some(
-            PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap(),
-        ));
+        let asset_lock_proof = instant_asset_lock_proof_fixture(
+            Some(PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap()),
+            None,
+        );
 
         let identifier = asset_lock_proof
             .create_identifier()
@@ -1603,6 +1608,7 @@ mod tests {
                 pk.as_slice(),
                 &signer,
                 &NativeBlsModule,
+                0,
                 platform_version,
             )
             .expect("expected an identity create transition");
@@ -1634,9 +1640,10 @@ mod tests {
             .random_public_and_private_key_data(&mut rng, platform_version)
             .unwrap();
 
-        let asset_lock_proof_top_up = instant_asset_lock_proof_fixture(Some(
-            PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap(),
-        ));
+        let asset_lock_proof_top_up = instant_asset_lock_proof_fixture(
+            Some(PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap()),
+            None,
+        );
 
         let identity_top_up_transition: StateTransition =
             IdentityTopUpTransition::try_from_identity(
@@ -1716,9 +1723,10 @@ mod tests {
             .random_public_and_private_key_data(&mut rng, platform_version)
             .unwrap();
 
-        let asset_lock_proof = instant_asset_lock_proof_fixture(Some(
-            PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap(),
-        ));
+        let asset_lock_proof = instant_asset_lock_proof_fixture(
+            Some(PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap()),
+            None,
+        );
 
         let identifier = asset_lock_proof
             .create_identifier()
@@ -1739,6 +1747,7 @@ mod tests {
                 pk.as_slice(),
                 &signer,
                 &NativeBlsModule,
+                0,
                 platform_version,
             )
             .expect("expected an identity create transition");
@@ -1770,9 +1779,10 @@ mod tests {
             .random_public_and_private_key_data(&mut rng, platform_version)
             .unwrap();
 
-        let asset_lock_proof_top_up = instant_asset_lock_proof_fixture(Some(
-            PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap(),
-        ));
+        let asset_lock_proof_top_up = instant_asset_lock_proof_fixture(
+            Some(PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap()),
+            None,
+        );
 
         let identity_top_up_transition: StateTransition =
             IdentityTopUpTransition::try_from_identity(
@@ -1878,9 +1888,10 @@ mod tests {
             .random_public_and_private_key_data(&mut rng, platform_version)
             .unwrap();
 
-        let asset_lock_proof = instant_asset_lock_proof_fixture(Some(
-            PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap(),
-        ));
+        let asset_lock_proof = instant_asset_lock_proof_fixture(
+            Some(PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap()),
+            None,
+        );
 
         let identifier = asset_lock_proof
             .create_identifier()
@@ -1903,9 +1914,10 @@ mod tests {
             .random_public_and_private_key_data(&mut rng, platform_version)
             .unwrap();
 
-        let asset_lock_proof_top_up = instant_asset_lock_proof_fixture(Some(
-            PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap(),
-        ));
+        let asset_lock_proof_top_up = instant_asset_lock_proof_fixture(
+            Some(PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap()),
+            None,
+        );
 
         let identity_top_up_transition: StateTransition =
             IdentityTopUpTransition::try_from_identity(
@@ -1976,9 +1988,10 @@ mod tests {
             .random_public_and_private_key_data(&mut rng, platform_version)
             .unwrap();
 
-        let asset_lock_proof = instant_asset_lock_proof_fixture(Some(
-            PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap(),
-        ));
+        let asset_lock_proof = instant_asset_lock_proof_fixture(
+            Some(PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap()),
+            None,
+        );
 
         let identifier = asset_lock_proof
             .create_identifier()
@@ -1999,6 +2012,7 @@ mod tests {
                 pk.as_slice(),
                 &signer,
                 &NativeBlsModule,
+                0,
                 platform_version,
             )
             .expect("expected an identity create transition");
@@ -2030,9 +2044,10 @@ mod tests {
             .random_public_and_private_key_data(&mut rng, platform_version)
             .unwrap();
 
-        let asset_lock_proof_top_up = instant_asset_lock_proof_fixture(Some(
-            PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap(),
-        ));
+        let asset_lock_proof_top_up = instant_asset_lock_proof_fixture(
+            Some(PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap()),
+            None,
+        );
 
         let identity_top_up_transition: StateTransition =
             IdentityTopUpTransition::try_from_identity(
@@ -2112,6 +2127,7 @@ mod tests {
                 pk.as_slice(),
                 &signer,
                 &NativeBlsModule,
+                0,
                 platform_version,
             )
             .expect("expected an identity create transition");
@@ -2190,9 +2206,10 @@ mod tests {
             .random_public_and_private_key_data(&mut rng, platform_version)
             .unwrap();
 
-        let asset_lock_proof = instant_asset_lock_proof_fixture(Some(
-            PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap(),
-        ));
+        let asset_lock_proof = instant_asset_lock_proof_fixture(
+            Some(PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap()),
+            None,
+        );
 
         let identifier = asset_lock_proof
             .create_identifier()
@@ -2209,10 +2226,11 @@ mod tests {
         let mut identity_create_transition: StateTransition =
             IdentityCreateTransition::try_from_identity_with_signer(
                 &identity,
-                asset_lock_proof,
+                asset_lock_proof.clone(),
                 pk.as_slice(),
                 &signer,
                 &NativeBlsModule,
+                0,
                 platform_version,
             )
             .expect("expected an identity create transition");
@@ -2268,6 +2286,43 @@ mod tests {
         let validation_result = platform
             .execute_tx(valid_identity_create_serialized_transition, &transaction)
             .expect("expected to execute identity_create tx");
+
+        platform
+            .drive
+            .grove
+            .commit_transaction(transaction)
+            .unwrap()
+            .expect("expected to commit transaction");
+
+        // this is unpaid because it will look like a replay attack
+        assert!(matches!(
+            validation_result,
+            UnpaidConsensusExecutionError(..)
+        ));
+
+        let valid_identity_create_transition: StateTransition =
+            IdentityCreateTransition::try_from_identity_with_signer(
+                &identity,
+                asset_lock_proof,
+                pk.as_slice(),
+                &signer,
+                &NativeBlsModule,
+                1,
+                platform_version,
+            )
+            .expect("expected an identity create transition");
+
+        let valid_identity_create_serialized_transition = valid_identity_create_transition
+            .serialize_to_bytes()
+            .expect("serialized state transition");
+
+        let transaction = platform.drive.grove.start_transaction();
+
+        let validation_result = platform
+            .execute_tx(valid_identity_create_serialized_transition, &transaction)
+            .expect("expected to execute identity_create tx");
+
+        // the user fee increase changed, so this is now passing
         assert!(matches!(validation_result, SuccessfulPaidExecution(..)));
 
         platform
@@ -2281,9 +2336,10 @@ mod tests {
             .random_public_and_private_key_data(&mut rng, platform_version)
             .unwrap();
 
-        let asset_lock_proof_top_up = instant_asset_lock_proof_fixture(Some(
-            PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap(),
-        ));
+        let asset_lock_proof_top_up = instant_asset_lock_proof_fixture(
+            Some(PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap()),
+            None,
+        );
 
         let identity_top_up_transition: StateTransition =
             IdentityTopUpTransition::try_from_identity(
@@ -2363,6 +2419,7 @@ mod tests {
                 pk.as_slice(),
                 &signer,
                 &NativeBlsModule,
+                0,
                 platform_version,
             )
             .expect("expected an identity create transition");
