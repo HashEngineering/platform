@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::block::block_info::BlockInfo;
 use crate::data_contract::document_type::accessors::DocumentTypeV0Getters;
 use crate::data_contract::document_type::DocumentTypeRef;
-use crate::document::{Document, DocumentV0};
+use crate::document::{Document, v0::DocumentV0};
 use crate::{document, ProtocolError};
 use platform_version::version::PlatformVersion;
 use std::collections::BTreeMap;

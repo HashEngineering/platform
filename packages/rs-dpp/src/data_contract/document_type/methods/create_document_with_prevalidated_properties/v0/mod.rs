@@ -1,4 +1,4 @@
-use crate::document::{Document, DocumentV0};
+use crate::document::{Document, v0::DocumentV0};
 use crate::prelude::{BlockHeight, CoreBlockHeight};
 use crate::ProtocolError;
 use chrono::Utc;

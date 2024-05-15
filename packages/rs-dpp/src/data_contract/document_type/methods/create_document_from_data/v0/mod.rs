@@ -6,7 +6,7 @@ use crate::document::property_names::{
     TRANSFERRED_AT_BLOCK_HEIGHT, TRANSFERRED_AT_CORE_BLOCK_HEIGHT, UPDATED_AT,
     UPDATED_AT_BLOCK_HEIGHT, UPDATED_AT_CORE_BLOCK_HEIGHT,
 };
-use crate::document::{Document, DocumentV0, INITIAL_REVISION};
+use crate::document::{Document, v0::DocumentV0, INITIAL_REVISION};
 use crate::identity::TimestampMillis;
 use crate::prelude::{BlockHeight, CoreBlockHeight};
 use crate::version::PlatformVersion;

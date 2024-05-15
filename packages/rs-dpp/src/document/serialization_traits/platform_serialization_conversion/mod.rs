@@ -3,7 +3,7 @@ pub(in crate::document) mod serialize;
 mod v0;
 
 use crate::data_contract::document_type::DocumentTypeRef;
-use crate::document::{Document, DocumentV0};
+use crate::document::{Document, v0::DocumentV0};
 #[cfg(feature = "validation")]
 use crate::prelude::ConsensusValidationResult;
 use crate::ProtocolError;

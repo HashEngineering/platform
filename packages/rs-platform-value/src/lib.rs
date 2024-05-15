@@ -11,7 +11,7 @@ pub mod btreemap_extensions;
 pub mod converter;
 pub mod display;
 mod eq;
-mod error;
+pub mod error;
 mod index;
 mod inner_array_value;
 pub mod inner_value;
@@ -48,9 +48,9 @@ use bincode::{Decode, Encode};
 pub use patch::{patch, Patch};
 
 /// A representation of a dynamic value that can handled dynamically
-#[non_exhaustive]
+//#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, PartialOrd, Encode, Decode)]
-// #[ferment_macro::export]
+#[ferment_macro::export]
 pub enum Value {
     /// A u128 integer
     U128(u128),

@@ -1,10 +1,10 @@
-use crate::{Error, Value};
+use crate::{error::Error, Value};
 use indexmap::IndexMap;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-//#[ferment_macro::export]
+#[ferment_macro::export]
+//#[ferment_macro::export(ValueMapHelper)]
 pub type ValueMap = Vec<(Value, Value)>;
-
 pub trait ValueMapHelper {
     fn sort_by_keys(&mut self);
     fn sort_by_keys_and_inner_maps(&mut self);
@@ -24,6 +24,7 @@ pub trait ValueMapHelper {
     fn remove_optional_key_value(&mut self, search_key_value: &Value) -> Option<Value>;
 }
 
+//#[ferment_macro::export]
 impl ValueMapHelper for ValueMap {
     fn sort_by_keys(&mut self) {
         self.sort_by(|(key1, _), (key2, _)| key1.partial_cmp(key2).unwrap_or(Ordering::Less));

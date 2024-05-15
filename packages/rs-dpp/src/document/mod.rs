@@ -16,10 +16,10 @@ pub mod serialization_traits;
 #[cfg(feature = "factories")]
 pub mod specialized_document_factory;
 pub mod transfer;
-mod v0;
+pub mod v0;
 
 pub use accessors::*;
-pub use v0::*;
+//pub use v0::*;
 
 #[cfg(feature = "extended-document")]
 pub use extended_document::property_names as extended_document_property_names;
@@ -47,6 +47,7 @@ use serde::{Deserialize, Serialize};
 
 use std::fmt;
 use std::fmt::Formatter;
+use crate::document::v0::DocumentV0;
 
 #[derive(Clone, Debug, PartialEq, From)]
 #[cfg_attr(
@@ -54,6 +55,7 @@ use std::fmt::Formatter;
     derive(Serialize, Deserialize),
     serde(tag = "$version")
 )]
+#[ferment_macro::export]
 pub enum Document {
     #[cfg_attr(feature = "document-serde-conversion", serde(rename = "0"))]
     V0(DocumentV0),

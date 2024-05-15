@@ -1,4 +1,4 @@
-use crate::document::{DocumentV0, DocumentV0Getters, DocumentV0Setters};
+use crate::document::{v0::DocumentV0, DocumentV0Getters, DocumentV0Setters};
 use crate::identity::TimestampMillis;
 use crate::prelude::Revision;
 use platform_value::{Identifier, Value};

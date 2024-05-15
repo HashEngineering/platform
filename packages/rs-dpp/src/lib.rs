@@ -66,9 +66,12 @@ pub mod prelude {
     #[cfg(feature = "validation")]
     pub use crate::validation::ConsensusValidationResult;
 
+    #[ferment_macro::export]
     pub type BlockHeight = u64;
 
+    #[ferment_macro::export]
     pub type CoreBlockHeight = u32;
+    #[ferment_macro::export]
     pub type TimestampMillis = u64;
     #[ferment_macro::export]
     pub type Revision = u64;
