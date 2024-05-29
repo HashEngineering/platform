@@ -36,6 +36,7 @@ use grovedb::Error;
 /// Order clause struct
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[ferment_macro::export]
 pub struct OrderClause {
     /// Field
     pub field: String,

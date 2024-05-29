@@ -47,7 +47,7 @@ use dpp::data_contract::document_type::methods::DocumentTypeV0Methods;
 use dpp::data_contract::document_type::{DocumentPropertyType, DocumentType, DocumentTypeRef};
 use dpp::document::document_methods::DocumentMethodsV0;
 use dpp::document::Document;
-use dpp::platform_value::Value;
+use platform_value::Value;
 use dpp::version::PlatformVersion;
 
 /// Converts SQL values to CBOR.
@@ -77,6 +77,7 @@ fn sql_value_to_platform_value(sql_value: ast::Value) -> Option<Value> {
 /// Where operator arguments
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[ferment_macro::export]
 pub enum WhereOperator {
     /// Equal
     Equal,
@@ -231,6 +232,7 @@ impl From<WhereOperator> for Value {
 /// Where clause struct
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[ferment_macro::export]
 pub struct WhereClause {
     /// Field
     pub field: String,

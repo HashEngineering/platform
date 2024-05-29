@@ -30,6 +30,7 @@ thiserror = { version = "1.0.59" }
 tracing = { version = "0.1.37", default-features = false, features = [] }
 derive_more = { version = "0.99.17", optional = true}
 hex = { version = "0.4.3" }
+platform-value = { path = "../rs-platform-value" }
 
 # optional dependencies
 parking_lot = { version = "0.12.1", optional = true }
@@ -49,6 +50,12 @@ grovedb = { git = "https://github.com/dashpay/grovedb", rev = "d9292aa20bd8f3bda
 grovedb-costs = { git = "https://github.com/dashpay/grovedb", rev = "d9292aa20bd8f3bda7c5d25d62db06ac341b0677", optional = true }
 grovedb-path = { git = "https://github.com/dashpay/grovedb", rev = "d9292aa20bd8f3bda7c5d25d62db06ac341b0677" }
 grovedb-storage = { git = "https://github.com/dashpay/grovedb", rev = "d9292aa20bd8f3bda7c5d25d62db06ac341b0677", optional = true }
+
+ferment-interfaces = { path = "../../../ferment/ferment-interfaces" }
+ferment-macro = { path = "../../../ferment/ferment-macro" }
+
+[build-dependencies]
+ferment = { path = "../../../ferment/ferment" }
 
 [dev-dependencies]
 criterion = "0.3.5"
