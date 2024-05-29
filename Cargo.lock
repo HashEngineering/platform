@@ -1424,6 +1424,9 @@ dependencies = [
  "derive_more",
  "dpp",
  "enum-map",
+ "ferment",
+ "ferment-interfaces",
+ "ferment-macro",
  "grovedb",
  "grovedb-costs",
  "grovedb-path",
@@ -1436,6 +1439,7 @@ dependencies = [
  "moka",
  "nohash-hasher",
  "parking_lot",
+ "platform-value",
  "platform-version",
  "rand",
  "serde",
@@ -1752,6 +1756,9 @@ dependencies = [
 [[package]]
 name = "ferment-interfaces"
 version = "0.1.4"
+dependencies = [
+ "indexmap 2.2.6",
+]
 
 [[package]]
 name = "ferment-macro"
