@@ -67,6 +67,7 @@ impl<S: Signer> PutIdentity<S> for Identity {
         asset_lock_proof_private_key: &PrivateKey,
         signer: &S,
     ) -> Result<Identity, Error> {
+        tracing::trace!("preparing put identity to platform: {:?}", asset_lock_proof);
         let identity_id = asset_lock_proof.create_identifier()?;
         let (state_transition, request) = self.broadcast_request_for_new_identity(
             asset_lock_proof,
@@ -79,6 +80,7 @@ impl<S: Signer> PutIdentity<S> for Identity {
             .clone()
             .execute(sdk, RequestSettings::default())
             .await;
+        tracing::trace!("put identity to platform: {:?}", response_result);
 
         match response_result {
             Ok(_) => {}
@@ -96,6 +98,7 @@ impl<S: Signer> PutIdentity<S> for Identity {
         let request = state_transition.wait_for_state_transition_result_request()?;
 
         let response = request.execute(sdk, RequestSettings::default()).await?;
+        tracing::trace!("wait for state transition response: {:?}", response);
 
         let block_info = block_info_from_metadata(response.metadata()?)?;
         let proof = response.proof_owned()?;
