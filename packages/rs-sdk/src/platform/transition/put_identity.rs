@@ -11,6 +11,7 @@ use dpp::prelude::{AssetLockProof, Identity};
 
 use crate::platform::block_info_from_metadata::block_info_from_metadata;
 use dpp::state_transition::proof_result::StateTransitionProofResult;
+use dpp::state_transition::StateTransition;
 use drive::drive::Drive;
 use rs_dapi_client::{DapiClientError, DapiRequest, RequestSettings};
 
@@ -24,7 +25,13 @@ pub trait PutIdentity<S: Signer> {
         asset_lock_proof: AssetLockProof,
         asset_lock_proof_private_key: &PrivateKey,
         signer: &S,
-    ) -> Result<(), Error>;
+    ) -> Result<StateTransition, Error>;
+    /// wait for the response
+    async fn wait_for_response(
+        &self,
+        sdk: &Sdk,
+        state_transition: &StateTransition,
+    ) -> Result<Identity, Error>;
     /// Puts an identity on platform and waits for the confirmation proof
     async fn put_to_platform_and_wait_for_response(
         &self,
@@ -43,22 +50,66 @@ impl<S: Signer> PutIdentity<S> for Identity {
         asset_lock_proof: AssetLockProof,
         asset_lock_proof_private_key: &PrivateKey,
         signer: &S,
-    ) -> Result<(), Error> {
-        let (_, request) = self.broadcast_request_for_new_identity(
+    ) -> Result<StateTransition, Error> {
+        let identity_id = asset_lock_proof.create_identifier()?;
+        let (transition, request) = self.broadcast_request_for_new_identity(
             asset_lock_proof,
             asset_lock_proof_private_key,
             signer,
             sdk.version(),
         )?;
 
-        request
+        let response_result = request
             .clone()
             .execute(sdk, RequestSettings::default())
-            .await?;
+            .await;
 
         // response is empty for a broadcast, result comes from the stream wait for state transition result
+        match response_result {
+            Ok(_) => {}
+            //todo make this more reliable
+            Err(DapiClientError::Transport(te, _)) if te.code() == Code::AlreadyExists => {
+                tracing::debug!(
+                    ?identity_id,
+                    "attempt to create identity that already exists"
+                );
+                return Err(Error::DapiClientError(
+                    "identity was proved to not exist but was said to exist".to_string(),
+                ));
+            }
+            Err(e) => return Err(e.into()),
+        }
 
-        Ok(())
+        Ok(transition)
+    }
+
+    async fn wait_for_response(
+        &self,
+        sdk: &Sdk,
+        state_transition: &StateTransition,
+    ) -> Result<Identity, Error> {
+
+        let request = state_transition.wait_for_state_transition_result_request()?;
+
+        let response = request.execute(sdk, RequestSettings::default()).await?;
+        tracing::trace!("wait for state transition response: {:?}", response);
+
+        let block_info = block_info_from_metadata(response.metadata()?)?;
+        let proof = response.proof_owned()?;
+
+        let (_, result) = Drive::verify_state_transition_was_executed_with_proof(
+            &state_transition,
+            &block_info,
+            proof.grovedb_proof.as_slice(),
+            &|_| Ok(None),
+            sdk.version(),
+        )?;
+
+        // todo verify
+        match result {
+            StateTransitionProofResult::VerifiedIdentity(identity) => Ok(identity),
+            _ => Err(Error::DapiClientError("proved a non identity".to_string())),
+        }
     }
 
     async fn put_to_platform_and_wait_for_response(
