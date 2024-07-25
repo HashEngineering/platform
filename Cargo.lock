@@ -765,7 +765,7 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "check-features"
-version = "0.1.0-beta.4"
+version = "0.1.0-rc.1"
 dependencies = [
  "toml",
 ]
@@ -1131,7 +1131,7 @@ dependencies = [
 
 [[package]]
 name = "dapi-grpc"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "dapi-grpc-macros",
  "futures-core",
@@ -1147,7 +1147,7 @@ dependencies = [
 
 [[package]]
 name = "dapi-grpc-macros"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "dapi-grpc",
  "heck 0.5.0",
@@ -1192,7 +1192,7 @@ dependencies = [
 
 [[package]]
 name = "dash-sdk"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1276,7 +1276,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_repr",
- "serde_with 2.3.3",
+ "serde_with",
 ]
 
 [[package]]
@@ -1292,7 +1292,7 @@ dependencies = [
 
 [[package]]
 name = "dashpay-contract"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "platform-value",
  "platform-version",
@@ -1302,7 +1302,7 @@ dependencies = [
 
 [[package]]
 name = "data-contracts"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "dashpay-contract",
  "dpns-contract",
@@ -1396,7 +1396,7 @@ checksum = "1435fa1053d8b2fbbe9be7e97eca7f33d37b28409959813daefc1446a14247f1"
 
 [[package]]
 name = "dpns-contract"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "platform-value",
  "platform-version",
@@ -1406,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "dpp"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "anyhow",
  "assert_matches",
@@ -1458,7 +1458,7 @@ dependencies = [
 
 [[package]]
 name = "drive"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -1497,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "drive-abci"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "arc-swap",
  "assert_matches",
@@ -1537,7 +1537,6 @@ dependencies = [
  "rust_decimal_macros",
  "serde",
  "serde_json",
- "serde_with 3.9.0",
  "simple-signer",
  "strategy-tests",
  "tempfile",
@@ -1553,7 +1552,7 @@ dependencies = [
 
 [[package]]
 name = "drive-proof-verifier"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "bincode",
  "dapi-grpc",
@@ -1767,7 +1766,7 @@ checksum = "9fc0510504f03c51ada170672ac806f1f105a88aa97a5281117e1ddc3368e51a"
 
 [[package]]
 name = "feature-flags-contract"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "platform-value",
  "platform-version",
@@ -2683,7 +2682,7 @@ dependencies = [
 
 [[package]]
 name = "json-schema-compatibility-validator"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "assert_matches",
  "json-patch",
@@ -2850,7 +2849,7 @@ dependencies = [
 
 [[package]]
 name = "masternode-reward-shares-contract"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "platform-value",
  "platform-version",
@@ -3408,7 +3407,7 @@ checksum = "d231b230927b5e4ad203db57bbcbee2802f6bce620b1e4a9024a07d94e2907ec"
 
 [[package]]
 name = "platform-serialization"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "bincode",
  "platform-version",
@@ -3416,7 +3415,7 @@ dependencies = [
 
 [[package]]
 name = "platform-serialization-derive"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3426,7 +3425,7 @@ dependencies = [
 
 [[package]]
 name = "platform-value"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "base64 0.22.1",
  "bincode",
@@ -3447,7 +3446,7 @@ dependencies = [
 
 [[package]]
 name = "platform-value-convertible"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "quote",
  "syn 2.0.71",
@@ -3455,7 +3454,7 @@ dependencies = [
 
 [[package]]
 name = "platform-version"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "bincode",
  "grovedb-version",
@@ -3466,7 +3465,7 @@ dependencies = [
 
 [[package]]
 name = "platform-versioning"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4076,7 +4075,7 @@ dependencies = [
 
 [[package]]
 name = "rs-dapi-client"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "backon",
  "chrono",
@@ -4477,23 +4476,7 @@ dependencies = [
  "indexmap 1.9.3",
  "serde",
  "serde_json",
- "serde_with_macros 2.3.3",
- "time",
-]
-
-[[package]]
-name = "serde_with"
-version = "3.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69cecfa94848272156ea67b2b1a53f20fc7bc638c4a46d2f8abde08f05f4b857"
-dependencies = [
- "base64 0.22.1",
- "chrono",
- "hex",
- "serde",
- "serde_derive",
- "serde_json",
- "serde_with_macros 3.9.0",
+ "serde_with_macros",
  "time",
 ]
 
@@ -4502,18 +4485,6 @@ name = "serde_with_macros"
 version = "2.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "881b6f881b17d13214e5d494c939ebab463d01264ce1811e9d4ac3a882e7695f"
-dependencies = [
- "darling",
- "proc-macro2",
- "quote",
- "syn 2.0.71",
-]
-
-[[package]]
-name = "serde_with_macros"
-version = "3.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8fee4991ef4f274617a51ad4af30519438dacb2f56ac773b08a1922ff743350"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -4584,7 +4555,7 @@ checksum = "f27f6278552951f1f2b8cf9da965d10969b2efdea95a6ec47987ab46edfe263a"
 
 [[package]]
 name = "simple-signer"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "base64 0.22.1",
  "bincode",
@@ -4675,7 +4646,7 @@ dependencies = [
 
 [[package]]
 name = "strategy-tests"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "bincode",
  "dpp",
@@ -5717,7 +5688,7 @@ checksum = "ed9d5b4305409d1fc9482fee2d7f9bcbf24b3972bf59817ef757e23982242a93"
 
 [[package]]
 name = "wasm-dpp"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5990,7 +5961,7 @@ dependencies = [
 
 [[package]]
 name = "withdrawals-contract"
-version = "1.0.0-beta.4"
+version = "1.0.0-rc.1"
 dependencies = [
  "num_enum",
  "platform-value",
