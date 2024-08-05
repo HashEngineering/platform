@@ -21,6 +21,7 @@ pub trait TopUpIdentity {
         asset_lock_proof: AssetLockProof,
         asset_lock_proof_private_key: &PrivateKey,
         user_fee_increase: Option<UserFeeIncrease>,
+        request_settings: RequestSettings
     ) -> Result<u64, Error>;
 }
 
@@ -32,6 +33,7 @@ impl TopUpIdentity for Identity {
         asset_lock_proof: AssetLockProof,
         asset_lock_proof_private_key: &PrivateKey,
         user_fee_increase: Option<UserFeeIncrease>,
+        request_settings: RequestSettings
     ) -> Result<u64, Error> {
         let state_transition = IdentityTopUpTransition::try_from_identity(
             self,
@@ -46,7 +48,7 @@ impl TopUpIdentity for Identity {
 
         request
             .clone()
-            .execute(sdk, RequestSettings::default())
+            .execute(sdk, request_settings)
             .await?;
 
         let request = state_transition.wait_for_state_transition_result_request()?;

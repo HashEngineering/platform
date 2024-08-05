@@ -27,6 +27,7 @@ pub trait PutIdentity<S: Signer> {
         asset_lock_proof: AssetLockProof,
         asset_lock_proof_private_key: &PrivateKey,
         signer: &S,
+        request_settings: RequestSettings
     ) -> Result<StateTransition, Error>;
     /// wait for the response
     async fn wait_for_response(
@@ -52,6 +53,7 @@ impl<S: Signer> PutIdentity<S> for Identity {
         asset_lock_proof: AssetLockProof,
         asset_lock_proof_private_key: &PrivateKey,
         signer: &S,
+        request_settings: RequestSettings
     ) -> Result<StateTransition, Error> {
         let identity_id = asset_lock_proof.create_identifier()?;
         let (transition, request) = self.broadcast_request_for_new_identity(
@@ -63,7 +65,7 @@ impl<S: Signer> PutIdentity<S> for Identity {
 
         let response_result = request
             .clone()
-            .execute(sdk, RequestSettings::default())
+            .execute(sdk, request_settings)
             .await;
 
         // response is empty for a broadcast, result comes from the stream wait for state transition result
