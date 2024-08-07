@@ -16,7 +16,7 @@ const { version } = JSON.parse(fs.readFileSync(path.join(PACKAGE_ROOT_DIR, 'pack
  */
 export default function getBaseConfigFactory(homeDir) {
   const prereleaseTag = semver.prerelease(version) === null ? '' : `-${semver.prerelease(version)[0]}`;
-  const dockerImageVersion = `${semver.major(version)}.${semver.minor(version)}${prereleaseTag}`;
+  const dockerImageVersion = `${semver.major(version)}${prereleaseTag}`;
 
   /**
    * @typedef {function} getBaseConfig
@@ -54,7 +54,7 @@ export default function getBaseConfigFactory(homeDir) {
           port: 3001,
         },
         docker: {
-          image: 'dashpay/dashd:20',
+          image: 'dashpay/dashd:21',
           commandArgs: [],
         },
         p2p: {
@@ -140,7 +140,7 @@ export default function getBaseConfigFactory(homeDir) {
           },
         },
         logIps: 0,
-        indexes: true,
+        indexes: [],
       },
       platform: {
         gateway: {
@@ -301,7 +301,7 @@ export default function getBaseConfigFactory(homeDir) {
           tenderdash: {
             mode: 'full',
             docker: {
-              image: 'dashpay/tenderdash:1.1.0-dev.3',
+              image: 'dashpay/tenderdash:1.1.0',
             },
             p2p: {
               host: '0.0.0.0',
@@ -332,10 +332,10 @@ export default function getBaseConfigFactory(homeDir) {
               cacheSize: 15000,
               size: 5000,
               maxTxsBytes: 1073741824,
-              timeoutCheckTx: '0',
-              txEnqueueTimeout: '0',
-              txSendRateLimit: 0,
-              txRecvRateLimit: 0,
+              timeoutCheckTx: '1s',
+              txEnqueueTimeout: '10ms',
+              txSendRateLimit: 10,
+              txRecvRateLimit: 12,
               maxConcurrentCheckTx: 250,
             },
             consensus: {
@@ -388,8 +388,8 @@ export default function getBaseConfigFactory(homeDir) {
                   app_version: '1',
                 },
                 timeout: {
-                  propose: '30000000000',
-                  propose_delta: '1000000000',
+                  propose: '40000000000',
+                  propose_delta: '5000000000',
                   vote: '2000000000',
                   vote_delta: '500000000',
                   commit: '1000000000',
@@ -397,7 +397,7 @@ export default function getBaseConfigFactory(homeDir) {
                 },
                 synchrony: {
                   message_delay: '32000000000',
-                  precision: '500000000',
+                  precision: '1000000000',
                 },
                 abci: {
                   recheck_tx: true,
