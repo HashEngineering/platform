@@ -11,6 +11,8 @@ use pollster::FutureExt;
 use std::hash::Hash;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use futures::TryFutureExt;
+use tokio::runtime::{Builder, Handle, Runtime};
 
 /// Context provider that uses the Core gRPC API to fetch data from Platform.
 ///
@@ -197,7 +199,17 @@ impl ContextProvider for GrpcContextProvider {
 
         let sdk_cloned = sdk.clone();
 
-        let data_contract: Option<DataContract> = DataContract::fetch(&sdk_cloned, contract_id)
+        #[cfg(feature = "tokio/rt-multi-thread")]
+        let handle = Handle::current();
+        #[cfg(feature = "tokio/rt-multi-thread")]
+        let data_contract = tokio::task::block_in_place(|| {
+            handle.block_on(async {
+                DataContract::fetch(&sdk_cloned, contract_id).await
+            }).map_err(|e| ContextProviderError::DataContractFailure(e.to_string()))
+        })?;
+
+        #[cfg(not(feature = "tokio/rt-multi-thread"))]
+            let data_contract: Option<DataContract> = DataContract::fetch(&sdk_cloned, contract_id)
             .block_on()
             .map_err(|e| ContextProviderError::DataContractFailure(e.to_string()))?;
 
