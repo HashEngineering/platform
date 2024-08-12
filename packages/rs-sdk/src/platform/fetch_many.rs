@@ -138,11 +138,59 @@ where
         sdk: &Sdk,
         query: Q,
     ) -> Result<O, Error> {
+        Self::fetch_many_with_settings(sdk, query, RequestSettings::default()).await
+    }
+
+    /// Fetch (or search) multiple objects on the Dash Platform
+    ///
+    /// [`FetchMany::fetch_many_with_settings()`] is an asynchronous method that fetches multiple objects from the Dash Platform.
+    ///
+    /// Note that this method might introduce some predefined limit on the number of objects returned.
+    /// If you need to specify the limit yourself, use [FetchMany::fetch_many_with_limit()] or [LimitQuery] instead.
+    ///
+    /// ## Per-object type documentation
+    ///
+    /// See documentation of [FetchMany trait implementations](FetchMany#foreign-impls) for each object type
+    /// for more details, including list of supported [queries](Query).
+    ///
+    /// ## Generic Parameters
+    ///
+    /// - `Q`: The type of [Query] used to generate a request
+    ///
+    /// ## Parameters
+    ///
+    /// - `sdk`: An instance of [Sdk].
+    /// - `query`: A query parameter implementing [`Query`](crate::platform::query::Query) to specify the data to be retrieved.
+    /// - `settings`: Request settings for the connection to Platform.
+    ///
+    /// ## Returns
+    ///
+    /// Returns a `Result` containing either:
+    ///
+    /// * list of objects matching the [Query] indexed by a key type `K`, where an item can be None of
+    /// the object was not found for provided key
+    /// *  [`Error`](crate::error::Error).
+    ///
+    /// Note that behavior when no items are found can be either empty collection or collection containing None values.
+    ///
+    /// ## Usage
+    ///
+    /// See `tests/fetch/document.rs` for a full example.
+    ///
+    /// ## Error Handling
+    ///
+    /// Any errors encountered during the execution are returned as [`Error`](crate::error::Error) instances.
+
+    async fn fetch_many_with_settings<Q: Query<<Self as FetchMany<K, O>>::Request>>(
+        sdk: &Sdk,
+        query: Q,
+        settings: RequestSettings
+    ) -> Result<O, Error> {
         let request = query.query(sdk.prove())?;
 
         let response = request
             .clone()
-            .execute(sdk, RequestSettings::default())
+            .execute(sdk, settings)
             .await?;
 
         let object_type = std::any::type_name::<Self>().to_string();
