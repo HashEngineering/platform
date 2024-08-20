@@ -31,6 +31,7 @@ pub enum Contender {
     Debug, PartialEq, Eq, Clone, From, Encode, Decode, PlatformSerialize, PlatformDeserialize,
 )]
 #[platform_serialize(unversioned)]
+#[ferment_macro::export]
 pub enum ContenderWithSerializedDocument {
     /// V0
     V0(ContenderWithSerializedDocumentV0),

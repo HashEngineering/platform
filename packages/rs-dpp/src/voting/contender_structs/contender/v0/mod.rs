@@ -26,6 +26,7 @@ pub struct ContenderV0 {
 /// This struct holds the identity ID of the contender, the serialized document,
 /// and the vote tally.
 #[derive(Debug, PartialEq, Eq, Clone, Default, Encode, Decode)]
+#[ferment_macro::export]
 pub struct ContenderWithSerializedDocumentV0 {
     /// The identity ID of the contender.
     pub identity_id: Identifier,

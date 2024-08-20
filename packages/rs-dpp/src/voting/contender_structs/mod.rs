@@ -1,4 +1,4 @@
-mod contender;
+pub mod contender;
 
 use crate::data_contract::document_type::DocumentTypeRef;
 use crate::document::serialization_traits::DocumentPlatformConversionMethodsV0;

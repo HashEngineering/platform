@@ -7,7 +7,7 @@
 
 use dpp::data_contract::document_type::DocumentType;
 use dpp::fee::Credits;
-use dpp::platform_value::Value;
+use platform_value::Value;
 use dpp::prelude::{IdentityNonce, TimestampMillis};
 use dpp::version::PlatformVersion;
 pub use dpp::version::ProtocolVersionVoteCount;
@@ -21,9 +21,10 @@ use dpp::{
     dashcore::ProTxHash,
     document::Document,
     identity::KeyID,
-    prelude::{DataContract, Identifier, IdentityPublicKey, Revision},
-    util::deserializer::ProtocolVersion,
-};
+    prelude::{DataContract, IdentityPublicKey, Revision},
+    util::deserializer::ProtocolVersion};
+use dpp::platform_value;
+use platform_value::types::identifier::Identifier;
 use drive::grovedb::Element;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -72,6 +73,7 @@ pub type DataContracts = RetrievedObjects<Identifier, DataContract>;
     derive(Encode, Decode, PlatformSerialize, PlatformDeserialize,),
     platform_serialize(unversioned)
 )]
+#[ferment_macro::export]
 pub struct Contenders {
     /// Contenders indexed by their identity IDs.
     pub contenders: BTreeMap<Identifier, ContenderWithSerializedDocument>,
@@ -123,6 +125,7 @@ impl FromIterator<(Identifier, Option<ContenderWithSerializedDocument>)> for Con
     derive(Encode, Decode, PlatformSerialize, PlatformDeserialize,),
     platform_serialize(unversioned)
 )]
+#[ferment_macro::export]
 pub struct Voter(pub Identifier);
 
 /// Multiple voters.
@@ -132,6 +135,7 @@ pub struct Voter(pub Identifier);
     derive(Encode, Decode, PlatformSerialize, PlatformDeserialize,),
     platform_serialize(unversioned)
 )]
+#[ferment_macro::export]
 pub struct Voters(pub BTreeSet<Voter>);
 
 /// Create [Voters] from an iterator of tuples.
@@ -199,6 +203,7 @@ pub type IdentityBalanceAndRevision = (u64, Revision);
 
 /// Contested resource values.
 #[derive(Debug, derive_more::From, Clone, PartialEq)]
+#[ferment_macro::export]
 pub enum ContestedResource {
     /// Generic [Value]
     Value(Value),
@@ -253,6 +258,7 @@ impl PlatformVersionedDecode for ContestedResource {
 
 /// Contested resources
 #[derive(derive_more::From, Clone, Debug, Default)]
+#[ferment_macro::export]
 pub struct ContestedResources(pub Vec<ContestedResource>);
 
 #[cfg(feature = "mocks")]
@@ -302,7 +308,11 @@ impl FromIterator<ContestedResource> for ContestedResources {
 pub struct ContestedVote(ContestedDocumentResourceVotePoll, ResourceVoteChoice);
 
 /// Votes casted by some identity.
-pub type ResourceVotesByIdentity = RetrievedObjects<Identifier, ResourceVote>;
+
+// Previously was this, but changed to work with ferment
+// pub type ResourceVotesByIdentity = RetrievedObjects<Identifier, ResourceVote>;
+#[ferment_macro::export]
+pub type ResourceVotesByIdentity = BTreeMap<Identifier, Option<ResourceVote>>;
 
 /// Prefunded specialized balance.
 #[derive(Debug, derive_more::From, Copy, Clone)]
