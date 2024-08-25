@@ -1050,7 +1050,6 @@ impl<'a> WhereClause {
         Ok(query)
     }
 
-    /// Build where clauses from operations
     pub(crate) fn build_where_clauses_from_operations(
         binary_operation: &ast::Expr,
         document_type: &DocumentType,
@@ -1080,13 +1079,16 @@ impl<'a> WhereClause {
                     "$id" | "$ownerId" => Cow::Owned(DocumentPropertyType::Identifier),
                     "$createdAt" | "$updatedAt" => Cow::Owned(DocumentPropertyType::Date),
                     "$revision" => Cow::Owned(DocumentPropertyType::U64),
-                    property_name => {
-                        let Some(property) = document_type.properties().get(property_name) else {
-                            return Err(Error::Query(QuerySyntaxError::InvalidInClause(
-                                "Invalid query: in clause property not in document type"
-                                    .to_string(),
-                            )));
-                        };
+                    _ => {
+                        let property = document_type
+                            .flattened_properties()
+                            .get(&field_name)
+                            .ok_or_else(|| {
+                                Error::Query(QuerySyntaxError::InvalidSQL(format!(
+                                    "Invalid query: property named {} not in document type",
+                                    field_name
+                                )))
+                            })?;
                         Cow::Borrowed(&property.property_type)
                     }
                 };
@@ -1215,14 +1217,16 @@ impl<'a> WhereClause {
                         "$id" | "$ownerId" => Cow::Owned(DocumentPropertyType::Identifier),
                         "$createdAt" | "$updatedAt" => Cow::Owned(DocumentPropertyType::Date),
                         "$revision" => Cow::Owned(DocumentPropertyType::U64),
-                        property_name => {
-                            let Some(property) = document_type.properties().get(property_name)
-                            else {
-                                return Err(Error::Query(QuerySyntaxError::InvalidSQL(format!(
-                                    "Invalid query: property named {} not in document type",
-                                    field_name.as_str()
-                                ))));
-                            };
+                        _ => {
+                            let property = document_type
+                                .flattened_properties()
+                                .get(&field_name)
+                                .ok_or_else(|| {
+                                    Error::Query(QuerySyntaxError::InvalidSQL(format!(
+                                        "Invalid query: property named {} not in document type",
+                                        field_name
+                                    )))
+                                })?;
                             Cow::Borrowed(&property.property_type)
                         }
                     };
