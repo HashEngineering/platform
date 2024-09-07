@@ -1,36 +1,32 @@
-use crate::platform::transition::broadcast_request::BroadcastRequestForStateTransition;
 use std::sync::Arc;
-use dapi_grpc::platform::v0::WaitForStateTransitionResultResponse;
-
-use crate::{Error, Sdk};
-
-use crate::platform::block_info_from_metadata::block_info_from_metadata;
-use crate::platform::transition::put_settings::PutSettings;
-use dapi_grpc::platform::VersionedGrpcResponse;
+use dpp::data_contract::DataContract;
 use dpp::data_contract::document_type::accessors::DocumentTypeV0Getters;
 use dpp::data_contract::document_type::DocumentType;
-use dpp::data_contract::DataContract;
 use dpp::document::{Document, DocumentV0Getters};
-use dpp::identity::signer::Signer;
 use dpp::identity::IdentityPublicKey;
+use dpp::identity::signer::Signer;
 use dpp::ProtocolError;
-use dpp::state_transition::documents_batch_transition::methods::v0::DocumentsBatchTransitionMethodsV0;
 use dpp::state_transition::documents_batch_transition::DocumentsBatchTransition;
+use dpp::state_transition::documents_batch_transition::methods::v0::DocumentsBatchTransitionMethodsV0;
 use dpp::state_transition::proof_result::StateTransitionProofResult;
 use dpp::state_transition::StateTransition;
 use drive::drive::Drive;
 use rs_dapi_client::{DapiRequest, RequestSettings};
-
+use crate::platform::transition::put_settings::PutSettings;
+use crate::{Error, Sdk};
+use crate::platform::block_info_from_metadata::block_info_from_metadata;
+use crate::platform::transition::broadcast_request::BroadcastRequestForStateTransition;
+use crate::platform::transition::put_document::PutDocument;
+use dapi_grpc::platform::VersionedGrpcResponse;
 #[async_trait::async_trait]
-/// A trait for putting a document to platform
-pub trait PutDocument<S: Signer> {
-    /// Puts a document on platform
+/// A trait for replacing a document on platform
+pub trait ReplaceDocument<S: Signer> {
+    /// Replaces a document on platform
     /// setting settings to `None` sets default connection behavior
-    async fn put_to_platform(
+    async fn replace_on_platform(
         &self,
         sdk: &Sdk,
         document_type: DocumentType,
-        document_state_transition_entropy: [u8; 32],
         identity_public_key: IdentityPublicKey,
         signer: &S,
         settings: Option<PutSettings>,
@@ -45,12 +41,10 @@ pub trait PutDocument<S: Signer> {
         settings: Option<PutSettings>
     ) -> Result<Document, Error>;
 
-    /// Puts an identity on platform and waits for the confirmation proof
-    async fn put_to_platform_and_wait_for_response(
+    async fn replace_on_platform_and_wait_for_response(
         &self,
         sdk: &Sdk,
         document_type: DocumentType,
-        document_state_transition_entropy: [u8; 32],
         identity_public_key: IdentityPublicKey,
         data_contract: Arc<DataContract>,
         signer: &S,
@@ -58,34 +52,16 @@ pub trait PutDocument<S: Signer> {
     ) -> Result<Document, Error>;
 }
 
-use dapi_grpc::platform::v0::StateTransitionBroadcastError;
-use dapi_grpc::platform::v0::wait_for_state_transition_result_response::wait_for_state_transition_result_response_v0;
-use dapi_grpc::platform::v0::wait_for_state_transition_result_response::Version::V0;
-pub(crate) fn get_error(response: &WaitForStateTransitionResultResponse) -> Option<&StateTransitionBroadcastError> {
-    match &response.version {
-        Some(V0(responseV0)) => {
-            return match &responseV0.result {
-                Some(wait_for_state_transition_result_response_v0::Result::Error(error)) => Some(&error),
-                _ => None
-            }
-        }
-        _ => {}
-    }
-    None
-}
-
 #[async_trait::async_trait]
-impl<S: Signer> PutDocument<S> for Document {
-    async fn put_to_platform(
+impl<S: Signer> ReplaceDocument<S> for Document {
+    async fn replace_on_platform(
         &self,
         sdk: &Sdk,
         document_type: DocumentType,
-        document_state_transition_entropy: [u8; 32],
         identity_public_key: IdentityPublicKey,
         signer: &S,
         settings: Option<PutSettings>,
     ) -> Result<StateTransition, Error> {
-        tracing::trace!("PutDocument::put_to_platform");
         let new_identity_contract_nonce = sdk
             .get_identity_contract_nonce(
                 self.owner_id(),
@@ -94,13 +70,12 @@ impl<S: Signer> PutDocument<S> for Document {
                 settings,
             )
             .await?;
-        tracing::trace!("PutDocument::put_to_platform, nonce: {:?}", new_identity_contract_nonce);
+        tracing::trace!("ReplaceDocument::put_to_platform, nonce: {:?}", new_identity_contract_nonce);
         let settings = settings.unwrap_or_default();
 
-        let transition = DocumentsBatchTransition::new_document_creation_transition_from_document(
+        let transition = DocumentsBatchTransition::new_document_replacement_transition_from_document(
             self.clone(),
             document_type.as_ref(),
-            document_state_transition_entropy,
             &identity_public_key,
             new_identity_contract_nonce,
             settings.user_fee_increase.unwrap_or_default(),
@@ -111,9 +86,9 @@ impl<S: Signer> PutDocument<S> for Document {
             None,
         )?;
 
-        tracing::trace!("PutDocument::put_to_platform, transition: {:?}", transition);
+        tracing::trace!("ReplaceDocument::put_to_platform, transition: {:?}", transition);
         let request = transition.broadcast_request_for_state_transition()?;
-        tracing::trace!("PutDocument::put_to_platform, request: {:?}", request);
+        tracing::trace!("ReplaceDocument::put_to_platform, request: {:?}", request);
 
         let response = request
             .clone()
@@ -121,15 +96,15 @@ impl<S: Signer> PutDocument<S> for Document {
             .await;
 
         match response {
-            Ok(r) => tracing::trace!("PutDocument::put_to_platform, response: {:?}", r),
+            Ok(r) => tracing::trace!("ReplaceDocument::put_to_platform, response: {:?}", r),
             Err(e) => {
-                tracing::trace!("PutDocument::put_to_platform, response error: {:?}", e);
+                tracing::trace!("ReplaceDocument::put_to_platform, response error: {:?}", e);
                 return Err(Error::from(e));
             }
         }
 
         // response is empty for a broadcast, result comes from the stream wait for state transition result
-        tracing::trace!("PutDocument::put_to_platform, returning: {:?}", transition);
+        tracing::trace!("ReplaceDocument::put_to_platform, returning: {:?}", transition);
         Ok(transition)
     }
 
@@ -140,9 +115,9 @@ impl<S: Signer> PutDocument<S> for Document {
         data_contract: Arc<DataContract>,
         settings: Option<PutSettings>
     ) -> Result<Document, Error> {
-        tracing::trace!("PutDocument::wait_for_response: {:?}", state_transition);
+        tracing::trace!("ReplaceDocument::wait_for_response: {:?}", state_transition);
         let request = state_transition.wait_for_state_transition_result_request()?;
-        tracing::trace!("PutDocument::wait_for_response, request: {:?}", request);
+        tracing::trace!("ReplaceDocument::wait_for_response, request: {:?}", request);
 
         let request_settings = match settings {
             Some(put_settings) => put_settings.request_settings,
@@ -150,10 +125,10 @@ impl<S: Signer> PutDocument<S> for Document {
         };
 
         let response = request.execute(sdk, request_settings).await?;
-        tracing::trace!("PutDocument::wait_for_response, response: {:?}", response);
+        tracing::trace!("ReplaceDocument::wait_for_response, response: {:?}", response);
 
         // look at error here
-        match get_error(&response) {
+        match crate::platform::transition::put_document::get_error(&response) {
             Some(e) => {
                 return Err(Error::Protocol(ProtocolError::Generic(e.message.to_string())))
             },
@@ -172,7 +147,7 @@ impl<S: Signer> PutDocument<S> for Document {
             sdk.version(),
         )?;
 
-        tracing::trace!("PutDocument::wait_for_response, result: {:?}", result);
+        tracing::trace!("ReplaceDocument::wait_for_response, result: {:?}", result);
         //todo verify
 
         match result {
@@ -191,34 +166,32 @@ impl<S: Signer> PutDocument<S> for Document {
         }
     }
 
-    async fn put_to_platform_and_wait_for_response(
+    async fn replace_on_platform_and_wait_for_response(
         &self,
         sdk: &Sdk,
         document_type: DocumentType,
-        document_state_transition_entropy: [u8; 32],
         identity_public_key: IdentityPublicKey,
         data_contract: Arc<DataContract>,
         signer: &S,
         settings: Option<PutSettings>
     ) -> Result<Document, Error> {
-        tracing::trace!("preparing put document to platform: {:?}", self);
+        tracing::trace!("preparing replace document on platform: {:?}", self);
         let state_transition = self
-            .put_to_platform(
+            .replace_on_platform(
                 sdk,
                 document_type,
-                document_state_transition_entropy,
                 identity_public_key,
                 signer,
                 settings,
             )
             .await?;
-        tracing::trace!("put document to platform complete: {} {:?}", hex::encode(state_transition.transaction_id().unwrap()), state_transition);
+        tracing::trace!("replace document to platform complete: {} {:?}", hex::encode(state_transition.transaction_id().unwrap()), state_transition);
 
         // TODO: Why do we need full type annotation?
         let document =
-            <Self as PutDocument<S>>::wait_for_response(self, sdk, state_transition, data_contract, settings)
+            <Self as ReplaceDocument<S>>::wait_for_response(self, sdk, state_transition, data_contract, settings)
                 .await?;
-        tracing::trace!("waiting for document  complete: {:?}", document);
+        tracing::trace!("waiting for replace document  complete: {:?}", document);
         Ok(document)
     }
 }

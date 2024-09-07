@@ -14,6 +14,7 @@ mod txid;
 pub mod update_price_of_document;
 pub mod vote;
 pub mod withdraw_from_identity;
+pub mod replace_document;
 
 pub use context::*;
 
