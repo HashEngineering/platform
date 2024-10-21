@@ -12,7 +12,7 @@ mod fetch;
 pub mod fetch_current_no_parameters;
 mod fetch_many;
 mod identities_contract_keys_query;
-mod query;
+pub mod query;
 pub mod transition;
 pub mod types;
 
