@@ -363,6 +363,7 @@ impl From<&PrefundedSpecializedBalance> for Credits {
     derive(Encode, Decode, PlatformSerialize, PlatformDeserialize),
     platform_serialize(unversioned)
 )]
+#[ferment_macro::export]
 pub struct VotePollsGroupedByTimestamp(pub Vec<(TimestampMillis, Vec<VotePoll>)>);
 impl VotePollsGroupedByTimestamp {
     /// Sort the vote polls by timestamp.
