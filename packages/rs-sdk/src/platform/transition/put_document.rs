@@ -19,7 +19,7 @@ use dpp::state_transition::documents_batch_transition::DocumentsBatchTransition;
 use dpp::state_transition::proof_result::StateTransitionProofResult;
 use dpp::state_transition::StateTransition;
 use drive::drive::Drive;
-use rs_dapi_client::{DapiRequest, RequestSettings};
+use rs_dapi_client::{DapiRequest, IntoInner, RequestSettings};
 
 #[async_trait::async_trait]
 /// A trait for putting a document to platform
@@ -118,7 +118,8 @@ impl<S: Signer> PutDocument<S> for Document {
         let response = request
             .clone()
             .execute(sdk, settings.request_settings)
-            .await;
+            .await // TODO: We need better way to handle execution errors
+            .into_inner();
 
         match response {
             Ok(r) => tracing::trace!("PutDocument::put_to_platform, response: {:?}", r),
@@ -148,8 +149,11 @@ impl<S: Signer> PutDocument<S> for Document {
             Some(put_settings) => put_settings.request_settings,
             None => RequestSettings::default()
         };
-
-        let response = request.execute(sdk, request_settings).await?;
+        // TODO: Implement retry logic
+        let response = request
+            .execute(sdk, request_settings)
+            .await
+            .into_inner()?;
         tracing::trace!("PutDocument::wait_for_response, response: {:?}", response);
 
         // look at error here

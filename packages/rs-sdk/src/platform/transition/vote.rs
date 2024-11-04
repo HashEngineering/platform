@@ -18,7 +18,7 @@ use dpp::voting::votes::resource_vote::accessors::v0::ResourceVoteGettersV0;
 use dpp::voting::votes::Vote;
 use drive::drive::Drive;
 use drive_proof_verifier::{error::ContextProviderError, DataContractProvider};
-use rs_dapi_client::{DapiRequest, RequestSettings};
+use rs_dapi_client::{DapiRequest, IntoInner, RequestSettings};
 
 #[async_trait::async_trait]
 /// A trait for putting a vote on platform
@@ -79,7 +79,10 @@ impl<S: Signer> PutVote<S> for Vote {
         )?;
         let request = masternode_vote_transition.broadcast_request_for_state_transition()?;
 
-        request.execute(sdk, settings.request_settings).await?;
+        request
+            .execute(sdk, settings.request_settings)
+            .await // TODO: We need better way to handle execution errors
+            .into_inner()?;
 
         Ok(masternode_vote_transition)
     }
@@ -113,8 +116,11 @@ impl<S: Signer> PutVote<S> for Vote {
             None,
         )?;
         let request = masternode_vote_transition.broadcast_request_for_state_transition()?;
-
-        let response_result = request.execute(sdk, settings.request_settings).await;
+        // TODO: Implement retry logic
+        let response_result = request
+            .execute(sdk, settings.request_settings)
+            .await
+            .into_inner();
 
         match response_result {
             Ok(_) => {}
@@ -133,7 +139,10 @@ impl<S: Signer> PutVote<S> for Vote {
         }
 
         let request = masternode_vote_transition.wait_for_state_transition_result_request()?;
-        let response = request.execute(sdk, settings.request_settings).await?;
+        let response = request
+            .execute(sdk, settings.request_settings)
+            .await
+            .into_inner()?;
 
         let block_info = block_info_from_metadata(response.metadata()?)?;
         let proof = response.proof_owned()?;

@@ -1,13 +1,13 @@
 //! Example ContextProvider that uses the Core gRPC API to fetch data from Platform.
 
-use crate::core_client::CoreClient;
+use crate::core::LowLevelDashCoreClient;
 use crate::platform::Fetch;
+use crate::sync::block_on;
 use crate::{Error, Sdk};
 use arc_swap::ArcSwapAny;
 use dpp::prelude::{CoreBlockHeight, DataContract, Identifier};
 use drive_proof_verifier::error::ContextProviderError;
 use drive_proof_verifier::ContextProvider;
-use pollster::FutureExt;
 use std::hash::Hash;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -19,7 +19,7 @@ use tokio::runtime::{Builder, Handle, Runtime};
 /// Example [ContextProvider] used by the Sdk for testing purposes.
 pub struct GrpcContextProvider {
     /// Core client
-    core: CoreClient,
+    core: LowLevelDashCoreClient,
     /// [Sdk] to use when fetching data from Platform
     ///
     /// Note that if the `sdk` is `None`, the context provider will not be able to fetch data itself and will rely on
@@ -64,7 +64,8 @@ impl GrpcContextProvider {
         data_contracts_cache_size: NonZeroUsize,
         quorum_public_keys_cache_size: NonZeroUsize,
     ) -> Result<Self, Error> {
-        let core_client = CoreClient::new(core_ip, core_port, core_user, core_password)?;
+        let core_client =
+            LowLevelDashCoreClient::new(core_ip, core_port, core_user, core_password)?;
         Ok(Self {
             core: core_client,
             sdk: ArcSwapAny::new(Arc::new(sdk)),
@@ -199,19 +200,22 @@ impl ContextProvider for GrpcContextProvider {
 
         let sdk_cloned = sdk.clone();
 
-        #[cfg(feature = "tokio/rt-multi-thread")]
-        let handle = Handle::current();
-        #[cfg(feature = "tokio/rt-multi-thread")]
-        let data_contract = tokio::task::block_in_place(|| {
-            handle.block_on(async {
-                DataContract::fetch(&sdk_cloned, contract_id).await
-            }).map_err(|e| ContextProviderError::DataContractFailure(e.to_string()))
-        })?;
-
-        #[cfg(not(feature = "tokio/rt-multi-thread"))]
-            let data_contract: Option<DataContract> = DataContract::fetch(&sdk_cloned, contract_id)
-            .block_on()
-            .map_err(|e| ContextProviderError::DataContractFailure(e.to_string()))?;
+        let data_contract: Option<DataContract> =
+            block_on(async move { DataContract::fetch(&sdk_cloned, contract_id).await })?
+                .map_err(|e| ContextProviderError::DataContractFailure(e.to_string()))?;
+        // #[cfg(feature = "tokio/rt-multi-thread")]
+        // let handle = Handle::current();
+        // #[cfg(feature = "tokio/rt-multi-thread")]
+        // let data_contract = tokio::task::block_in_place(|| {
+        //     handle.block_on(async {
+        //         DataContract::fetch(&sdk_cloned, contract_id).await
+        //     }).map_err(|e| ContextProviderError::DataContractFailure(e.to_string()))
+        // })?;
+        //
+        // #[cfg(not(feature = "tokio/rt-multi-thread"))]
+        //     let data_contract: Option<DataContract> = DataContract::fetch(&sdk_cloned, contract_id)
+        //     .block_on()
+        //     .map_err(|e| ContextProviderError::DataContractFailure(e.to_string()))?;
 
         if let Some(ref dc) = data_contract {
             self.data_contracts_cache.put(*data_contract_id, dc.clone());

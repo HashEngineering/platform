@@ -15,7 +15,8 @@ use crate::platform::block_info_from_metadata::block_info_from_metadata;
 use dpp::state_transition::proof_result::StateTransitionProofResult;
 use dpp::state_transition::StateTransition;
 use drive::drive::Drive;
-use rs_dapi_client::{DapiClientError, DapiRequest, RequestSettings};
+use rs_dapi_client::transport::TransportError;
+use rs_dapi_client::{DapiClientError, DapiRequest, IntoInner, RequestSettings};
 
 #[async_trait::async_trait]
 /// A trait for putting an identity to platform
@@ -66,7 +67,8 @@ impl<S: Signer> PutIdentity<S> for Identity {
         let response_result = request
             .clone()
             .execute(sdk, request_settings)
-            .await;
+            .await // TODO: We need better way to handle execution errors
+            .into_inner();
 
         // response is empty for a broadcast, result comes from the stream wait for state transition result
         match response_result {
@@ -135,13 +137,16 @@ impl<S: Signer> PutIdentity<S> for Identity {
         let response_result = request
             .clone()
             .execute(sdk, RequestSettings::default())
-            .await;
+            .await
+            .into_inner();
         tracing::trace!("put identity to platform: {:?}", response_result);
 
         match response_result {
             Ok(_) => {}
             //todo make this more reliable
-            Err(DapiClientError::Transport(te, _)) if te.code() == Code::AlreadyExists => {
+            Err(DapiClientError::Transport(TransportError::Grpc(te)))
+                if te.code() == Code::AlreadyExists =>
+            {
                 tracing::debug!(
                     ?identity_id,
                     "attempt to create identity that already exists"
@@ -155,8 +160,12 @@ impl<S: Signer> PutIdentity<S> for Identity {
         }
 
         let request = state_transition.wait_for_state_transition_result_request()?;
+        // TODO: Implement retry logic
 
-        let response = request.execute(sdk, RequestSettings::default()).await?;
+        let response = request
+            .execute(sdk, RequestSettings::default())
+            .await
+            .into_inner()?;
         tracing::trace!("wait for state transition response: {:?}", response);
 
         let block_info = block_info_from_metadata(response.metadata()?)?;
