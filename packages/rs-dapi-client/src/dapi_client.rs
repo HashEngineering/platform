@@ -189,6 +189,10 @@ impl DapiRequestExecutor for DapiClient {
                 // `impl Future<Output = Result<...>`, not a `Result` itself.
                 let address = address_result?;
                 let pool = self.pool.clone();
+                tracing::info!(
+                    "calling ip {:?}",
+                    address.clone()
+                );
 
                 let mut transport_client = R::Client::with_uri_and_settings(
                     address.uri().clone(),
