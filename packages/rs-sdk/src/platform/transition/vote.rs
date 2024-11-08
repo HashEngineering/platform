@@ -183,8 +183,8 @@ impl<S: Signer> PutVote<S> for Vote {
         };
         let response = request.execute(sdk, request_settings).await?;
 
-        let block_info = block_info_from_metadata(response.metadata()?)?;
-        let proof = response.proof_owned()?;
+        let block_info = block_info_from_metadata(response.inner.metadata()?)?;
+        let proof = response.inner.proof_owned()?;
         let context_provider =
             sdk.context_provider()
                 .ok_or(Error::from(ContextProviderError::Config(

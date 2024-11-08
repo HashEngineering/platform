@@ -222,42 +222,41 @@ where
     ///
     /// Any errors encountered during the execution are returned as [`Error`](crate::error::Error) instances.
 
-    async fn fetch_many_with_settings<Q: Query<<Self as FetchMany<K, O>>::Request>>(
-        sdk: &Sdk,
-        query: Q,
-        settings: RequestSettings
-    ) -> Result<O, Error> {
-        let request = query.query(sdk.prove())?;
-
-        let response = request
-            .clone()
-            .execute(sdk, settings)
-            .await?;
-
-            let object_type = std::any::type_name::<Self>().to_string();
-            tracing::trace!(request = ?request, response = ?response, ?address, retries, object_type, "fetched object from platform");
-
-            sdk.parse_proof::<<Self as FetchMany<K, O>>::Request, O>(request.clone(), response)
-                .await
-                .map(|o| ExecutionResponse {
-                    inner: o,
-                    retries,
-                    address: address.clone(),
-                })
-                .map_err(|e| ExecutionError {
-                    inner: e,
-                    retries,
-                    address: Some(address),
-                })
-        };
-
-        let settings = sdk.dapi_client_settings;
-
-        retry(settings, closure)
-            .await
-            .into_inner()
-            .map(|o| o.unwrap_or_default())
-    }
+    // async fn fetch_many_with_settings<Q: Query<<Self as FetchMany<K, O>>::Request>>(
+    //     sdk: &Sdk,
+    //     query: Q,
+    //     settings: RequestSettings
+    // ) -> Result<O, Error> {
+    //     let request = query.query(sdk.prove())?;
+    //
+    //     let response = request
+    //         .clone()
+    //         .execute(sdk, settings)
+    //         .await?;
+    //
+    //         let object_type = std::any::type_name::<Self>().to_string();
+    //         tracing::trace!(request = ?request, response = ?response, ?address, retries, object_type, "fetched object from platform");
+    //
+    //         sdk.parse_proof::<<Self as FetchMany<K, O>>::Request, O>(request.clone(), response)
+    //             .await
+    //             .map(|o| ExecutionResponse {
+    //                 inner: o,
+    //                 retries,
+    //                 address: address.clone(),
+    //             })
+    //             .map_err(|e| ExecutionError {
+    //                 inner: e,
+    //                 retries,
+    //                 address: Some(address),
+    //             });
+    //
+    //     let settings = sdk.dapi_client_settings;
+    //
+    //     retry(settings, closure)
+    //         .await
+    //         .into_inner()
+    //         .map(|o| o.unwrap_or_default())
+    // }
 
     /// Fetch multiple objects from Platform by their identifiers.
     ///

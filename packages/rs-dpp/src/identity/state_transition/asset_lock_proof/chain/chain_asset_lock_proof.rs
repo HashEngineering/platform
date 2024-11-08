@@ -5,7 +5,7 @@ use std::convert::TryFrom;
 use crate::util::hash::hash_double;
 use crate::{identifier::Identifier, ProtocolError};
 pub use bincode::{Decode, Encode};
-use dashcore::OutPoint;
+use dashcore::blockdata::transaction::outpoint::OutPoint;
 
 /// Instant Asset Lock Proof is a part of Identity Create and Identity Topup
 /// transitions. It is a proof that specific output of dash is locked in credits

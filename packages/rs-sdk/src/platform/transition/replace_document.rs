@@ -128,16 +128,16 @@ impl<S: Signer> ReplaceDocument<S> for Document {
         tracing::trace!("ReplaceDocument::wait_for_response, response: {:?}", response);
 
         // look at error here
-        match crate::platform::transition::put_document::get_error(&response) {
+        match crate::platform::transition::put_document::get_error(&response.inner) {
             Some(e) => {
                 return Err(Error::Protocol(ProtocolError::Generic(e.message.to_string())))
             },
             None => {}
         }
 
-        let block_info = block_info_from_metadata(response.metadata()?)?;
+        let block_info = block_info_from_metadata(response.inner.metadata()?)?;
 
-        let proof = response.proof_owned()?;
+        let proof = response.inner.proof_owned()?;
 
         let (_, result) = Drive::verify_state_transition_was_executed_with_proof(
             &state_transition,

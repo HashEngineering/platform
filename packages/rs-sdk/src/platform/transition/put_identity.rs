@@ -74,7 +74,8 @@ impl<S: Signer> PutIdentity<S> for Identity {
         match response_result {
             Ok(_) => {}
             //todo make this more reliable
-            Err(DapiClientError::Transport(te, _)) if te.code() == Code::AlreadyExists => {
+            Err(DapiClientError::Transport(TransportError::Grpc(te)))
+            if te.code() == Code::AlreadyExists => {
                 tracing::debug!(
                     ?identity_id,
                     "attempt to create identity that already exists"
@@ -100,8 +101,8 @@ impl<S: Signer> PutIdentity<S> for Identity {
         let response = request.execute(sdk, RequestSettings::default()).await?;
         tracing::trace!("wait for state transition response: {:?}", response);
 
-        let block_info = block_info_from_metadata(response.metadata()?)?;
-        let proof = response.proof_owned()?;
+        let block_info = block_info_from_metadata(response.inner.metadata()?)?;
+        let proof = response.inner.proof_owned()?;
 
         let (_, result) = Drive::verify_state_transition_was_executed_with_proof(
             &state_transition,
