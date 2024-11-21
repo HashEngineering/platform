@@ -22,9 +22,17 @@ fn create_channel(
     uri: Uri,
     settings: Option<&AppliedRequestSettings>,
 ) -> Result<Channel, dapi_grpc::tonic::transport::Error> {
-    let mut builder = Channel::builder(uri).tls_config(
+    #[cfg(not(target_os = "android"))]
+        let mut builder = Channel::builder(uri).tls_config(
         ClientTlsConfig::new()
             .with_native_roots()
+            .with_webpki_roots()
+            .assume_http2(true),
+    )?;
+
+    #[cfg(target_os = "android")]
+        let mut builder = Channel::builder(uri).tls_config(
+        ClientTlsConfig::new()
             .with_webpki_roots()
             .assume_http2(true),
     )?;
