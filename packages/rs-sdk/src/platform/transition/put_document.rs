@@ -1,12 +1,6 @@
-use crate::platform::transition::broadcast_request::BroadcastRequestForStateTransition;
-use std::sync::Arc;
-use dapi_grpc::platform::v0::WaitForStateTransitionResultResponse;
-
-use crate::{Error, Sdk};
-
-use crate::platform::block_info_from_metadata::block_info_from_metadata;
+use super::broadcast::BroadcastStateTransition;
 use crate::platform::transition::put_settings::PutSettings;
-use dapi_grpc::platform::VersionedGrpcResponse;
+use crate::{Error, Sdk};
 use dpp::data_contract::document_type::accessors::DocumentTypeV0Getters;
 use dpp::data_contract::document_type::DocumentType;
 use dpp::data_contract::DataContract;
@@ -18,8 +12,7 @@ use dpp::state_transition::documents_batch_transition::methods::v0::DocumentsBat
 use dpp::state_transition::documents_batch_transition::DocumentsBatchTransition;
 use dpp::state_transition::proof_result::StateTransitionProofResult;
 use dpp::state_transition::StateTransition;
-use drive::drive::Drive;
-use rs_dapi_client::{DapiRequest, IntoInner, RequestSettings};
+use std::sync::Arc;
 
 #[async_trait::async_trait]
 /// A trait for putting a document to platform
@@ -61,6 +54,8 @@ pub trait PutDocument<S: Signer> {
 use dapi_grpc::platform::v0::StateTransitionBroadcastError;
 use dapi_grpc::platform::v0::wait_for_state_transition_result_response::wait_for_state_transition_result_response_v0;
 use dapi_grpc::platform::v0::wait_for_state_transition_result_response::Version::V0;
+use rs_dapi_client::RequestSettings;
+
 pub(crate) fn get_error(response: &WaitForStateTransitionResultResponse) -> Option<&StateTransitionBroadcastError> {
     match &response.version {
         Some(V0(responseV0)) => {
@@ -111,25 +106,8 @@ impl<S: Signer> PutDocument<S> for Document {
             None,
         )?;
 
-        tracing::trace!("PutDocument::put_to_platform, transition: {:?}", transition);
-        let request = transition.broadcast_request_for_state_transition()?;
-        tracing::trace!("PutDocument::put_to_platform, request: {:?}", request);
-
-        let response = request
-            .clone()
-            .execute(sdk, settings.request_settings)
-            .await // TODO: We need better way to handle execution errors
-            .into_inner();
-
-        match response {
-            Ok(r) => tracing::trace!("PutDocument::put_to_platform, response: {:?}", r),
-            Err(e) => {
-                tracing::trace!("PutDocument::put_to_platform, response error: {:?}", e);
-                return Err(Error::from(e));
-            }
-        }
-
         // response is empty for a broadcast, result comes from the stream wait for state transition result
+        transition.broadcast(sdk, Some(settings)).await?;
         tracing::trace!("PutDocument::put_to_platform, returning: {:?}", transition);
         Ok(transition)
     }
@@ -138,47 +116,13 @@ impl<S: Signer> PutDocument<S> for Document {
         &self,
         sdk: &Sdk,
         state_transition: StateTransition,
-        data_contract: Arc<DataContract>,
+        _data_contract: Arc<DataContract>,
         settings: Option<PutSettings>
     ) -> Result<Document, Error> {
         tracing::trace!("PutDocument::wait_for_response: {:?}", state_transition);
-        let request = state_transition.wait_for_state_transition_result_request()?;
-        tracing::trace!("PutDocument::wait_for_response, request: {:?}", request);
-
-        let request_settings = match settings {
-            Some(put_settings) => put_settings.request_settings,
-            None => RequestSettings::default()
-        };
-        // TODO: Implement retry logic
-        let response = request
-            .execute(sdk, request_settings)
-            .await
-            .into_inner()?;
-        tracing::trace!("PutDocument::wait_for_response, response: {:?}", response);
-
-        // look at error here
-        match get_error(&response) {
-            Some(e) => {
-                return Err(Error::Protocol(ProtocolError::Generic(e.message.to_string())))
-            },
-            None => {}
-        }
-
-        let block_info = block_info_from_metadata(response.metadata()?)?;
-
-        let proof = response.proof_owned()?;
-
-        let (_, result) = Drive::verify_state_transition_was_executed_with_proof(
-            &state_transition,
-            &block_info,
-            proof.grovedb_proof.as_slice(),
-            &|_| Ok(Some(data_contract.clone())),
-            sdk.version(),
-        )?;
-
+        let result = state_transition.wait_for_response(sdk, None).await?;
         tracing::trace!("PutDocument::wait_for_response, result: {:?}", result);
         //todo verify
-
         match result {
             StateTransitionProofResult::VerifiedDocuments(mut documents) => {
                 let document = documents
@@ -201,7 +145,7 @@ impl<S: Signer> PutDocument<S> for Document {
         document_type: DocumentType,
         document_state_transition_entropy: [u8; 32],
         identity_public_key: IdentityPublicKey,
-        data_contract: Arc<DataContract>,
+        _data_contract: Arc<DataContract>,
         signer: &S,
         settings: Option<PutSettings>
     ) -> Result<Document, Error> {
@@ -218,11 +162,20 @@ impl<S: Signer> PutDocument<S> for Document {
             .await?;
         tracing::trace!("put document to platform complete: {} {:?}", hex::encode(state_transition.transaction_id().unwrap()), state_transition);
 
-        // TODO: Why do we need full type annotation?
-        let document =
-            <Self as PutDocument<S>>::wait_for_response(self, sdk, state_transition, data_contract, settings)
-                .await?;
-        tracing::trace!("waiting for document  complete: {:?}", document);
-        Ok(document)
+        let result = state_transition.broadcast_and_wait(sdk, None).await?;
+        match result {
+            StateTransitionProofResult::VerifiedDocuments(mut documents) => {
+                let document = documents
+                    .remove(self.id_ref())
+                    .ok_or(Error::InvalidProvedResponse(
+                        "did not prove the sent document".to_string(),
+                    ))?
+                    .ok_or(Error::InvalidProvedResponse(
+                        "expected there to actually be a document".to_string(),
+                    ))?;
+                Ok(document)
+            }
+            _ => Err(Error::DapiClientError("proved a non document".to_string())),
+        }
     }
 }
