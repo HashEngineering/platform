@@ -51,7 +51,7 @@ pub trait PutDocument<S: Signer> {
     ) -> Result<Document, Error>;
 }
 
-use dapi_grpc::platform::v0::StateTransitionBroadcastError;
+use dapi_grpc::platform::v0::{StateTransitionBroadcastError, WaitForStateTransitionResultResponse};
 use dapi_grpc::platform::v0::wait_for_state_transition_result_response::wait_for_state_transition_result_response_v0;
 use dapi_grpc::platform::v0::wait_for_state_transition_result_response::Version::V0;
 use rs_dapi_client::RequestSettings;
