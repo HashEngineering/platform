@@ -120,7 +120,7 @@ impl<S: Signer> PutDocument<S> for Document {
         settings: Option<PutSettings>
     ) -> Result<Document, Error> {
         tracing::trace!("PutDocument::wait_for_response: {:?}", state_transition);
-        let result = state_transition.wait_for_response(sdk, None).await?;
+        let result = state_transition.wait_for_response(sdk, settings).await?;
         tracing::trace!("PutDocument::wait_for_response, result: {:?}", result);
         //todo verify
         match result {
