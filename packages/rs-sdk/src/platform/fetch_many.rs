@@ -252,7 +252,7 @@ where
             .dapi_client_settings
             .override_by(settings.unwrap_or_default());
 
-        retry(settings, fut).await.into_inner()
+        retry(sdk.address_list(), settings, fut).await.into_inner()
     }
 
     /// Fetch (or search) multiple objects on the Dash Platform
@@ -403,7 +403,7 @@ impl FetchMany<Identifier, Documents> for Document {
     ) -> Result<Documents, Error> {
         let document_query: &DocumentQuery = &query.query(sdk.prove())?;
 
-        retry(sdk.dapi_client_settings, |settings| async move {
+        retry(sdk.address_list(), sdk.dapi_client_settings, |settings| async move {
             let request = document_query.clone();
 
             let ExecutionResponse {

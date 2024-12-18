@@ -73,7 +73,7 @@ impl TransportClient for PlatformGrpcClient {
                 Some(settings),
                 || match create_channel(uri.clone(), Some(settings)) {
                     Ok(channel) => Ok(Self::new(channel).into()),
-                    Err(e) => Err(dapi_grpc::tonic::Status::failed_precondition(format!(
+                    Err(e) => Err(dapi_grpc::tonic::Status::invalid_argument(format!(
                         "Channel creation failed: {}",
                         e
                     ))),
@@ -89,7 +89,7 @@ impl TransportClient for CoreGrpcClient {
             .get_or_create(PoolPrefix::Core, &uri, None, || {
                 match create_channel(uri.clone(), None) {
                     Ok(channel) => Ok(Self::new(channel).into()),
-                    Err(e) => Err(dapi_grpc::tonic::Status::failed_precondition(format!(
+                    Err(e) => Err(dapi_grpc::tonic::Status::invalid_argument(format!(
                         "Channel creation failed: {}",
                         e
                     ))),
@@ -110,7 +110,7 @@ impl TransportClient for CoreGrpcClient {
                 Some(settings),
                 || match create_channel(uri.clone(), Some(settings)) {
                     Ok(channel) => Ok(Self::new(channel).into()),
-                    Err(e) => Err(dapi_grpc::tonic::Status::failed_precondition(format!(
+                    Err(e) => Err(dapi_grpc::tonic::Status::invalid_argument(format!(
                         "Channel creation failed: {}",
                         e
                     ))),
