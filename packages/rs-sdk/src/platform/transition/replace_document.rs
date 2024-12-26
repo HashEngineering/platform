@@ -18,9 +18,12 @@ use crate::platform::block_info_from_metadata::block_info_from_metadata;
 use crate::platform::transition::broadcast_request::BroadcastRequestForStateTransition;
 use crate::platform::transition::put_document::PutDocument;
 use dapi_grpc::platform::VersionedGrpcResponse;
+use crate::platform::transition::broadcast::BroadcastStateTransition;
+use crate::platform::transition::waitable::Waitable;
+
 #[async_trait::async_trait]
 /// A trait for replacing a document on platform
-pub trait ReplaceDocument<S: Signer> {
+pub trait ReplaceDocument<S: Signer>: Waitable {
     /// Replaces a document on platform
     /// setting settings to `None` sets default connection behavior
     async fn replace_on_platform(
@@ -32,14 +35,6 @@ pub trait ReplaceDocument<S: Signer> {
         settings: Option<PutSettings>,
     ) -> Result<StateTransition, Error>;
 
-    /// Waits for the response of a state transition after it has been broadcast
-    async fn wait_for_response(
-        &self,
-        sdk: &Sdk,
-        state_transition: StateTransition,
-        data_contract: Arc<DataContract>,
-        settings: Option<PutSettings>
-    ) -> Result<Document, Error>;
 
     async fn replace_on_platform_and_wait_for_response(
         &self,
@@ -86,84 +81,11 @@ impl<S: Signer> ReplaceDocument<S> for Document {
             None,
         )?;
 
-        tracing::trace!("ReplaceDocument::put_to_platform, transition: {:?}", transition);
-        let request = transition.broadcast_request_for_state_transition()?;
-        tracing::trace!("ReplaceDocument::put_to_platform, request: {:?}", request);
-
-        let response = request
-            .clone()
-            .execute(sdk, settings.request_settings)
-            .await;
-
-        match response {
-            Ok(r) => tracing::trace!("ReplaceDocument::put_to_platform, response: {:?}", r),
-            Err(e) => {
-                tracing::trace!("ReplaceDocument::put_to_platform, response error: {:?}", e);
-                return Err(Error::from(e));
-            }
-        }
-
         // response is empty for a broadcast, result comes from the stream wait for state transition result
+        transition.broadcast(sdk, Some(settings)).await?;
+
         tracing::trace!("ReplaceDocument::put_to_platform, returning: {:?}", transition);
         Ok(transition)
-    }
-
-    async fn wait_for_response(
-        &self,
-        sdk: &Sdk,
-        state_transition: StateTransition,
-        data_contract: Arc<DataContract>,
-        settings: Option<PutSettings>
-    ) -> Result<Document, Error> {
-        tracing::trace!("ReplaceDocument::wait_for_response: {:?}", state_transition);
-        let request = state_transition.wait_for_state_transition_result_request()?;
-        tracing::trace!("ReplaceDocument::wait_for_response, request: {:?}", request);
-
-        let request_settings = match settings {
-            Some(put_settings) => put_settings.request_settings,
-            None => RequestSettings::default()
-        };
-
-        let response = request.execute(sdk, request_settings).await?;
-        tracing::trace!("ReplaceDocument::wait_for_response, response: {:?}", response);
-
-        // look at error here
-        match crate::platform::transition::put_document::get_error(&response.inner) {
-            Some(e) => {
-                return Err(Error::Protocol(ProtocolError::Generic(e.message.to_string())))
-            },
-            None => {}
-        }
-
-        let block_info = block_info_from_metadata(response.inner.metadata()?)?;
-
-        let proof = response.inner.proof_owned()?;
-
-        let (_, result) = Drive::verify_state_transition_was_executed_with_proof(
-            &state_transition,
-            &block_info,
-            proof.grovedb_proof.as_slice(),
-            &|_| Ok(Some(data_contract.clone())),
-            sdk.version(),
-        )?;
-
-        tracing::trace!("ReplaceDocument::wait_for_response, result: {:?}", result);
-        //todo verify
-
-        match result {
-            StateTransitionProofResult::VerifiedDocuments(mut documents) => {
-                let document = documents
-                    .remove(self.id_ref())
-                    .ok_or(Error::InvalidProvedResponse(
-                        "did not prove the sent document".to_string(),
-                    ))?
-                    .ok_or(Error::InvalidProvedResponse(
-                        "expected there to actually be a document".to_string(),
-                    ))?;
-                Ok(document)
-            }
-            _ => Err(Error::DapiClientError("proved a non document".to_string())),
-        }
     }
 
     async fn replace_on_platform_and_wait_for_response(
@@ -187,11 +109,6 @@ impl<S: Signer> ReplaceDocument<S> for Document {
             .await?;
         tracing::trace!("replace document to platform complete: {} {:?}", hex::encode(state_transition.transaction_id().unwrap()), state_transition);
 
-        // TODO: Why do we need full type annotation?
-        let document =
-            <Self as ReplaceDocument<S>>::wait_for_response(self, sdk, state_transition, data_contract, settings)
-                .await?;
-        tracing::trace!("waiting for replace document  complete: {:?}", document);
-        Ok(document)
+        Self::wait_for_response(sdk, state_transition, settings).await
     }
 }
