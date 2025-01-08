@@ -23,8 +23,7 @@ lazy_static = "1.4.0"
 platform-serialization = { path = "../rs-platform-serialization" }
 platform-version = { path = "../rs-platform-version" }
 indexmap = "2.0.2"
-ferment-interfaces = { path = "../../../ferment/ferment-interfaces" }
-ferment-macro = { path = "../../../ferment/ferment-macro" }
+ferment-macro = { git = "https://github.com/dashpay/ferment", branch = "feat/opaque-default", package = "ferment-macro" }
 
 [build-dependencies]
 cbindgen = "0.26.0"

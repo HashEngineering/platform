@@ -45,4 +45,4 @@ serde_json = { version = "1.0.103", features = [
 hex = { version = "0.4.3" }
 indexmap = { version = "2.6.0" }
 derive_more = { version = "1.0", features = ["from"] }
-ferment-macro = { path = "../../../ferment/ferment-macro" }
+ferment-macro = { git = "https://github.com/dashpay/ferment", branch = "feat/opaque-default", package = "ferment-macro" }

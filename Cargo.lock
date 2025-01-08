@@ -1224,7 +1224,7 @@ dependencies = [
  "drive-proof-verifier",
  "envy",
  "ferment-interfaces",
- "ferment-macro",
+ "ferment-macro 0.1.4 (git+https://github.com/dashpay/ferment?branch=feat/opaque-default)",
  "futures",
  "hex",
  "http",
@@ -1480,8 +1480,7 @@ dependencies = [
  "derive_more 1.0.0",
  "dpp",
  "env_logger 0.11.5",
- "ferment-interfaces",
- "ferment-macro",
+ "ferment-macro 0.1.4 (git+https://github.com/dashpay/ferment?branch=feat/opaque-default)",
  "getrandom",
  "hex",
  "indexmap 2.6.0",
@@ -1531,8 +1530,7 @@ dependencies = [
  "dpp",
  "enum-map",
  "ferment",
- "ferment-interfaces",
- "ferment-macro",
+ "ferment-macro 0.1.4 (git+https://github.com/dashpay/ferment?branch=feat/opaque-default)",
  "grovedb",
  "grovedb-costs",
  "grovedb-epoch-based-storage-flags",
@@ -1622,7 +1620,7 @@ dependencies = [
  "derive_more 1.0.0",
  "dpp",
  "drive",
- "ferment-macro",
+ "ferment-macro 0.1.4 (git+https://github.com/dashpay/ferment?branch=feat/opaque-default)",
  "hex",
  "indexmap 2.6.0",
  "platform-serialization",
@@ -1853,7 +1851,7 @@ dependencies = [
  "ansi_term",
  "cargo_metadata",
  "env_logger 0.11.5",
- "ferment-macro",
+ "ferment-macro 0.1.4",
  "log",
  "proc-macro2",
  "quote",
@@ -1863,6 +1861,7 @@ dependencies = [
 [[package]]
 name = "ferment-interfaces"
 version = "0.1.4"
+source = "git+https://github.com/dashpay/ferment?branch=feat/opaque-default#a9cf93872a7bd1229c394ac2443c109fb0d70949"
 dependencies = [
  "indexmap 2.6.0",
 ]
@@ -1870,6 +1869,15 @@ dependencies = [
 [[package]]
 name = "ferment-macro"
 version = "0.1.4"
+dependencies = [
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
+name = "ferment-macro"
+version = "0.1.4"
+source = "git+https://github.com/dashpay/ferment?branch=feat/opaque-default#a9cf93872a7bd1229c394ac2443c109fb0d70949"
 dependencies = [
  "quote",
  "syn 1.0.109",
@@ -3636,8 +3644,7 @@ dependencies = [
  "cbindgen",
  "ciborium 0.2.0",
  "ferment",
- "ferment-interfaces",
- "ferment-macro",
+ "ferment-macro 0.1.4 (git+https://github.com/dashpay/ferment?branch=feat/opaque-default)",
  "hex",
  "indexmap 2.6.0",
  "lazy_static",
@@ -3664,8 +3671,7 @@ name = "platform-version"
 version = "1.7.0"
 dependencies = [
  "bincode",
- "ferment-interfaces",
- "ferment-macro",
+ "ferment-macro 0.1.4 (git+https://github.com/dashpay/ferment?branch=feat/opaque-default)",
  "grovedb-version",
  "once_cell",
  "thiserror 1.0.69",
@@ -4148,7 +4154,7 @@ dependencies = [
  "backon",
  "chrono",
  "dapi-grpc",
- "ferment-macro",
+ "ferment-macro 0.1.4 (git+https://github.com/dashpay/ferment?branch=feat/opaque-default)",
  "futures",
  "hex",
  "http-serde",
