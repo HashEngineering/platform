@@ -6,7 +6,7 @@ use dpp::ProtocolError;
 
 use dpp::data_contract::accessors::v0::DataContractV0Getters;
 use dpp::data_contract::DataContract;
-use dpp::document::DocumentV0;
+use dpp::document::v0::DocumentV0;
 use dpp::serialization::PlatformSerializableWithPlatformVersion;
 use dpp::system_data_contracts::dpns_contract::DPNS_DASH_TLD_DOCUMENT_ID;
 use dpp::version::PlatformVersion;

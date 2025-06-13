@@ -1,6 +1,6 @@
 pub mod transformer;
 
-use dpp::document::{Document, DocumentV0};
+use dpp::document::{Document, v0::DocumentV0};
 use dpp::identity::TimestampMillis;
 use dpp::platform_value::{Identifier, Value};
 use dpp::prelude::{BlockHeight, CoreBlockHeight, Revision};

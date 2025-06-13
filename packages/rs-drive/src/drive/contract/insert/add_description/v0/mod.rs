@@ -6,7 +6,7 @@ use crate::util::object_size_info::{DocumentAndContractInfo, OwnedDocumentInfo};
 use dpp::block::block_info::BlockInfo;
 use dpp::data_contract::accessors::v0::DataContractV0Getters;
 use dpp::data_contracts::keyword_search_contract;
-use dpp::document::{Document, DocumentV0};
+use dpp::document::{Document, v0::DocumentV0};
 use dpp::fee::fee_result::FeeResult;
 use dpp::identifier::Identifier;
 use grovedb::batch::KeyInfoPath;

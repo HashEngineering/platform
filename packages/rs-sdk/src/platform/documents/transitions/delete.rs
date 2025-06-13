@@ -178,7 +178,7 @@ impl DocumentDeleteTransitionBuilder {
             .map_err(|e| Error::Protocol(e.into()))?;
 
         // Create a minimal document for deletion
-        let document = Document::V0(dpp::document::DocumentV0 {
+        let document = Document::V0(dpp::document::v0::DocumentV0 {
             id: self.document_id,
             owner_id: self.owner_id,
             properties: Default::default(),

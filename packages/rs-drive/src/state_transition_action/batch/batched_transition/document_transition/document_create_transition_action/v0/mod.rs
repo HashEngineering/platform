@@ -1,7 +1,7 @@
 pub mod transformer;
 
 use dpp::block::block_info::BlockInfo;
-use dpp::document::{Document, DocumentV0};
+use dpp::document::{Document, v0::DocumentV0};
 use dpp::platform_value::{Identifier, Value};
 use std::collections::BTreeMap;
 use std::vec;

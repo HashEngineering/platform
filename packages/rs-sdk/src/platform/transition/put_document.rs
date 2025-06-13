@@ -12,10 +12,9 @@ use dpp::identity::IdentityPublicKey;
 use dpp::state_transition::batch_transition::methods::v0::DocumentsBatchTransitionMethodsV0;
 use dpp::state_transition::batch_transition::BatchTransition;
 use dpp::ProtocolError;
-use dpp::state_transition::documents_batch_transition::methods::v0::DocumentsBatchTransitionMethodsV0;
-use dpp::state_transition::documents_batch_transition::DocumentsBatchTransition;
 use dpp::state_transition::StateTransition;
 use dpp::tokens::token_payment_info::TokenPaymentInfo;
+//use crate::dashcore_rpc::Result;
 
 #[async_trait::async_trait]
 /// A trait for putting a document to platform

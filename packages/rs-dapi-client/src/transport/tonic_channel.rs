@@ -21,8 +21,14 @@ pub fn create_channel(
     let host = uri.host().expect("Failed to get host from URI").to_string();
 
     let mut builder = Channel::builder(uri);
+    #[cfg(not(target_os = "android"))]
     let mut tls_config = ClientTlsConfig::new()
         .with_native_roots()
+        .with_webpki_roots()
+        .assume_http2(true);
+
+    #[cfg(target_os = "android")]
+    let mut tls_config = ClientTlsConfig::new()
         .with_webpki_roots()
         .assume_http2(true);
 

@@ -6,8 +6,8 @@ use dpp::document::{Document, DocumentV0Getters};
 use dpp::identity::IdentityPublicKey;
 use dpp::identity::signer::Signer;
 use dpp::ProtocolError;
-use dpp::state_transition::documents_batch_transition::DocumentsBatchTransition;
-use dpp::state_transition::documents_batch_transition::methods::v0::DocumentsBatchTransitionMethodsV0;
+use dpp::state_transition::batch_transition::BatchTransition;
+use dpp::state_transition::batch_transition::methods::v0::DocumentsBatchTransitionMethodsV0;
 use dpp::state_transition::proof_result::StateTransitionProofResult;
 use dpp::state_transition::StateTransition;
 use drive::drive::Drive;
@@ -68,17 +68,16 @@ impl<S: Signer> ReplaceDocument<S> for Document {
         tracing::trace!("ReplaceDocument::put_to_platform, nonce: {:?}", new_identity_contract_nonce);
         let settings = settings.unwrap_or_default();
 
-        let transition = DocumentsBatchTransition::new_document_replacement_transition_from_document(
+        let transition = BatchTransition::new_document_replacement_transition_from_document(
             self.clone(),
             document_type.as_ref(),
             &identity_public_key,
             new_identity_contract_nonce,
             settings.user_fee_increase.unwrap_or_default(),
+            None,
             signer,
             sdk.version(),
-            None,
-            None,
-            None,
+            None
         )?;
 
         // response is empty for a broadcast, result comes from the stream wait for state transition result

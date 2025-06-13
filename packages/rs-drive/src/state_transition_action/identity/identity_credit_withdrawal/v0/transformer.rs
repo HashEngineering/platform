@@ -12,7 +12,7 @@ use dpp::consensus::state::state_error::StateError;
 use dpp::consensus::ConsensusError;
 use dpp::data_contracts::withdrawals_contract;
 use dpp::data_contracts::withdrawals_contract::v1::document_types::withdrawal;
-use dpp::document::{Document, DocumentV0};
+use dpp::document::{Document, v0::DocumentV0};
 use dpp::identity::core_script::CoreScript;
 use dpp::identity::hash::IdentityPublicKeyHashMethodsV0;
 use dpp::identity::identity_public_key::accessors::v0::IdentityPublicKeyGettersV0;

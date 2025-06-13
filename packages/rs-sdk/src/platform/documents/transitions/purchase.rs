@@ -89,7 +89,7 @@ impl DocumentPurchaseTransitionBuilder {
     ) -> Self {
         // Create a minimal document with just the required fields
         // The actual document will be fetched during the transition
-        let document = Document::V0(dpp::document::DocumentV0 {
+        let document = Document::V0(dpp::document::v0::DocumentV0 {
             id: document_id,
             owner_id: current_owner_id,
             properties: Default::default(),
