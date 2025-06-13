@@ -4,8 +4,7 @@ use std::convert::TryFrom;
 
 use crate::util::hash::hash_double;
 use crate::{identifier::Identifier, ProtocolError};
-pub use bincode::{Decode, Encode};
-use dashcore::blockdata::transaction::outpoint::OutPoint;
+use dashcore::OutPoint;
 
 /// Instant Asset Lock Proof is a part of Identity Create and Identity Topup
 /// transitions. It is a proof that specific output of dash is locked in credits
@@ -44,7 +43,7 @@ impl ChainAssetLockProof {
 
     /// Create identifier
     pub fn create_identifier(&self) -> Identifier {
-        let outpoint_bytes: [u8; 36] = self.out_point.try_into().unwrap();
+        let outpoint_bytes: [u8; 36] = self.out_point.into();
 
         let hash = hash_double(outpoint_bytes.as_slice());
 
