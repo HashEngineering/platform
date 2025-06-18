@@ -7,7 +7,7 @@ use crate::data_contract::created_data_contract::v0::CreatedDataContractV0;
 use crate::data_contract::created_data_contract::CreatedDataContract;
 use crate::data_contract::document_type::accessors::DocumentTypeV0Getters;
 use crate::data_contract::document_type::DocumentTypeRef;
-use crate::document::{Document, DocumentV0};
+use crate::document::{Document, v0::DocumentV0};
 use crate::prelude::{DataContract, IdentityNonce};
 #[cfg(feature = "data-contract-cbor-conversion")]
 use crate::util::cbor_serializer::serializable_value_to_cbor;
