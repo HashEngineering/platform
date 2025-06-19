@@ -57,7 +57,7 @@ lru = { version = "0.12.3" }
 serde = { version = "1.0.219", optional = true, features = ["derive"] }
 serde_json = { version = "1.0.140", optional = true }
 chrono = { version = "0.4.38", features = ["serde"] }
-ferment-macro = { git = "https://github.com/dashpay/ferment", branch = "feat/opaque-default", package = "ferment-macro" }
+ferment-macro = { git = "https://github.com/dashpay/ferment", tag = "v0.2.3", package = "ferment-macro" }
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["macros"] }

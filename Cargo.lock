@@ -96,15 +96,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 
 [[package]]
-name = "ansi_term"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d52a9bb7ec0cf484c551830a7ce27bd20d67eac647e1befb56b0be4ee39a55d2"
-dependencies = [
- "winapi",
-]
-
-[[package]]
 name = "anstream"
 version = "0.6.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -792,38 +783,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "camino"
-version = "1.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0da45bc31171d8d6960122e222a67740df867c1dd53b4d51caa297084c185cab"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "cargo-platform"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e35af189006b9c0f00a064685c727031e3ed2d8020f7ba284d78cc2671bd36ea"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "cargo_metadata"
-version = "0.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d886547e41f740c616ae73108f6eb70afe6d940c7bc697cb30f13daec073037"
-dependencies = [
- "camino",
- "cargo-platform",
- "semver",
- "serde",
- "serde_json",
- "thiserror 1.0.64",
-]
-
-[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1371,8 +1330,8 @@ dependencies = [
  "drive",
  "drive-proof-verifier",
  "envy",
- "ferment-interfaces",
- "ferment-macro 0.1.4 (git+https://github.com/dashpay/ferment?branch=feat%2Fopaque-default)",
+ "ferment",
+ "ferment-macro",
  "futures",
  "hex",
  "http",
@@ -1639,7 +1598,7 @@ dependencies = [
  "derive_more 1.0.0",
  "dpp",
  "env_logger",
- "ferment-macro 0.1.4 (git+https://github.com/dashpay/ferment?branch=feat%2Fopaque-default)",
+ "ferment-macro",
  "getrandom 0.2.15",
  "hex",
  "indexmap 2.7.0",
@@ -1688,8 +1647,7 @@ dependencies = [
  "derive_more 1.0.0",
  "dpp",
  "enum-map",
- "ferment",
- "ferment-macro 0.1.4 (git+https://github.com/dashpay/ferment?branch=feat%2Fopaque-default)",
+ "ferment-macro",
  "grovedb",
  "grovedb-costs",
  "grovedb-epoch-based-storage-flags",
@@ -1780,7 +1738,7 @@ dependencies = [
  "derive_more 1.0.0",
  "dpp",
  "drive",
- "ferment-macro 0.1.4 (git+https://github.com/dashpay/ferment?branch=feat%2Fopaque-default)",
+ "ferment-macro",
  "hex",
  "indexmap 2.7.0",
  "platform-serialization",
@@ -2006,38 +1964,17 @@ dependencies = [
 
 [[package]]
 name = "ferment"
-version = "0.1.4"
-dependencies = [
- "ansi_term",
- "cargo_metadata",
- "env_logger",
- "ferment-macro 0.1.4",
- "log",
- "proc-macro2",
- "quote",
- "syn 1.0.109",
-]
-
-[[package]]
-name = "ferment-interfaces"
-version = "0.1.4"
-source = "git+https://github.com/dashpay/ferment?branch=feat%2Fopaque-default#a9cf93872a7bd1229c394ac2443c109fb0d70949"
+version = "0.2.3"
+source = "git+https://github.com/dashpay/ferment?tag=v0.2.3#867aba9a03b86c8552d3526952af80f566ab0174"
 dependencies = [
  "indexmap 2.7.0",
+ "serde_json",
 ]
 
 [[package]]
 name = "ferment-macro"
-version = "0.1.4"
-dependencies = [
- "quote",
- "syn 1.0.109",
-]
-
-[[package]]
-name = "ferment-macro"
-version = "0.1.4"
-source = "git+https://github.com/dashpay/ferment?branch=feat%2Fopaque-default#a9cf93872a7bd1229c394ac2443c109fb0d70949"
+version = "0.2.3"
+source = "git+https://github.com/dashpay/ferment?tag=v0.2.3#867aba9a03b86c8552d3526952af80f566ab0174"
 dependencies = [
  "quote",
  "syn 1.0.109",
@@ -4033,8 +3970,7 @@ dependencies = [
  "bs58",
  "cbindgen",
  "ciborium",
- "ferment",
- "ferment-macro 0.1.4 (git+https://github.com/dashpay/ferment?branch=feat%2Fopaque-default)",
+ "ferment-macro",
  "hex",
  "indexmap 2.7.0",
  "platform-serialization",
@@ -4059,7 +3995,7 @@ name = "platform-version"
 version = "2.0.0-rc.16"
 dependencies = [
  "bincode",
- "ferment-macro 0.1.4 (git+https://github.com/dashpay/ferment?branch=feat%2Fopaque-default)",
+ "ferment-macro",
  "grovedb-version",
  "once_cell",
  "thiserror 2.0.12",
@@ -4565,7 +4501,7 @@ dependencies = [
  "backon",
  "chrono",
  "dapi-grpc",
- "ferment-macro 0.1.4 (git+https://github.com/dashpay/ferment?branch=feat%2Fopaque-default)",
+ "ferment-macro",
  "futures",
  "getrandom 0.2.15",
  "gloo-timers",
@@ -4826,9 +4762,6 @@ name = "semver"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61697e0a1c7e512e84a621326239844a24d8207b4669b41bc18b32ea5cbf988b"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "serde"

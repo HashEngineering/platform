@@ -59,10 +59,10 @@ grovedb-path = { git = "https://github.com/dashpay/grovedb", rev = "221ca6ec6b8d
 grovedb-storage = { git = "https://github.com/dashpay/grovedb", rev = "221ca6ec6b8d2b192d334192bd5a7b2cab5b0aa8", optional = true }
 grovedb-version = { git = "https://github.com/dashpay/grovedb", rev = "221ca6ec6b8d2b192d334192bd5a7b2cab5b0aa8" }
 grovedb-epoch-based-storage-flags = { git = "https://github.com/dashpay/grovedb", rev = "221ca6ec6b8d2b192d334192bd5a7b2cab5b0aa8" }
-ferment-macro = { git = "https://github.com/dashpay/ferment", branch = "feat/opaque-default", package = "ferment-macro" }
+ferment-macro = { git = "https://github.com/dashpay/ferment", tag = "v0.2.3", package = "ferment-macro" }
 
-[build-dependencies]
-ferment = { path = "../../../ferment/ferment" }
+#[build-dependencies]
+#ferment = { git = "https://github.com/dashpay/ferment", tag = "v0.2.3", package = "ferment" }
 
 [dev-dependencies]
 criterion = "0.5"

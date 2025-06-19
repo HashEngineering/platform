@@ -21,11 +21,11 @@ treediff = "5.0.0"
 platform-serialization = { path = "../rs-platform-serialization" }
 platform-version = { path = "../rs-platform-version" }
 indexmap = "2.0.2"
-ferment-macro = { git = "https://github.com/dashpay/ferment", branch = "feat/opaque-default", package = "ferment-macro" }
+ferment-macro = { git = "https://github.com/dashpay/ferment", tag = "v0.2.3", package = "ferment-macro" }
 
 [build-dependencies]
 cbindgen = "0.26.0"
-ferment = { path = "../../../ferment/ferment" }
+# ferment = { git = "https://github.com/dashpay/ferment", tag = "v0.2.3", package = "ferment" }
 
 ### FEATURES #################################################################
 
