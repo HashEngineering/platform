@@ -38,3 +38,6 @@ exclude = ["packages/wasm-sdk"] # This one is experimental and not ready for use
 [workspace.package]
 
 rust-version = "1.85"
+
+[patch.crates-io]
+elliptic-curve-tools = { git = "https://github.com/mikelodder7/elliptic-curve-tools", rev = "5789c0491252d5af8add829348af9dd6ac09d8f6" }
