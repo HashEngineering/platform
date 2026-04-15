@@ -6,8 +6,10 @@ use crate::platform::Fetch;
 use crate::Error;
 use crate::Sdk;
 use dpp::document::Document;
+use dpp::identity::PartialIdentity;
 use dpp::prelude::{DataContract, Identifier, Identity};
 use dpp::state_transition::identity_create_transition::accessors::IdentityCreateTransitionAccessorsV0;
+use dpp::state_transition::identity_update_transition::accessors::IdentityUpdateTransitionAccessorsV0;
 use dpp::state_transition::StateTransition;
 use dpp::state_transition::StateTransitionLike;
 use dpp::voting::votes::Vote;
@@ -90,6 +92,21 @@ impl Waitable for Identity {
         state_transition: StateTransition,
         settings: Option<PutSettings>,
     ) -> Result<Self, Error> {
+        // IdentityUpdate is proved with VerifiedPartialIdentity, not VerifiedIdentity, so
+        // TryFrom<StateTransitionProofResult> for Identity would fail. Intercept it here and
+        // fetch the full Identity after the proof is confirmed.
+        if let StateTransition::IdentityUpdate(ref update) = state_transition {
+            let identity_id = update.identity_id();
+            let _: PartialIdentity = state_transition.wait_for_response(sdk, settings).await?;
+            return Identity::fetch(sdk, identity_id)
+                .await?
+                .ok_or_else(|| {
+                    Error::DapiClientError(
+                        "identity not found after update was confirmed on platform".to_string(),
+                    )
+                });
+        }
+
         let result: Result<Self, Error> = state_transition.wait_for_response(sdk, settings).await;
 
         match result {
