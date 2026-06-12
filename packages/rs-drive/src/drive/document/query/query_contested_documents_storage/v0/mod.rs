@@ -62,7 +62,7 @@ impl Drive {
     /// # Returns
     ///
     /// * `Result<QueryDocumentsOutcome, Error>` - Returns `QueryDocumentsOutcome` on success with the list of documents,
-    ///    number of skipped items, and cost. If the operation fails, it returns an `Error`.
+    ///   number of skipped items, and cost. If the operation fails, it returns an `Error`.
     #[inline(always)]
     pub(super) fn query_contested_documents_v0(
         &self,
@@ -103,5 +103,21 @@ impl Drive {
         };
 
         Ok(QueryContestedDocumentsOutcomeV0 { documents, cost })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contested_documents_outcome_v0_defaults() {
+        // Covers the accessor and owned-accessor branches on the default
+        // outcome — these are the no-epoch / no-document code paths.
+        let outcome = QueryContestedDocumentsOutcomeV0::default();
+        assert!(outcome.documents().is_empty());
+        assert_eq!(outcome.cost(), 0);
+        let taken = outcome.documents_owned();
+        assert!(taken.is_empty());
     }
 }

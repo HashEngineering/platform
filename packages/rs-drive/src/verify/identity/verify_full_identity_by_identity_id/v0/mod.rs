@@ -66,7 +66,7 @@ impl Drive {
                 if key == identity_id {
                     if let Some(element) = maybe_element {
                         //this is the balance
-                        let signed_balance = element.as_sum_item_value().map_err(Error::GroveDB)?;
+                        let signed_balance = element.as_sum_item_value().map_err(Error::from)?;
                         if signed_balance < 0 {
                             return Err(Error::Proof(ProofError::Overflow(
                                 "balance can't be negative",
@@ -86,7 +86,7 @@ impl Drive {
                 }
             } else if path == identity_path && key == vec![IdentityTreeRevision as u8] {
                 if let Some(element) = maybe_element {
-                    let item_bytes = element.into_item_bytes().map_err(Error::GroveDB)?;
+                    let item_bytes = element.into_item_bytes().map_err(Error::from)?;
                     //this is the revision
                     revision = Some(Revision::from_be_bytes(item_bytes.try_into().map_err(
                         |_| {
@@ -103,7 +103,7 @@ impl Drive {
                 }
             } else if path == identity_keys_path {
                 if let Some(element) = maybe_element {
-                    let item_bytes = element.into_item_bytes().map_err(Error::GroveDB)?;
+                    let item_bytes = element.into_item_bytes().map_err(Error::from)?;
                     let key = IdentityPublicKey::deserialize_from_bytes(&item_bytes)?;
                     keys.insert(key.id(), key);
                 } else {
@@ -137,5 +137,73 @@ impl Drive {
             ))
         }?;
         Ok((root_hash, maybe_identity))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::util::test_helpers::setup::setup_drive_with_initial_state_structure;
+    use dpp::block::block_info::BlockInfo;
+    use dpp::identity::accessors::IdentityGettersV0;
+    use dpp::version::PlatformVersion;
+
+    #[test]
+    fn should_prove_and_verify_full_identity_by_identity_id() {
+        let drive = setup_drive_with_initial_state_structure(None);
+        let platform_version = PlatformVersion::latest();
+
+        let identity = Identity::random_identity(5, Some(14), platform_version)
+            .expect("expected a random identity");
+
+        let identity_id = identity.id().to_buffer();
+
+        drive
+            .add_new_identity(
+                identity.clone(),
+                false,
+                &BlockInfo::default(),
+                true,
+                None,
+                platform_version,
+            )
+            .expect("expected to add an identity");
+
+        let proof = drive
+            .prove_full_identity(identity_id, None, &platform_version.drive)
+            .expect("should not error when proving full identity");
+
+        let (_root_hash, proved_identity) = Drive::verify_full_identity_by_identity_id(
+            proof.as_slice(),
+            false,
+            identity_id,
+            platform_version,
+        )
+        .expect("expected to verify full identity");
+
+        assert_eq!(proved_identity, Some(identity));
+    }
+
+    #[test]
+    fn should_prove_and_verify_absent_full_identity() {
+        let drive = setup_drive_with_initial_state_structure(None);
+        let platform_version = PlatformVersion::latest();
+
+        // Use an identity id that was never inserted
+        let absent_identity_id = [0xABu8; 32];
+
+        let proof = drive
+            .prove_full_identity(absent_identity_id, None, &platform_version.drive)
+            .expect("should not error when proving absent full identity");
+
+        let (_root_hash, proved_identity) = Drive::verify_full_identity_by_identity_id(
+            proof.as_slice(),
+            false,
+            absent_identity_id,
+            platform_version,
+        )
+        .expect("expected to verify absent full identity");
+
+        assert_eq!(proved_identity, None);
     }
 }

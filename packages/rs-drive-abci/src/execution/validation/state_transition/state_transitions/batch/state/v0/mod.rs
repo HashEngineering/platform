@@ -3,7 +3,7 @@ use dpp::consensus::ConsensusError;
 use dpp::consensus::state::state_error::StateError;
 use dpp::prelude::ConsensusValidationResult;
 use dpp::state_transition::batch_transition::BatchTransition;
-use dpp::state_transition::StateTransitionLike;
+use dpp::state_transition::StateTransitionOwned;
 use drive::state_transition_action::StateTransitionAction;
 use dpp::version::{DefaultForPlatformVersion, PlatformVersion};
 use drive::grovedb::TransactionArg;
@@ -36,9 +36,8 @@ use crate::execution::validation::state_transition::batch::data_triggers::{data_
 use crate::platform_types::platform::{PlatformStateRef};
 use crate::execution::validation::state_transition::state_transitions::batch::transformer::v0::BatchTransitionTransformerV0;
 use crate::execution::validation::state_transition::ValidationMode;
-use crate::platform_types::platform_state::v0::PlatformStateV0Methods;
+use crate::platform_types::platform_state::PlatformStateV0Methods;
 
-mod data_triggers;
 pub mod fetch_contender;
 pub mod fetch_documents;
 
@@ -74,9 +73,6 @@ impl DocumentsBatchStateTransitionStateValidationV0 for BatchTransition {
         platform_version: &PlatformVersion,
     ) -> Result<ConsensusValidationResult<StateTransitionAction>, Error> {
         let mut validation_result = ConsensusValidationResult::<StateTransitionAction>::new();
-
-        let state_transition_execution_context =
-            StateTransitionExecutionContext::default_for_platform_version(platform_version)?;
 
         let owner_id = state_transition_action.owner_id();
 
@@ -271,17 +267,46 @@ impl DocumentsBatchStateTransitionStateValidationV0 for BatchTransition {
                 ));
             } else if platform.config.execution.use_document_triggers {
                 if let BatchedTransitionAction::DocumentAction(document_transition) = &transition {
-                    // we should also validate document triggers
-                    let data_trigger_execution_context = DataTriggerExecutionContext {
+                    // Pre-PR this site allocated a default-initialized local
+                    // `StateTransitionExecutionContext` and passed `&local` to
+                    // the trigger context. The local was dropped on return and
+                    // all of its add_operation calls were silently discarded.
+                    // `_v1` triggers need to actually bill (call add_operation),
+                    // so the trigger context now references the OUTER mutable
+                    // execution_context that the processor threaded in.
+                    //
+                    // PROTOCOL_VERSION_11 consensus-safety: on PV11 the
+                    // per-trigger version fields stay at 0, so wrappers
+                    // dispatch to `_v0` triggers whose bodies are
+                    // byte-identical to v3.1-dev (only their param signature
+                    // gained `&mut`, the body never mutates). _v0 triggers
+                    // do not call `add_operation`, so the outer
+                    // execution_context is read-only from the trigger's
+                    // perspective on PV11 — same chain state as pre-PR.
+                    //
+                    // Non-consensus side-effect on PV11 mempool: the trigger
+                    // now sees the outer ctx's real `dry_run` flag instead of
+                    // the previous-default `false`. During CheckTx with
+                    // `dry_run: true`, _v0 triggers short-circuit their
+                    // `query_documents` (via `query_documents_v0`'s internal
+                    // dry-run guard) and skip the post-query validation.
+                    // Doesn't affect block validation (Validator mode is
+                    // always `dry_run: false`), so chain replay matches
+                    // pre-PR byte-for-byte. Pre-PR also did the query but
+                    // ignored its result during dry-run validation, so the
+                    // net mempool outcome is the same.
+                    let owner_id_value = self.owner_id();
+                    let mut data_trigger_execution_context = DataTriggerExecutionContext {
                         platform,
+                        block_info,
                         transaction,
-                        owner_id: &self.owner_id(),
-                        state_transition_execution_context: &state_transition_execution_context,
+                        owner_id: &owner_id_value,
+                        state_transition_execution_context: execution_context,
                     };
                     let data_trigger_execution_result = document_transition
                         .validate_with_data_triggers(
                             &data_trigger_bindings,
-                            &data_trigger_execution_context,
+                            &mut data_trigger_execution_context,
                             platform_version,
                         )?;
 

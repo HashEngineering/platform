@@ -1,9 +1,11 @@
+pub mod address_funds;
 pub mod data_contract;
 pub mod data_trigger;
 pub mod document;
 pub mod group;
 pub mod identity;
 pub mod prefunded_specialized_balances;
+pub mod shielded;
 pub mod state_error;
 pub mod token;
 pub mod voting;

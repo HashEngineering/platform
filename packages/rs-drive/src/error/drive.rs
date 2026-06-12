@@ -1,4 +1,5 @@
 use crate::drive::contract::MAX_CONTRACT_HISTORY_FETCH_LIMIT;
+use crate::drive::document::MAX_DOCUMENT_HISTORY_FETCH_LIMIT;
 use dpp::fee::Credits;
 use dpp::identifier::Identifier;
 use dpp::version::FeatureVersion;
@@ -179,6 +180,10 @@ pub enum DriveError {
     InvalidContractHistoryFetchLimit(u16),
 
     /// Error
+    #[error("invalid document history fetch limit: {0}. The limit must be between 1 and {MAX_DOCUMENT_HISTORY_FETCH_LIMIT}")]
+    InvalidDocumentHistoryFetchLimit(u16),
+
+    /// Error
     #[error("prefunded specialized balance does not exist: {0}")]
     PrefundedSpecializedBalanceDoesNotExist(String),
 
@@ -201,4 +206,16 @@ pub enum DriveError {
     /// Element was not found
     #[error("element not found: {0}")]
     ElementNotFound(&'static str),
+
+    /// Invalid input provided
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+
+    /// No checkpoints available
+    #[error("no checkpoints available")]
+    NoCheckpointsAvailable,
+
+    /// Checkpoint not found for specified block height
+    #[error("checkpoint not found for block height: {0}")]
+    CheckpointNotFound(u64),
 }

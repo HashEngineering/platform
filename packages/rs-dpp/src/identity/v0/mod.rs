@@ -2,20 +2,21 @@ mod conversion;
 #[cfg(feature = "random-identities")]
 pub mod random;
 
+#[cfg(feature = "json-conversion")]
+use crate::serialization::json_safe_fields;
+#[cfg(feature = "value-conversion")]
+use crate::serialization::ValueConvertible;
 use std::collections::BTreeMap;
-#[cfg(feature = "identity-value-conversion")]
+#[cfg(feature = "value-conversion")]
 use std::convert::TryFrom;
 use std::hash::{Hash, Hasher};
 
-#[cfg(feature = "identity-value-conversion")]
-use platform_value::Value;
-#[cfg(feature = "identity-serde-conversion")]
-use serde::{Deserialize, Serialize};
-
 use crate::identity::{identity_public_key::IdentityPublicKey, identity_public_key::KeyID, PartialIdentity};
 use crate::prelude::Revision;
+#[cfg(feature = "value-conversion")]
+use platform_value::Value;
 
-#[cfg(feature = "identity-value-conversion")]
+#[cfg(feature = "value-conversion")]
 use crate::errors::ProtocolError;
 use platform_value::types::identifier::Identifier;
 #[cfg(feature = "identity-serialization")]
@@ -23,18 +24,20 @@ use bincode::{Decode, Encode};
 
 /// Implement the Identity. Identity is a low-level construct that provides the foundation
 /// for user-facing functionality on the platform
+#[cfg_attr(feature = "json-conversion", json_safe_fields)]
 #[derive(Default, Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "identity-serialization", derive(Encode, Decode))]
 #[cfg_attr(
-    feature = "identity-serde-conversion",
-    derive(Serialize, Deserialize),
+    any(feature = "serde-conversion", feature = "serde-conversion"),
+    derive(serde::Serialize, serde::Deserialize),
     serde(rename_all = "camelCase")
 )]
+#[cfg_attr(feature = "value-conversion", derive(ValueConvertible))]
 #[ferment_macro::export]
 pub struct IdentityV0 {
     pub id: Identifier,
     #[cfg_attr(
-        feature = "identity-serde-conversion",
+        any(feature = "serde-conversion", feature = "serde-conversion"),
         serde(with = "public_key_serialization")
     )]
     pub public_keys: BTreeMap<KeyID, IdentityPublicKey>,
@@ -123,7 +126,7 @@ impl IdentityV0 {
     }
 }
 
-#[cfg(feature = "identity-value-conversion")]
+#[cfg(feature = "value-conversion")]
 impl TryFrom<Value> for IdentityV0 {
     type Error = ProtocolError;
 
@@ -132,7 +135,7 @@ impl TryFrom<Value> for IdentityV0 {
     }
 }
 
-#[cfg(feature = "identity-value-conversion")]
+#[cfg(feature = "value-conversion")]
 impl TryFrom<&Value> for IdentityV0 {
     type Error = ProtocolError;
 

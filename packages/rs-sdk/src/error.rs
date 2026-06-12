@@ -1,12 +1,17 @@
 //! Definitions of errors
 use dapi_grpc::platform::v0::StateTransitionBroadcastError as StateTransitionBroadcastErrorProto;
 use dapi_grpc::tonic::Code;
+pub use dash_context_provider::ContextProviderError;
 use dpp::block::block_info::BlockInfo;
+use dpp::consensus::basic::state_transition::{
+    OutputBelowMinimumError, TransitionNoInputsError, TransitionNoOutputsError,
+};
+use dpp::consensus::state::address_funds::{AddressDoesNotExistError, AddressNotEnoughFundsError};
 use dpp::consensus::ConsensusError;
 use dpp::serialization::PlatformDeserializable;
+use dpp::validation::SimpleConsensusValidationResult;
 use dpp::version::PlatformVersionError;
-use dpp::ProtocolError;
-pub use drive_proof_verifier::error::ContextProviderError;
+use dpp::{dashcore_rpc, ProtocolError};
 use rs_dapi_client::transport::TransportError;
 use rs_dapi_client::{CanRetry, DapiClientError, ExecutionError};
 use std::fmt::Debug;
@@ -14,6 +19,7 @@ use std::time::Duration;
 
 /// Error type for the SDK
 // TODO: Propagate server address and retry information so that the user can retrieve it
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// SDK is not configured properly
@@ -22,7 +28,7 @@ pub enum Error {
     /// Drive error
     #[error("Drive error: {0}")]
     Drive(#[from] drive::error::Error),
-    /// Drive error
+    /// Drive proof error with associated proof bytes and block info
     #[error("Drive error with associated proof: {0}")]
     DriveProofError(drive::error::proof::ProofError, Vec<u8>, BlockInfo),
     /// DPP error
@@ -36,7 +42,7 @@ pub enum Error {
     InvalidProvedResponse(String),
     /// DAPI client error, for example, connection error
     #[error("Dapi client error: {0}")]
-    DapiClientError(String),
+    DapiClientError(rs_dapi_client::DapiClientError),
     #[cfg(feature = "mocks")]
     /// DAPI mocks error
     #[error("Dapi mocks error: {0}")]
@@ -66,6 +72,33 @@ pub enum Error {
     /// Returned when an attempt is made to create an object that already exists in the system
     #[error("Object already exists: {0}")]
     AlreadyExists(String),
+    /// Invalid credit transfer configuration
+    #[error("Invalid credit transfer: {0}")]
+    InvalidCreditTransfer(String),
+    /// Identity nonce overflow: the nonce has reached its maximum value and
+    /// cannot be incremented further without wrapping to zero.
+    #[error("Identity nonce overflow: nonce has reached the maximum value ({0})")]
+    NonceOverflow(u64),
+    /// Identity nonce not found on Platform.
+    ///
+    /// Platform returned no nonce for the requested identity (or identity–
+    /// contract pair).  This usually means the queried DAPI node has not yet
+    /// indexed the identity — for example right after identity creation or
+    /// when the node is lagging behind the chain tip.
+    ///
+    /// **Recovery**: retry the state transition; the SDK will re-fetch the
+    /// nonce from a (potentially different) DAPI node on the next attempt.
+    #[error("Identity nonce not found on platform: {0}")]
+    IdentityNonceNotFound(String),
+
+    /// Drive returned an internal error that is not a consensus error.
+    ///
+    /// Contains the decoded human-readable message extracted from the
+    /// `drive-error-data-bin` gRPC metadata (CBOR map, `message` field).
+    /// Typically a storage-level failure (e.g., GroveDB constraint violation).
+    #[error("Drive internal error: {0}")]
+    DriveInternalError(String),
+
     /// Generic error
     // TODO: Use domain specific errors instead of generic ones
     #[error("SDK error: {0}")]
@@ -86,6 +119,11 @@ pub enum Error {
     /// Error returned when trying to broadcast a state transition
     #[error(transparent)]
     StateTransitionBroadcastError(#[from] StateTransitionBroadcastError),
+
+    /// All available addresses have been exhausted (banned due to errors).
+    /// Contains the last meaningful error that caused addresses to be banned.
+    #[error("no available addresses to retry, last error: {0}")]
+    NoAvailableAddressesToRetry(Box<Error>),
 }
 
 /// State transition broadcast error
@@ -154,14 +192,82 @@ impl From<DapiClientError> for Error {
                         Self::Generic(format!("Invalid consensus error encoding: {e}"))
                     });
             }
+            // Check drive-error-data-bin for decoded Drive error messages
+            if status.code() == Code::Internal {
+                if let Some(drive_error_value) = status.metadata().get_bin("drive-error-data-bin") {
+                    match drive_error_value.to_bytes() {
+                        Ok(bytes) => {
+                            if let Some(message) = extract_drive_error_message(&bytes) {
+                                return Self::DriveInternalError(message);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                "Failed to decode drive-error-data-bin metadata: {}",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+
             // Otherwise we parse the error code and act accordingly
             if status.code() == Code::AlreadyExists {
                 return Self::AlreadyExists(status.message().to_string());
             }
         }
 
-        Self::DapiClientError(value.to_string())
+        // Preserve the original DAPI client error for structured inspection
+        Self::DapiClientError(value)
     }
+}
+
+/// Hard cap on the length of attacker-influenceable CBOR payloads accepted
+/// before decoding the `drive-error-data-bin` gRPC metadata.
+///
+/// gRPC metadata is conventionally bounded around 8 KiB; 64 KiB is comfortably
+/// above any legitimate payload. The cap bounds memory only — `ciborium`'s
+/// own recursion limit (256) bounds nesting depth and returns
+/// `RecursionLimitExceeded` rather than recursing into the stack.
+const MAX_CBOR_INPUT_SIZE: usize = 65_536;
+
+// `ciborium` caps recursion at depth 256 and returns
+// `Error::RecursionLimitExceeded` (a normal `Err`, not a panic) for deeper
+// input, so a hostile peer cannot exhaust the stack here.
+fn decode_cbor_value(bytes: &[u8]) -> Option<ciborium::Value> {
+    ciborium::from_reader::<ciborium::Value, _>(bytes).ok()
+}
+
+/// Extract the `message` text from CBOR-encoded `drive-error-data-bin` metadata.
+///
+/// The metadata is a CBOR map with optional fields `code`, `message`,
+/// `consensus_error`. Returns `Some(message)` when a non-empty `message`
+/// text is present. Inputs larger than [`MAX_CBOR_INPUT_SIZE`] are rejected
+/// unread.
+//
+// MIRROR: keep in sync with `walk_cbor_for_key` in
+// packages/rs-dapi/src/services/platform_service/error_mapping.rs.
+fn extract_drive_error_message(bytes: &[u8]) -> Option<String> {
+    if bytes.len() > MAX_CBOR_INPUT_SIZE {
+        tracing::debug!(
+            len = bytes.len(),
+            max = MAX_CBOR_INPUT_SIZE,
+            "drive-error-data-bin exceeds size cap; refusing to decode"
+        );
+        return None;
+    }
+    let value = decode_cbor_value(bytes)?;
+    let map = value.as_map()?;
+    for (key, val) in map {
+        if key.as_text() == Some("message") {
+            if let Some(msg) = val.as_text() {
+                if !msg.is_empty() {
+                    return Some(msg.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 impl From<PlatformVersionError> for Error {
@@ -170,19 +276,82 @@ impl From<PlatformVersionError> for Error {
     }
 }
 
+impl From<ConsensusError> for Error {
+    fn from(value: ConsensusError) -> Self {
+        Self::Protocol(ProtocolError::ConsensusError(Box::new(value)))
+    }
+}
+
+impl From<TransitionNoInputsError> for Error {
+    fn from(value: TransitionNoInputsError) -> Self {
+        Self::Protocol(ProtocolError::ConsensusError(Box::new(value.into())))
+    }
+}
+
+impl From<TransitionNoOutputsError> for Error {
+    fn from(value: TransitionNoOutputsError) -> Self {
+        Self::Protocol(ProtocolError::ConsensusError(Box::new(value.into())))
+    }
+}
+
+impl From<OutputBelowMinimumError> for Error {
+    fn from(value: OutputBelowMinimumError) -> Self {
+        Self::Protocol(ProtocolError::ConsensusError(Box::new(value.into())))
+    }
+}
+
+impl From<SimpleConsensusValidationResult> for Error {
+    fn from(value: SimpleConsensusValidationResult) -> Self {
+        value
+            .errors
+            .into_iter()
+            .next()
+            .map(Error::from)
+            .unwrap_or_else(|| {
+                Error::Protocol(ProtocolError::CorruptedCodeExecution(
+                    "state transition structure validation failed without an error".to_string(),
+                ))
+            })
+    }
+}
+
+impl From<AddressDoesNotExistError> for Error {
+    fn from(value: AddressDoesNotExistError) -> Self {
+        Self::Protocol(ProtocolError::ConsensusError(Box::new(value.into())))
+    }
+}
+
+impl From<AddressNotEnoughFundsError> for Error {
+    fn from(value: AddressNotEnoughFundsError) -> Self {
+        Self::Protocol(ProtocolError::ConsensusError(Box::new(value.into())))
+    }
+}
+
+// Retain legacy behavior for generic execution errors that are not DapiClientError
 impl<T> From<ExecutionError<T>> for Error
 where
     ExecutionError<T>: ToString,
 {
     fn from(value: ExecutionError<T>) -> Self {
-        // TODO: Improve error handling
-        Self::DapiClientError(value.to_string())
+        // Fallback to a generic string representation
+        Self::Generic(value.to_string())
     }
 }
 
 impl CanRetry for Error {
     fn can_retry(&self) -> bool {
-        matches!(self, Error::StaleNode(..) | Error::TimeoutReached(_, _))
+        matches!(
+            self,
+            Error::StaleNode(..) | Error::TimeoutReached(_, _) | Error::Proof(_)
+        )
+    }
+
+    fn is_no_available_addresses(&self) -> bool {
+        matches!(
+            self,
+            Error::DapiClientError(DapiClientError::NoAvailableAddresses)
+                | Error::DapiClientError(DapiClientError::NoAvailableAddressesToRetry(_))
+        )
     }
 }
 
@@ -298,6 +467,103 @@ mod tests {
                     BasicError::IdentityAssetLockProofLockedTransactionMismatchError(_)
                 ))
             );
+        }
+
+        #[test]
+        fn test_drive_error_data_bin_maps_to_drive_internal_error() {
+            let cbor_map = ciborium::Value::Map(vec![
+                (
+                    ciborium::Value::Text("code".to_string()),
+                    ciborium::Value::Integer(13.into()),
+                ),
+                (
+                    ciborium::Value::Text("message".to_string()),
+                    ciborium::Value::Text(
+                        "storage: identity: a unique key with that hash already exists: \
+                         the key already exists in the non unique set [1, 2, 3]"
+                            .to_string(),
+                    ),
+                ),
+            ]);
+            let mut cbor_bytes = Vec::new();
+            ciborium::into_writer(&cbor_map, &mut cbor_bytes).expect("CBOR serialization");
+
+            let mut metadata = MetadataMap::new();
+            metadata.insert_bin(
+                "drive-error-data-bin",
+                MetadataValue::from_bytes(&cbor_bytes),
+            );
+
+            let status =
+                dapi_grpc::tonic::Status::with_metadata(Code::Internal, "internal", metadata);
+            let error = DapiClientError::Transport(TransportError::Grpc(status));
+
+            let sdk_error = Error::from(error);
+
+            assert_matches!(sdk_error, Error::DriveInternalError(msg) if msg.contains("unique key"));
+        }
+
+        #[test]
+        fn test_internal_error_without_drive_metadata_falls_through() {
+            let status = dapi_grpc::tonic::Status::new(Code::Internal, "Internal error");
+            let error = DapiClientError::Transport(TransportError::Grpc(status));
+
+            let sdk_error = Error::from(error);
+
+            assert_matches!(sdk_error, Error::DapiClientError(_));
+        }
+
+        #[test]
+        fn test_non_internal_code_with_drive_metadata_not_intercepted() {
+            let cbor_map = ciborium::Value::Map(vec![(
+                ciborium::Value::Text("message".to_string()),
+                ciborium::Value::Text("some drive error".to_string()),
+            )]);
+            let mut cbor_bytes = Vec::new();
+            ciborium::into_writer(&cbor_map, &mut cbor_bytes).expect("CBOR serialization");
+
+            let mut metadata = MetadataMap::new();
+            metadata.insert_bin(
+                "drive-error-data-bin",
+                MetadataValue::from_bytes(&cbor_bytes),
+            );
+
+            let status =
+                dapi_grpc::tonic::Status::with_metadata(Code::Unavailable, "unavailable", metadata);
+            let error = DapiClientError::Transport(TransportError::Grpc(status));
+
+            let sdk_error = Error::from(error);
+
+            assert_matches!(sdk_error, Error::DapiClientError(_));
+        }
+
+        #[test]
+        fn test_malformed_cbor_in_drive_error_data_bin_falls_through() {
+            let garbage_bytes = vec![0xFF, 0xFE, 0x00, 0x01, 0x02];
+
+            let mut metadata = MetadataMap::new();
+            metadata.insert_bin(
+                "drive-error-data-bin",
+                MetadataValue::from_bytes(&garbage_bytes),
+            );
+
+            let status =
+                dapi_grpc::tonic::Status::with_metadata(Code::Internal, "internal", metadata);
+            let error = DapiClientError::Transport(TransportError::Grpc(status));
+
+            let sdk_error = Error::from(error);
+
+            assert_matches!(sdk_error, Error::DapiClientError(_));
+        }
+
+        // Pathological CBOR: 60_000 nested single-pair-map openers (`0xA1`).
+        // `ciborium` rejects this at its depth-256 recursion limit with a
+        // normal `Err`, so the decode returns `None` without exhausting the
+        // stack.
+        #[test]
+        fn test_deeply_nested_cbor_rejected_without_stack_exhaustion() {
+            let payload = vec![0xA1u8; 60_000];
+            assert!(super::extract_drive_error_message(&payload).is_none());
         }
     }
 }

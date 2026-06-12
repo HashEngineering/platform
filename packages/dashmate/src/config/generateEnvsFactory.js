@@ -1,6 +1,19 @@
 import os from 'os';
+import path from 'path';
+import { DASHMATE_HELPER_DOCKER_IMAGE, NETWORK_LOCAL } from '../constants.js';
 import convertObjectToEnvs from './convertObjectToEnvs.js';
-import { DASHMATE_HELPER_DOCKER_IMAGE } from '../constants.js';
+
+/**
+ * Maps dashmate network name to Dash Core network name.
+ * @param {string} network - dashmate network (local, devnet, testnet, mainnet)
+ * @returns {string} Dash Core network name (regtest, devnet, testnet, mainnet)
+ */
+function getDashCoreNetwork(network) {
+  if (network === NETWORK_LOCAL) {
+    return 'regtest';
+  }
+  return network;
+}
 
 /**
  * @param {ConfigFile} configFile
@@ -40,9 +53,8 @@ export default function generateEnvsFactory(configFile, homeDir, getConfigProfil
         dockerComposeFiles.push('docker-compose.build.drive_abci.yml');
       }
 
-      if (config.get('platform.dapi.api.docker.build.enabled')) {
-        dockerComposeFiles.push('docker-compose.build.dapi_api.yml');
-        dockerComposeFiles.push('docker-compose.build.dapi_core_streams.yml');
+      if (config.get('platform.dapi.rsDapi.docker.build.enabled')) {
+        dockerComposeFiles.push('docker-compose.build.rs-dapi.yml');
       }
     }
 
@@ -73,7 +85,7 @@ export default function generateEnvsFactory(configFile, homeDir, getConfigProfil
       driveAbciMetricsUrl = 'http://0.0.0.0:29090';
     }
 
-    return {
+    const envs = {
       DASHMATE_HOME_DIR: homeDir.getPath(),
       LOCAL_UID: uid,
       LOCAL_GID: gid,
@@ -87,8 +99,64 @@ export default function generateEnvsFactory(configFile, homeDir, getConfigProfil
       DASHMATE_HELPER_DOCKER_IMAGE,
       PLATFORM_GATEWAY_RATE_LIMITER_METRICS_DISABLED: !config.get('platform.gateway.rateLimiter.metrics.enabled'),
       PLATFORM_DRIVE_ABCI_METRICS_URL: driveAbciMetricsUrl,
+      DASH_CORE_NETWORK: getDashCoreNetwork(config.get('network')),
       ...convertObjectToEnvs(config.getOptions()),
     };
+
+    // NOTE: per-image docker `build.args` (`…docker.build.buildArgs`) are NOT
+    // forwarded as env vars here. They are rendered directly into the per-config
+    // `dynamic-compose.yml` as `build.args` entries (see
+    // `templates/dynamic-compose.yml.dot`), which is the single source of truth.
+
+    const configuredAccessLogPath = config.get('platform.dapi.rsDapi.logs.accessLogPath');
+    const hasConfiguredPath = typeof configuredAccessLogPath === 'string'
+      && configuredAccessLogPath.trim() !== '';
+
+    const containerAccessLogDir = '/var/log/rs-dapi';
+    let containerAccessLogPath = path.posix.join(containerAccessLogDir, 'access.log');
+    let accessLogVolumeType = 'volume';
+    let accessLogVolumeSource = 'rs-dapi-access-logs';
+
+    envs.PLATFORM_DAPI_RS_DAPI_LOGS_ACCESS_LOG_HOST_PATH = '';
+    envs.PLATFORM_DAPI_RS_DAPI_LOGS_ACCESS_LOG_HOST_DIR = '';
+
+    if (hasConfiguredPath) {
+      const homeDirPath = homeDir.getPath();
+
+      const hostAccessLogPath = path.isAbsolute(configuredAccessLogPath)
+        ? configuredAccessLogPath
+        : path.resolve(homeDirPath, configuredAccessLogPath);
+
+      const hostAccessLogDir = path.dirname(hostAccessLogPath);
+      const hostAccessLogFile = path.basename(hostAccessLogPath);
+
+      containerAccessLogPath = path.posix.join(containerAccessLogDir, hostAccessLogFile);
+      accessLogVolumeType = 'bind';
+      accessLogVolumeSource = hostAccessLogDir;
+
+      envs.PLATFORM_DAPI_RS_DAPI_LOGS_ACCESS_LOG_HOST_PATH = hostAccessLogPath;
+      envs.PLATFORM_DAPI_RS_DAPI_LOGS_ACCESS_LOG_HOST_DIR = hostAccessLogDir;
+    }
+
+    envs.PLATFORM_DAPI_RS_DAPI_LOGS_ACCESS_LOG_CONTAINER_DIR = containerAccessLogDir;
+    envs.PLATFORM_DAPI_RS_DAPI_LOGS_ACCESS_LOG_CONTAINER_PATH = containerAccessLogPath;
+    envs.PLATFORM_DAPI_RS_DAPI_LOGS_ACCESS_LOG_VOLUME_TYPE = accessLogVolumeType;
+    envs.PLATFORM_DAPI_RS_DAPI_LOGS_ACCESS_LOG_VOLUME_SOURCE = accessLogVolumeSource;
+
+    if (hasConfiguredPath) {
+      envs.PLATFORM_DAPI_RS_DAPI_LOGS_ACCESS_LOG_PATH = containerAccessLogPath;
+    } else {
+      envs.PLATFORM_DAPI_RS_DAPI_LOGS_ACCESS_LOG_PATH = '';
+    }
+
+    if (
+      config.has('platform.dapi.rsDapi.metrics.enabled')
+      && !config.get('platform.dapi.rsDapi.metrics.enabled')
+    ) {
+      envs.PLATFORM_DAPI_RS_DAPI_METRICS_PORT = '0';
+    }
+
+    return envs;
   }
 
   return generateEnvs;

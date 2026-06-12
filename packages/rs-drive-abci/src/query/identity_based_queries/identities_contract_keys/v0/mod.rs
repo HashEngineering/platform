@@ -2,6 +2,7 @@ use crate::error::query::QueryError;
 use crate::error::Error;
 use crate::platform_types::platform::Platform;
 use crate::platform_types::platform_state::PlatformState;
+use crate::query::response_metadata::CheckpointUsed;
 use crate::query::QueryValidationResult;
 use dapi_grpc::platform::v0::get_identities_contract_keys_request::GetIdentitiesContractKeysRequestV0;
 use dapi_grpc::platform::v0::get_identities_contract_keys_response::{
@@ -13,6 +14,7 @@ use dpp::platform_value::Bytes32;
 use dpp::validation::ValidationResult;
 use dpp::version::PlatformVersion;
 use drive::error::query::QuerySyntaxError;
+use drive::util::grove_operations::GroveDBToUse;
 
 impl<C> Platform<C> {
     #[inline(always)]
@@ -28,6 +30,15 @@ impl<C> Platform<C> {
         platform_state: &PlatformState,
         platform_version: &PlatformVersion,
     ) -> Result<QueryValidationResult<GetIdentitiesContractKeysResponseV0>, Error> {
+        if identities_ids.len() > platform_version.drive_abci.query.max_returned_elements as usize {
+            return Ok(QueryValidationResult::new_with_error(QueryError::Query(
+                QuerySyntaxError::InvalidLimit(format!(
+                    "trying to get {} identities contract keys, maximum is {}",
+                    identities_ids.len(),
+                    platform_version.drive_abci.query.max_returned_elements
+                )),
+            )));
+        }
         let identities_ids = check_validation_result_with_data!(identities_ids
             .into_iter()
             .map(|identity_id| {
@@ -53,14 +64,19 @@ impl<C> Platform<C> {
 
         let purposes = check_validation_result_with_data!(purposes
             .into_iter()
-            .map(
-                |purpose| Purpose::try_from(purpose as u8).map_err(|_| QueryError::Query(
-                    QuerySyntaxError::InvalidKeyParameter(format!(
+            .map(|purpose| {
+                if purpose < 0 || purpose > u8::MAX as i32 {
+                    return Err(QueryError::Query(QuerySyntaxError::InvalidKeyParameter(
+                        "purpose out of bounds".to_string(),
+                    )));
+                }
+                Purpose::try_from(purpose as u8).map_err(|_| {
+                    QueryError::Query(QuerySyntaxError::InvalidKeyParameter(format!(
                         "purpose {} not recognized",
                         purpose
-                    ))
-                ))
-            )
+                    )))
+                })
+            })
             .collect::<Result<Vec<Purpose>, QueryError>>());
 
         let response = if prove {
@@ -75,9 +91,10 @@ impl<C> Platform<C> {
 
             GetIdentitiesContractKeysResponseV0 {
                 result: Some(get_identities_contract_keys_response_v0::Result::Proof(
-                    self.response_proof_v0(platform_state, proof),
+                    self.response_proof_v0(platform_state, proof, GroveDBToUse::Current)
+                        .map(|(_, proof)| proof)?,
                 )),
-                metadata: Some(self.response_metadata_v0(platform_state)),
+                metadata: Some(self.response_metadata_v0(platform_state, CheckpointUsed::Current)),
             }
         } else {
             use get_identities_contract_keys_response_v0::IdentitiesKeys;
@@ -116,7 +133,7 @@ impl<C> Platform<C> {
                 result: Some(Result::IdentitiesKeys(IdentitiesKeys {
                     entries: identities_keys,
                 })),
-                metadata: Some(self.response_metadata_v0(platform_state)),
+                metadata: Some(self.response_metadata_v0(platform_state, CheckpointUsed::Current)),
             }
         };
 
@@ -147,6 +164,134 @@ mod tests {
     use dpp::dashcore::Network;
     use dpp::identity::identity_public_key::accessors::v0::IdentityPublicKeyGettersV0;
     use drive::drive::Drive;
+
+    use crate::error::query::QueryError;
+    use drive::error::query::QuerySyntaxError;
+
+    #[test]
+    fn test_invalid_identity_id() {
+        let (platform, state, platform_version) = setup_platform(None, Network::Testnet, None);
+
+        let request = GetIdentitiesContractKeysRequestV0 {
+            identities_ids: vec![vec![0; 8]], // invalid: 8 bytes
+            contract_id: vec![1; 32],
+            document_type_name: None,
+            purposes: vec![Purpose::AUTHENTICATION as i32],
+            prove: false,
+        };
+
+        let result = platform
+            .query_identities_contract_keys_v0(request, &state, platform_version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.errors.as_slice(),
+            [QueryError::InvalidArgument(msg)] if msg.contains("id must be a valid identifier (32 bytes long)")
+        ));
+    }
+
+    #[test]
+    fn test_invalid_contract_id() {
+        let (platform, state, platform_version) = setup_platform(None, Network::Testnet, None);
+
+        let request = GetIdentitiesContractKeysRequestV0 {
+            identities_ids: vec![vec![0; 32]],
+            contract_id: vec![1; 8], // invalid: 8 bytes
+            document_type_name: None,
+            purposes: vec![Purpose::AUTHENTICATION as i32],
+            prove: false,
+        };
+
+        let result = platform
+            .query_identities_contract_keys_v0(request, &state, platform_version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.errors.as_slice(),
+            [QueryError::InvalidArgument(msg)] if msg.contains("contract_id must be a valid identifier (32 bytes long)")
+        ));
+    }
+
+    #[test]
+    fn test_invalid_purpose() {
+        let (platform, state, platform_version) = setup_platform(None, Network::Testnet, None);
+
+        let request = GetIdentitiesContractKeysRequestV0 {
+            identities_ids: vec![vec![0; 32]],
+            contract_id: vec![1; 32],
+            document_type_name: None,
+            purposes: vec![200], // invalid purpose
+            prove: false,
+        };
+
+        let result = platform
+            .query_identities_contract_keys_v0(request, &state, platform_version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.errors.as_slice(),
+            [QueryError::Query(QuerySyntaxError::InvalidKeyParameter(msg))] if msg.contains("purpose")
+        ));
+    }
+
+    #[test]
+    fn test_identities_ids_exceeding_max_limit_is_rejected() {
+        let (platform, state, platform_version) =
+            setup_platform(Some((1, 1)), Network::Testnet, None);
+        let max = platform_version.drive_abci.query.max_returned_elements as usize;
+
+        let dashpay = platform.drive.cache.system_data_contracts.load_dashpay();
+
+        let request = GetIdentitiesContractKeysRequestV0 {
+            identities_ids: (0..=max).map(|i| vec![i as u8; 32]).collect(),
+            contract_id: dashpay.id().to_vec(),
+            document_type_name: Some("contactRequest".to_string()),
+            purposes: vec![Purpose::ENCRYPTION as i32],
+            prove: false,
+        };
+
+        let result = platform
+            .query_identities_contract_keys_v0(request, &state, platform_version)
+            .expect("query should not fail");
+
+        assert!(matches!(
+            result.errors.as_slice(),
+            [crate::error::query::QueryError::Query(
+                drive::error::query::QuerySyntaxError::InvalidLimit(_)
+            )]
+        ));
+    }
+
+    #[test]
+    fn test_identities_ids_at_max_limit_is_accepted() {
+        let (platform, state, platform_version) =
+            setup_platform(Some((1, 1)), Network::Testnet, None);
+        let max = platform_version.drive_abci.query.max_returned_elements as usize;
+
+        let dashpay = platform.drive.cache.system_data_contracts.load_dashpay();
+
+        let request = GetIdentitiesContractKeysRequestV0 {
+            identities_ids: (0..max).map(|i| vec![i as u8; 32]).collect(),
+            contract_id: dashpay.id().to_vec(),
+            document_type_name: Some("contactRequest".to_string()),
+            purposes: vec![Purpose::ENCRYPTION as i32],
+            prove: false,
+        };
+
+        let result = platform
+            .query_identities_contract_keys_v0(request, &state, platform_version)
+            .expect("query should not fail");
+
+        assert!(
+            !result.errors.iter().any(|e| matches!(
+                e,
+                crate::error::query::QueryError::Query(
+                    drive::error::query::QuerySyntaxError::InvalidLimit(_)
+                )
+            )),
+            "should not be rejected at exactly the max limit"
+        );
+    }
 
     #[test]
     fn test_identities_contract_keys_missing_identity() {

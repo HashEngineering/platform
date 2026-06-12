@@ -29,17 +29,17 @@ pub enum TransferResult {
 }
 
 impl Sdk {
-    /// Transfers tokens from one identity to one or more recipients.
+    /// Transfers tokens from one identity to another.
     ///
     /// This method broadcasts a transfer transition to move tokens between identities.
     /// The result varies based on token configuration:
-    /// - Standard tokens return updated balances for all affected identities
+    /// - Standard tokens return updated balances for the affected identities
     /// - Tokens with history tracking return documents
     /// - Group-managed tokens include group power information
     ///
     /// # Arguments
     ///
-    /// * `transfer_tokens_transition_builder` - Builder containing transfer parameters including recipients and amounts
+    /// * `transfer_tokens_transition_builder` - Builder containing transfer parameters including recipient and amount
     /// * `signing_key` - The identity public key for signing the transition
     /// * `signer` - Implementation of the Signer trait for cryptographic signing
     ///
@@ -53,7 +53,7 @@ impl Sdk {
     /// - The transition signing fails
     /// - Broadcasting the transition fails
     /// - The proof verification returns an unexpected result type
-    pub async fn token_transfer<S: Signer>(
+    pub async fn token_transfer<S: Signer<IdentityPublicKey>>(
         &self,
         transfer_tokens_transition_builder: TokenTransferTransitionBuilder,
         signing_key: &IdentityPublicKey,

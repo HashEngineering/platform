@@ -1,3 +1,4 @@
+use crate::data_contract::accessors::v0::DataContractV0Getters;
 use crate::data_contract::document_type::accessors::DocumentTypeV0Getters;
 use crate::data_contract::document_type::DocumentType;
 use crate::data_contract::schema::DataContractSchemaMethodsV0;
@@ -20,6 +21,8 @@ impl DataContractSchemaMethodsV0 for DataContractV0 {
     ) -> Result<(), ProtocolError> {
         self.document_types = DocumentType::create_document_types_from_document_schemas(
             self.id,
+            self.system_version_type(),
+            self.config.version(),
             schemas,
             defs.as_ref(),
             &BTreeMap::new(),
@@ -43,6 +46,8 @@ impl DataContractSchemaMethodsV0 for DataContractV0 {
     ) -> Result<(), ProtocolError> {
         let document_type = DocumentType::try_from_schema(
             self.id,
+            self.system_version_type(),
+            self.config.version(),
             name,
             schema,
             self.schema_defs.as_ref(),
@@ -156,6 +161,7 @@ mod test {
         assert_eq!(defs_map.as_ref(), data_contract.schema_defs())
     }
 
+    #[test]
     fn should_set_empty_schema_defs() {
         let platform_version = PlatformVersion::latest();
 
@@ -170,13 +176,25 @@ mod test {
 
         let defs_map = Some(defs.into_btree_string_map().expect("should convert to map"));
 
+        let schema = platform_value!({
+            "type": "object",
+            "properties": {
+                "a": {
+                    "type": "string",
+                    "maxLength": 10,
+                    "position": 0
+                }
+            },
+            "additionalProperties": false,
+        });
+
         let serialization_format = DataContractInSerializationFormatV0 {
             id: Identifier::random(),
             config,
             version: 0,
             owner_id: Default::default(),
             schema_defs: defs_map,
-            document_schemas: Default::default(),
+            document_schemas: BTreeMap::from([("document_type_name".to_string(), schema)]),
         };
 
         let mut data_contract = DataContractV0::try_from_platform_versioned(
@@ -191,6 +209,11 @@ mod test {
             .set_schema_defs(None, true, &mut vec![], platform_version)
             .expect("should set defs");
 
-        assert_eq!(None, data_contract.schema_defs())
+        assert_eq!(None, data_contract.schema_defs());
+        assert_eq!(
+            1,
+            data_contract.document_types().len(),
+            "document types should be preserved after clearing schema defs"
+        );
     }
 }

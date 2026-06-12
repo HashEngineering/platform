@@ -4,7 +4,7 @@ pub use v0::*;
 
 use crate::data_contract::DataContract;
 use crate::identity::signer::Signer;
-use crate::identity::{KeyID, PartialIdentity};
+use crate::identity::{IdentityPublicKey, KeyID, PartialIdentity};
 use crate::prelude::IdentityNonce;
 use crate::state_transition::data_contract_create_transition::{
     DataContractCreateTransition, DataContractCreateTransitionV0,
@@ -15,7 +15,7 @@ use crate::ProtocolError;
 use platform_version::version::PlatformVersion;
 
 impl DataContractCreateTransitionMethodsV0 for DataContractCreateTransition {
-    fn new_from_data_contract<S: Signer>(
+    async fn new_from_data_contract<S: Signer<IdentityPublicKey>>(
         data_contract: DataContract,
         identity_nonce: IdentityNonce,
         identity: &PartialIdentity,
@@ -31,15 +31,18 @@ impl DataContractCreateTransitionMethodsV0 for DataContractCreateTransition {
                 .contract_create_state_transition
                 .default_current_version,
         ) {
-            0 => DataContractCreateTransitionV0::new_from_data_contract(
-                data_contract,
-                identity_nonce,
-                identity,
-                key_id,
-                signer,
-                platform_version,
-                feature_version,
-            ),
+            0 => {
+                DataContractCreateTransitionV0::new_from_data_contract(
+                    data_contract,
+                    identity_nonce,
+                    identity,
+                    key_id,
+                    signer,
+                    platform_version,
+                    feature_version,
+                )
+                .await
+            }
             v => Err(ProtocolError::UnknownVersionError(format!(
                 "Unknown DataContractCreateTransition version for new_from_data_contract {v}"
             ))),

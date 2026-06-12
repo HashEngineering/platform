@@ -16,6 +16,14 @@
 
 @class BroadcastStateTransitionRequest;
 @class BroadcastStateTransitionResponse;
+@class GetAddressInfoRequest;
+@class GetAddressInfoResponse;
+@class GetAddressesBranchStateRequest;
+@class GetAddressesBranchStateResponse;
+@class GetAddressesInfosRequest;
+@class GetAddressesInfosResponse;
+@class GetAddressesTrunkStateRequest;
+@class GetAddressesTrunkStateResponse;
 @class GetConsensusParamsRequest;
 @class GetConsensusParamsResponse;
 @class GetContestedResourceIdentityVotesRequest;
@@ -34,6 +42,8 @@
 @class GetDataContractResponse;
 @class GetDataContractsRequest;
 @class GetDataContractsResponse;
+@class GetDocumentHistoryRequest;
+@class GetDocumentHistoryResponse;
 @class GetDocumentsRequest;
 @class GetDocumentsResponse;
 @class GetEpochsInfoRequest;
@@ -41,6 +51,8 @@
 @class GetEvonodesProposedEpochBlocksByIdsRequest;
 @class GetEvonodesProposedEpochBlocksByRangeRequest;
 @class GetEvonodesProposedEpochBlocksResponse;
+@class GetFinalizedEpochInfosRequest;
+@class GetFinalizedEpochInfosResponse;
 @class GetGroupActionSignersRequest;
 @class GetGroupActionSignersResponse;
 @class GetGroupActionsRequest;
@@ -61,6 +73,8 @@
 @class GetIdentityBalanceAndRevisionResponse;
 @class GetIdentityBalanceRequest;
 @class GetIdentityBalanceResponse;
+@class GetIdentityByNonUniquePublicKeyHashRequest;
+@class GetIdentityByNonUniquePublicKeyHashResponse;
 @class GetIdentityByPublicKeyHashRequest;
 @class GetIdentityByPublicKeyHashResponse;
 @class GetIdentityContractNonceRequest;
@@ -75,6 +89,8 @@
 @class GetIdentityTokenBalancesResponse;
 @class GetIdentityTokenInfosRequest;
 @class GetIdentityTokenInfosResponse;
+@class GetMostRecentShieldedAnchorRequest;
+@class GetMostRecentShieldedAnchorResponse;
 @class GetPathElementsRequest;
 @class GetPathElementsResponse;
 @class GetPrefundedSpecializedBalanceRequest;
@@ -83,10 +99,28 @@
 @class GetProtocolVersionUpgradeStateResponse;
 @class GetProtocolVersionUpgradeVoteStatusRequest;
 @class GetProtocolVersionUpgradeVoteStatusResponse;
+@class GetRecentAddressBalanceChangesRequest;
+@class GetRecentAddressBalanceChangesResponse;
+@class GetRecentCompactedAddressBalanceChangesRequest;
+@class GetRecentCompactedAddressBalanceChangesResponse;
+@class GetShieldedAnchorsRequest;
+@class GetShieldedAnchorsResponse;
+@class GetShieldedEncryptedNotesRequest;
+@class GetShieldedEncryptedNotesResponse;
+@class GetShieldedNotesCountRequest;
+@class GetShieldedNotesCountResponse;
+@class GetShieldedNullifiersRequest;
+@class GetShieldedNullifiersResponse;
+@class GetShieldedPoolStateRequest;
+@class GetShieldedPoolStateResponse;
 @class GetStatusRequest;
 @class GetStatusResponse;
+@class GetTokenContractInfoRequest;
+@class GetTokenContractInfoResponse;
 @class GetTokenDirectPurchasePricesRequest;
 @class GetTokenDirectPurchasePricesResponse;
+@class GetTokenPerpetualDistributionLastClaimRequest;
+@class GetTokenPerpetualDistributionLastClaimResponse;
 @class GetTokenPreProgrammedDistributionsRequest;
 @class GetTokenPreProgrammedDistributionsResponse;
 @class GetTokenStatusesRequest;
@@ -131,6 +165,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark broadcastStateTransition(BroadcastStateTransitionRequest) returns (BroadcastStateTransitionResponse)
 
+/**
+ * @sdk-ignore: Write-only endpoint, not a query
+ */
 - (GRPCUnaryProtoCall *)broadcastStateTransitionWithMessage:(BroadcastStateTransitionRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
 
 #pragma mark getIdentity(GetIdentityRequest) returns (GetIdentityResponse)
@@ -185,6 +222,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (GRPCUnaryProtoCall *)getDataContractsWithMessage:(GetDataContractsRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
 
+#pragma mark getDocumentHistory(GetDocumentHistoryRequest) returns (GetDocumentHistoryResponse)
+
+- (GRPCUnaryProtoCall *)getDocumentHistoryWithMessage:(GetDocumentHistoryRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
+
 #pragma mark getDocuments(GetDocumentsRequest) returns (GetDocumentsResponse)
 
 - (GRPCUnaryProtoCall *)getDocumentsWithMessage:(GetDocumentsRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
@@ -193,12 +234,19 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (GRPCUnaryProtoCall *)getIdentityByPublicKeyHashWithMessage:(GetIdentityByPublicKeyHashRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
 
+#pragma mark getIdentityByNonUniquePublicKeyHash(GetIdentityByNonUniquePublicKeyHashRequest) returns (GetIdentityByNonUniquePublicKeyHashResponse)
+
+- (GRPCUnaryProtoCall *)getIdentityByNonUniquePublicKeyHashWithMessage:(GetIdentityByNonUniquePublicKeyHashRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
+
 #pragma mark waitForStateTransitionResult(WaitForStateTransitionResultRequest) returns (WaitForStateTransitionResultResponse)
 
 - (GRPCUnaryProtoCall *)waitForStateTransitionResultWithMessage:(WaitForStateTransitionResultRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
 
 #pragma mark getConsensusParams(GetConsensusParamsRequest) returns (GetConsensusParamsResponse)
 
+/**
+ * @sdk-ignore: Consensus params fetched via Tenderdash RPC
+ */
 - (GRPCUnaryProtoCall *)getConsensusParamsWithMessage:(GetConsensusParamsRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
 
 #pragma mark getProtocolVersionUpgradeState(GetProtocolVersionUpgradeStateRequest) returns (GetProtocolVersionUpgradeStateResponse)
@@ -212,6 +260,10 @@ NS_ASSUME_NONNULL_BEGIN
 #pragma mark getEpochsInfo(GetEpochsInfoRequest) returns (GetEpochsInfoResponse)
 
 - (GRPCUnaryProtoCall *)getEpochsInfoWithMessage:(GetEpochsInfoRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
+
+#pragma mark getFinalizedEpochInfos(GetFinalizedEpochInfosRequest) returns (GetFinalizedEpochInfosResponse)
+
+- (GRPCUnaryProtoCall *)getFinalizedEpochInfosWithMessage:(GetFinalizedEpochInfosRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
 
 #pragma mark getContestedResources(GetContestedResourcesRequest) returns (GetContestedResourcesResponse)
 
@@ -292,9 +344,17 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (GRPCUnaryProtoCall *)getTokenDirectPurchasePricesWithMessage:(GetTokenDirectPurchasePricesRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
 
+#pragma mark getTokenContractInfo(GetTokenContractInfoRequest) returns (GetTokenContractInfoResponse)
+
+- (GRPCUnaryProtoCall *)getTokenContractInfoWithMessage:(GetTokenContractInfoRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
+
 #pragma mark getTokenPreProgrammedDistributions(GetTokenPreProgrammedDistributionsRequest) returns (GetTokenPreProgrammedDistributionsResponse)
 
 - (GRPCUnaryProtoCall *)getTokenPreProgrammedDistributionsWithMessage:(GetTokenPreProgrammedDistributionsRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
+
+#pragma mark getTokenPerpetualDistributionLastClaim(GetTokenPerpetualDistributionLastClaimRequest) returns (GetTokenPerpetualDistributionLastClaimResponse)
+
+- (GRPCUnaryProtoCall *)getTokenPerpetualDistributionLastClaimWithMessage:(GetTokenPerpetualDistributionLastClaimRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
 
 #pragma mark getTokenTotalSupply(GetTokenTotalSupplyRequest) returns (GetTokenTotalSupplyResponse)
 
@@ -316,6 +376,54 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (GRPCUnaryProtoCall *)getGroupActionSignersWithMessage:(GetGroupActionSignersRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
 
+#pragma mark getAddressInfo(GetAddressInfoRequest) returns (GetAddressInfoResponse)
+
+- (GRPCUnaryProtoCall *)getAddressInfoWithMessage:(GetAddressInfoRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
+
+#pragma mark getAddressesInfos(GetAddressesInfosRequest) returns (GetAddressesInfosResponse)
+
+- (GRPCUnaryProtoCall *)getAddressesInfosWithMessage:(GetAddressesInfosRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
+
+#pragma mark getAddressesTrunkState(GetAddressesTrunkStateRequest) returns (GetAddressesTrunkStateResponse)
+
+- (GRPCUnaryProtoCall *)getAddressesTrunkStateWithMessage:(GetAddressesTrunkStateRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
+
+#pragma mark getAddressesBranchState(GetAddressesBranchStateRequest) returns (GetAddressesBranchStateResponse)
+
+- (GRPCUnaryProtoCall *)getAddressesBranchStateWithMessage:(GetAddressesBranchStateRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
+
+#pragma mark getRecentAddressBalanceChanges(GetRecentAddressBalanceChangesRequest) returns (GetRecentAddressBalanceChangesResponse)
+
+- (GRPCUnaryProtoCall *)getRecentAddressBalanceChangesWithMessage:(GetRecentAddressBalanceChangesRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
+
+#pragma mark getRecentCompactedAddressBalanceChanges(GetRecentCompactedAddressBalanceChangesRequest) returns (GetRecentCompactedAddressBalanceChangesResponse)
+
+- (GRPCUnaryProtoCall *)getRecentCompactedAddressBalanceChangesWithMessage:(GetRecentCompactedAddressBalanceChangesRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
+
+#pragma mark getShieldedEncryptedNotes(GetShieldedEncryptedNotesRequest) returns (GetShieldedEncryptedNotesResponse)
+
+- (GRPCUnaryProtoCall *)getShieldedEncryptedNotesWithMessage:(GetShieldedEncryptedNotesRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
+
+#pragma mark getShieldedAnchors(GetShieldedAnchorsRequest) returns (GetShieldedAnchorsResponse)
+
+- (GRPCUnaryProtoCall *)getShieldedAnchorsWithMessage:(GetShieldedAnchorsRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
+
+#pragma mark getMostRecentShieldedAnchor(GetMostRecentShieldedAnchorRequest) returns (GetMostRecentShieldedAnchorResponse)
+
+- (GRPCUnaryProtoCall *)getMostRecentShieldedAnchorWithMessage:(GetMostRecentShieldedAnchorRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
+
+#pragma mark getShieldedPoolState(GetShieldedPoolStateRequest) returns (GetShieldedPoolStateResponse)
+
+- (GRPCUnaryProtoCall *)getShieldedPoolStateWithMessage:(GetShieldedPoolStateRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
+
+#pragma mark getShieldedNotesCount(GetShieldedNotesCountRequest) returns (GetShieldedNotesCountResponse)
+
+- (GRPCUnaryProtoCall *)getShieldedNotesCountWithMessage:(GetShieldedNotesCountRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
+
+#pragma mark getShieldedNullifiers(GetShieldedNullifiersRequest) returns (GetShieldedNullifiersResponse)
+
+- (GRPCUnaryProtoCall *)getShieldedNullifiersWithMessage:(GetShieldedNullifiersRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
+
 @end
 
 /**
@@ -326,8 +434,18 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark broadcastStateTransition(BroadcastStateTransitionRequest) returns (BroadcastStateTransitionResponse)
 
+/**
+ * @sdk-ignore: Write-only endpoint, not a query
+ *
+ * This method belongs to a set of APIs that have been deprecated. Using the v2 API is recommended.
+ */
 - (void)broadcastStateTransitionWithRequest:(BroadcastStateTransitionRequest *)request handler:(void(^)(BroadcastStateTransitionResponse *_Nullable response, NSError *_Nullable error))handler;
 
+/**
+ * @sdk-ignore: Write-only endpoint, not a query
+ *
+ * This method belongs to a set of APIs that have been deprecated. Using the v2 API is recommended.
+ */
 - (GRPCProtoCall *)RPCTobroadcastStateTransitionWithRequest:(BroadcastStateTransitionRequest *)request handler:(void(^)(BroadcastStateTransitionResponse *_Nullable response, NSError *_Nullable error))handler;
 
 
@@ -422,6 +540,13 @@ NS_ASSUME_NONNULL_BEGIN
 - (GRPCProtoCall *)RPCTogetDataContractsWithRequest:(GetDataContractsRequest *)request handler:(void(^)(GetDataContractsResponse *_Nullable response, NSError *_Nullable error))handler;
 
 
+#pragma mark getDocumentHistory(GetDocumentHistoryRequest) returns (GetDocumentHistoryResponse)
+
+- (void)getDocumentHistoryWithRequest:(GetDocumentHistoryRequest *)request handler:(void(^)(GetDocumentHistoryResponse *_Nullable response, NSError *_Nullable error))handler;
+
+- (GRPCProtoCall *)RPCTogetDocumentHistoryWithRequest:(GetDocumentHistoryRequest *)request handler:(void(^)(GetDocumentHistoryResponse *_Nullable response, NSError *_Nullable error))handler;
+
+
 #pragma mark getDocuments(GetDocumentsRequest) returns (GetDocumentsResponse)
 
 - (void)getDocumentsWithRequest:(GetDocumentsRequest *)request handler:(void(^)(GetDocumentsResponse *_Nullable response, NSError *_Nullable error))handler;
@@ -436,6 +561,13 @@ NS_ASSUME_NONNULL_BEGIN
 - (GRPCProtoCall *)RPCTogetIdentityByPublicKeyHashWithRequest:(GetIdentityByPublicKeyHashRequest *)request handler:(void(^)(GetIdentityByPublicKeyHashResponse *_Nullable response, NSError *_Nullable error))handler;
 
 
+#pragma mark getIdentityByNonUniquePublicKeyHash(GetIdentityByNonUniquePublicKeyHashRequest) returns (GetIdentityByNonUniquePublicKeyHashResponse)
+
+- (void)getIdentityByNonUniquePublicKeyHashWithRequest:(GetIdentityByNonUniquePublicKeyHashRequest *)request handler:(void(^)(GetIdentityByNonUniquePublicKeyHashResponse *_Nullable response, NSError *_Nullable error))handler;
+
+- (GRPCProtoCall *)RPCTogetIdentityByNonUniquePublicKeyHashWithRequest:(GetIdentityByNonUniquePublicKeyHashRequest *)request handler:(void(^)(GetIdentityByNonUniquePublicKeyHashResponse *_Nullable response, NSError *_Nullable error))handler;
+
+
 #pragma mark waitForStateTransitionResult(WaitForStateTransitionResultRequest) returns (WaitForStateTransitionResultResponse)
 
 - (void)waitForStateTransitionResultWithRequest:(WaitForStateTransitionResultRequest *)request handler:(void(^)(WaitForStateTransitionResultResponse *_Nullable response, NSError *_Nullable error))handler;
@@ -445,8 +577,18 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark getConsensusParams(GetConsensusParamsRequest) returns (GetConsensusParamsResponse)
 
+/**
+ * @sdk-ignore: Consensus params fetched via Tenderdash RPC
+ *
+ * This method belongs to a set of APIs that have been deprecated. Using the v2 API is recommended.
+ */
 - (void)getConsensusParamsWithRequest:(GetConsensusParamsRequest *)request handler:(void(^)(GetConsensusParamsResponse *_Nullable response, NSError *_Nullable error))handler;
 
+/**
+ * @sdk-ignore: Consensus params fetched via Tenderdash RPC
+ *
+ * This method belongs to a set of APIs that have been deprecated. Using the v2 API is recommended.
+ */
 - (GRPCProtoCall *)RPCTogetConsensusParamsWithRequest:(GetConsensusParamsRequest *)request handler:(void(^)(GetConsensusParamsResponse *_Nullable response, NSError *_Nullable error))handler;
 
 
@@ -469,6 +611,13 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)getEpochsInfoWithRequest:(GetEpochsInfoRequest *)request handler:(void(^)(GetEpochsInfoResponse *_Nullable response, NSError *_Nullable error))handler;
 
 - (GRPCProtoCall *)RPCTogetEpochsInfoWithRequest:(GetEpochsInfoRequest *)request handler:(void(^)(GetEpochsInfoResponse *_Nullable response, NSError *_Nullable error))handler;
+
+
+#pragma mark getFinalizedEpochInfos(GetFinalizedEpochInfosRequest) returns (GetFinalizedEpochInfosResponse)
+
+- (void)getFinalizedEpochInfosWithRequest:(GetFinalizedEpochInfosRequest *)request handler:(void(^)(GetFinalizedEpochInfosResponse *_Nullable response, NSError *_Nullable error))handler;
+
+- (GRPCProtoCall *)RPCTogetFinalizedEpochInfosWithRequest:(GetFinalizedEpochInfosRequest *)request handler:(void(^)(GetFinalizedEpochInfosResponse *_Nullable response, NSError *_Nullable error))handler;
 
 
 #pragma mark getContestedResources(GetContestedResourcesRequest) returns (GetContestedResourcesResponse)
@@ -633,11 +782,25 @@ NS_ASSUME_NONNULL_BEGIN
 - (GRPCProtoCall *)RPCTogetTokenDirectPurchasePricesWithRequest:(GetTokenDirectPurchasePricesRequest *)request handler:(void(^)(GetTokenDirectPurchasePricesResponse *_Nullable response, NSError *_Nullable error))handler;
 
 
+#pragma mark getTokenContractInfo(GetTokenContractInfoRequest) returns (GetTokenContractInfoResponse)
+
+- (void)getTokenContractInfoWithRequest:(GetTokenContractInfoRequest *)request handler:(void(^)(GetTokenContractInfoResponse *_Nullable response, NSError *_Nullable error))handler;
+
+- (GRPCProtoCall *)RPCTogetTokenContractInfoWithRequest:(GetTokenContractInfoRequest *)request handler:(void(^)(GetTokenContractInfoResponse *_Nullable response, NSError *_Nullable error))handler;
+
+
 #pragma mark getTokenPreProgrammedDistributions(GetTokenPreProgrammedDistributionsRequest) returns (GetTokenPreProgrammedDistributionsResponse)
 
 - (void)getTokenPreProgrammedDistributionsWithRequest:(GetTokenPreProgrammedDistributionsRequest *)request handler:(void(^)(GetTokenPreProgrammedDistributionsResponse *_Nullable response, NSError *_Nullable error))handler;
 
 - (GRPCProtoCall *)RPCTogetTokenPreProgrammedDistributionsWithRequest:(GetTokenPreProgrammedDistributionsRequest *)request handler:(void(^)(GetTokenPreProgrammedDistributionsResponse *_Nullable response, NSError *_Nullable error))handler;
+
+
+#pragma mark getTokenPerpetualDistributionLastClaim(GetTokenPerpetualDistributionLastClaimRequest) returns (GetTokenPerpetualDistributionLastClaimResponse)
+
+- (void)getTokenPerpetualDistributionLastClaimWithRequest:(GetTokenPerpetualDistributionLastClaimRequest *)request handler:(void(^)(GetTokenPerpetualDistributionLastClaimResponse *_Nullable response, NSError *_Nullable error))handler;
+
+- (GRPCProtoCall *)RPCTogetTokenPerpetualDistributionLastClaimWithRequest:(GetTokenPerpetualDistributionLastClaimRequest *)request handler:(void(^)(GetTokenPerpetualDistributionLastClaimResponse *_Nullable response, NSError *_Nullable error))handler;
 
 
 #pragma mark getTokenTotalSupply(GetTokenTotalSupplyRequest) returns (GetTokenTotalSupplyResponse)
@@ -673,6 +836,90 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)getGroupActionSignersWithRequest:(GetGroupActionSignersRequest *)request handler:(void(^)(GetGroupActionSignersResponse *_Nullable response, NSError *_Nullable error))handler;
 
 - (GRPCProtoCall *)RPCTogetGroupActionSignersWithRequest:(GetGroupActionSignersRequest *)request handler:(void(^)(GetGroupActionSignersResponse *_Nullable response, NSError *_Nullable error))handler;
+
+
+#pragma mark getAddressInfo(GetAddressInfoRequest) returns (GetAddressInfoResponse)
+
+- (void)getAddressInfoWithRequest:(GetAddressInfoRequest *)request handler:(void(^)(GetAddressInfoResponse *_Nullable response, NSError *_Nullable error))handler;
+
+- (GRPCProtoCall *)RPCTogetAddressInfoWithRequest:(GetAddressInfoRequest *)request handler:(void(^)(GetAddressInfoResponse *_Nullable response, NSError *_Nullable error))handler;
+
+
+#pragma mark getAddressesInfos(GetAddressesInfosRequest) returns (GetAddressesInfosResponse)
+
+- (void)getAddressesInfosWithRequest:(GetAddressesInfosRequest *)request handler:(void(^)(GetAddressesInfosResponse *_Nullable response, NSError *_Nullable error))handler;
+
+- (GRPCProtoCall *)RPCTogetAddressesInfosWithRequest:(GetAddressesInfosRequest *)request handler:(void(^)(GetAddressesInfosResponse *_Nullable response, NSError *_Nullable error))handler;
+
+
+#pragma mark getAddressesTrunkState(GetAddressesTrunkStateRequest) returns (GetAddressesTrunkStateResponse)
+
+- (void)getAddressesTrunkStateWithRequest:(GetAddressesTrunkStateRequest *)request handler:(void(^)(GetAddressesTrunkStateResponse *_Nullable response, NSError *_Nullable error))handler;
+
+- (GRPCProtoCall *)RPCTogetAddressesTrunkStateWithRequest:(GetAddressesTrunkStateRequest *)request handler:(void(^)(GetAddressesTrunkStateResponse *_Nullable response, NSError *_Nullable error))handler;
+
+
+#pragma mark getAddressesBranchState(GetAddressesBranchStateRequest) returns (GetAddressesBranchStateResponse)
+
+- (void)getAddressesBranchStateWithRequest:(GetAddressesBranchStateRequest *)request handler:(void(^)(GetAddressesBranchStateResponse *_Nullable response, NSError *_Nullable error))handler;
+
+- (GRPCProtoCall *)RPCTogetAddressesBranchStateWithRequest:(GetAddressesBranchStateRequest *)request handler:(void(^)(GetAddressesBranchStateResponse *_Nullable response, NSError *_Nullable error))handler;
+
+
+#pragma mark getRecentAddressBalanceChanges(GetRecentAddressBalanceChangesRequest) returns (GetRecentAddressBalanceChangesResponse)
+
+- (void)getRecentAddressBalanceChangesWithRequest:(GetRecentAddressBalanceChangesRequest *)request handler:(void(^)(GetRecentAddressBalanceChangesResponse *_Nullable response, NSError *_Nullable error))handler;
+
+- (GRPCProtoCall *)RPCTogetRecentAddressBalanceChangesWithRequest:(GetRecentAddressBalanceChangesRequest *)request handler:(void(^)(GetRecentAddressBalanceChangesResponse *_Nullable response, NSError *_Nullable error))handler;
+
+
+#pragma mark getRecentCompactedAddressBalanceChanges(GetRecentCompactedAddressBalanceChangesRequest) returns (GetRecentCompactedAddressBalanceChangesResponse)
+
+- (void)getRecentCompactedAddressBalanceChangesWithRequest:(GetRecentCompactedAddressBalanceChangesRequest *)request handler:(void(^)(GetRecentCompactedAddressBalanceChangesResponse *_Nullable response, NSError *_Nullable error))handler;
+
+- (GRPCProtoCall *)RPCTogetRecentCompactedAddressBalanceChangesWithRequest:(GetRecentCompactedAddressBalanceChangesRequest *)request handler:(void(^)(GetRecentCompactedAddressBalanceChangesResponse *_Nullable response, NSError *_Nullable error))handler;
+
+
+#pragma mark getShieldedEncryptedNotes(GetShieldedEncryptedNotesRequest) returns (GetShieldedEncryptedNotesResponse)
+
+- (void)getShieldedEncryptedNotesWithRequest:(GetShieldedEncryptedNotesRequest *)request handler:(void(^)(GetShieldedEncryptedNotesResponse *_Nullable response, NSError *_Nullable error))handler;
+
+- (GRPCProtoCall *)RPCTogetShieldedEncryptedNotesWithRequest:(GetShieldedEncryptedNotesRequest *)request handler:(void(^)(GetShieldedEncryptedNotesResponse *_Nullable response, NSError *_Nullable error))handler;
+
+
+#pragma mark getShieldedAnchors(GetShieldedAnchorsRequest) returns (GetShieldedAnchorsResponse)
+
+- (void)getShieldedAnchorsWithRequest:(GetShieldedAnchorsRequest *)request handler:(void(^)(GetShieldedAnchorsResponse *_Nullable response, NSError *_Nullable error))handler;
+
+- (GRPCProtoCall *)RPCTogetShieldedAnchorsWithRequest:(GetShieldedAnchorsRequest *)request handler:(void(^)(GetShieldedAnchorsResponse *_Nullable response, NSError *_Nullable error))handler;
+
+
+#pragma mark getMostRecentShieldedAnchor(GetMostRecentShieldedAnchorRequest) returns (GetMostRecentShieldedAnchorResponse)
+
+- (void)getMostRecentShieldedAnchorWithRequest:(GetMostRecentShieldedAnchorRequest *)request handler:(void(^)(GetMostRecentShieldedAnchorResponse *_Nullable response, NSError *_Nullable error))handler;
+
+- (GRPCProtoCall *)RPCTogetMostRecentShieldedAnchorWithRequest:(GetMostRecentShieldedAnchorRequest *)request handler:(void(^)(GetMostRecentShieldedAnchorResponse *_Nullable response, NSError *_Nullable error))handler;
+
+
+#pragma mark getShieldedPoolState(GetShieldedPoolStateRequest) returns (GetShieldedPoolStateResponse)
+
+- (void)getShieldedPoolStateWithRequest:(GetShieldedPoolStateRequest *)request handler:(void(^)(GetShieldedPoolStateResponse *_Nullable response, NSError *_Nullable error))handler;
+
+- (GRPCProtoCall *)RPCTogetShieldedPoolStateWithRequest:(GetShieldedPoolStateRequest *)request handler:(void(^)(GetShieldedPoolStateResponse *_Nullable response, NSError *_Nullable error))handler;
+
+
+#pragma mark getShieldedNotesCount(GetShieldedNotesCountRequest) returns (GetShieldedNotesCountResponse)
+
+- (void)getShieldedNotesCountWithRequest:(GetShieldedNotesCountRequest *)request handler:(void(^)(GetShieldedNotesCountResponse *_Nullable response, NSError *_Nullable error))handler;
+
+- (GRPCProtoCall *)RPCTogetShieldedNotesCountWithRequest:(GetShieldedNotesCountRequest *)request handler:(void(^)(GetShieldedNotesCountResponse *_Nullable response, NSError *_Nullable error))handler;
+
+
+#pragma mark getShieldedNullifiers(GetShieldedNullifiersRequest) returns (GetShieldedNullifiersResponse)
+
+- (void)getShieldedNullifiersWithRequest:(GetShieldedNullifiersRequest *)request handler:(void(^)(GetShieldedNullifiersResponse *_Nullable response, NSError *_Nullable error))handler;
+
+- (GRPCProtoCall *)RPCTogetShieldedNullifiersWithRequest:(GetShieldedNullifiersRequest *)request handler:(void(^)(GetShieldedNullifiersResponse *_Nullable response, NSError *_Nullable error))handler;
 
 
 @end

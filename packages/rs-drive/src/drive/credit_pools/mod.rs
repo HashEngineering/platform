@@ -115,7 +115,7 @@ impl Drive {
                 &platform_version.drive.grove_version,
             )
             .unwrap()
-            .map_err(Error::GroveDB)?;
+            .map_err(Error::from)?;
 
         let storage_fee_pools = storage_fee_pools_result.to_elements();
 
@@ -260,7 +260,10 @@ mod tests {
             assert_eq!(batch.len(), TO_EPOCH_INDEX as usize);
 
             for (i, operation) in batch.into_iter().enumerate() {
-                assert_eq!(operation.key.get_key(), KEY_POOL_STORAGE_FEES);
+                assert_eq!(
+                    operation.key.expect("expected key").get_key(),
+                    KEY_POOL_STORAGE_FEES
+                );
 
                 assert_eq!(
                     operation.path.to_path(),

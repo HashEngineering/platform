@@ -14,6 +14,10 @@ pub struct TotalCreditsBalance {
     pub total_identity_balances: SignedCredits,
     /// all the credits in specialized balances
     pub total_specialized_balances: SignedCredits,
+    /// all the credits in addresses
+    pub total_in_addresses: SignedCredits,
+    /// all the credits inside shielded credit pools
+    pub total_in_shielded_balances: SignedCredits,
 }
 
 impl fmt::Display for TotalCreditsBalance {
@@ -32,8 +36,18 @@ impl fmt::Display for TotalCreditsBalance {
         )?;
         writeln!(
             f,
-            "    total_specialized_balances: {}",
+            "    total_specialized_balances: {},",
             self.total_specialized_balances
+        )?;
+        writeln!(
+            f,
+            "    total_addresses_balances: {},",
+            self.total_in_addresses
+        )?;
+        writeln!(
+            f,
+            "    total_in_shielded_balances: {}",
+            self.total_in_shielded_balances
         )?;
         write!(f, "}}")
     }
@@ -48,6 +62,8 @@ impl TotalCreditsBalance {
             total_in_pools,
             total_identity_balances,
             total_specialized_balances,
+            total_in_addresses,
+            total_in_shielded_balances,
         } = *self;
 
         if total_in_pools < 0 {
@@ -68,6 +84,18 @@ impl TotalCreditsBalance {
             ));
         }
 
+        if total_in_addresses < 0 {
+            return Err(ProtocolError::CriticalCorruptedCreditsCodeExecution(
+                "Credits of addresses are less than 0".to_string(),
+            ));
+        }
+
+        if total_in_shielded_balances < 0 {
+            return Err(ProtocolError::CriticalCorruptedCreditsCodeExecution(
+                "Credits inside shielded balances are less than 0".to_string(),
+            ));
+        }
+
         if total_credits_in_platform > MAX_CREDITS {
             return Err(ProtocolError::CriticalCorruptedCreditsCodeExecution(
                 "Total credits in platform more than max credits size".to_string(),
@@ -77,6 +105,8 @@ impl TotalCreditsBalance {
         let total_from_trees = (total_in_pools)
             .checked_add(total_identity_balances)
             .and_then(|partial_sum| partial_sum.checked_add(total_specialized_balances))
+            .and_then(|partial_sum| partial_sum.checked_add(total_in_addresses))
+            .and_then(|partial_sum| partial_sum.checked_add(total_in_shielded_balances))
             .ok_or(ProtocolError::CriticalCorruptedCreditsCodeExecution(
                 "Overflow of total credits".to_string(),
             ))?;
@@ -90,12 +120,16 @@ impl TotalCreditsBalance {
             total_in_pools,
             total_identity_balances,
             total_specialized_balances,
+            total_in_addresses,
+            total_in_shielded_balances,
             ..
         } = *self;
 
         let total_in_trees = total_in_pools
             .checked_add(total_identity_balances)
             .and_then(|partial_sum| partial_sum.checked_add(total_specialized_balances))
+            .and_then(|partial_sum| partial_sum.checked_add(total_in_addresses))
+            .and_then(|partial_sum| partial_sum.checked_add(total_in_shielded_balances))
             .ok_or(ProtocolError::CriticalCorruptedCreditsCodeExecution(
                 "Overflow of total credits".to_string(),
             ))?;

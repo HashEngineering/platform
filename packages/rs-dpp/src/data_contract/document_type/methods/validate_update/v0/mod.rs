@@ -1,6 +1,8 @@
 use crate::consensus::basic::data_contract::IncompatibleDocumentTypeSchemaError;
 use crate::consensus::state::data_contract::document_type_update_error::DocumentTypeUpdateError;
-use crate::data_contract::document_type::accessors::DocumentTypeV0Getters;
+use crate::data_contract::document_type::accessors::{
+    DocumentTypeV0Getters, DocumentTypeV2Getters,
+};
 use crate::data_contract::document_type::schema::validate_schema_compatibility;
 use crate::data_contract::document_type::DocumentTypeRef;
 use crate::data_contract::errors::DataContractError;
@@ -178,6 +180,73 @@ impl DocumentTypeRef<'_> {
             );
         }
 
+        if new_document_type.documents_countable() != self.documents_countable() {
+            return SimpleConsensusValidationResult::new_with_error(
+                DocumentTypeUpdateError::new(
+                    self.data_contract_id(),
+                    self.name(),
+                    format!(
+                        "document type can not change whether its documents are countable: changing from {} to {}",
+                        self.documents_countable(),
+                        new_document_type.documents_countable()
+                    ),
+                )
+                    .into(),
+            );
+        }
+
+        if new_document_type.range_countable() != self.range_countable() {
+            return SimpleConsensusValidationResult::new_with_error(
+                DocumentTypeUpdateError::new(
+                    self.data_contract_id(),
+                    self.name(),
+                    format!(
+                        "document type can not change whether it is range countable: changing from {} to {}",
+                        self.range_countable(),
+                        new_document_type.range_countable()
+                    ),
+                )
+                    .into(),
+            );
+        }
+
+        // Sum-tree immutability — parallels the count flags above.
+        // Two checks: (1) whether the doctype is summable at all (the
+        // presence/absence of `documents_summable`), and (2) the *name* of
+        // the summed property. Changing either invalidates every on-disk
+        // sum contribution because grovedb's sum trees aggregate `i64`
+        // per merk node — a renamed property would silently double-count
+        // or under-count depending on which document field gets read.
+        if new_document_type.documents_summable() != self.documents_summable() {
+            return SimpleConsensusValidationResult::new_with_error(
+                DocumentTypeUpdateError::new(
+                    self.data_contract_id(),
+                    self.name(),
+                    format!(
+                        "document type can not change whether or how its documents are summable: changing from {:?} to {:?}",
+                        self.documents_summable(),
+                        new_document_type.documents_summable()
+                    ),
+                )
+                    .into(),
+            );
+        }
+
+        if new_document_type.range_summable() != self.range_summable() {
+            return SimpleConsensusValidationResult::new_with_error(
+                DocumentTypeUpdateError::new(
+                    self.data_contract_id(),
+                    self.name(),
+                    format!(
+                        "document type can not change whether it is range summable: changing from {} to {}",
+                        self.range_summable(),
+                        new_document_type.range_summable()
+                    ),
+                )
+                    .into(),
+            );
+        }
+
         SimpleConsensusValidationResult::new()
     }
 
@@ -280,6 +349,8 @@ mod tests {
 
             let old_document_type = DocumentType::try_from_schema(
                 data_contract_id,
+                1,
+                config.version(),
                 document_type_name,
                 schema,
                 None,
@@ -308,6 +379,8 @@ mod tests {
 
             let new_document_type = DocumentType::try_from_schema(
                 data_contract_id,
+                1,
+                config.version(),
                 document_type_name,
                 schema,
                 None,
@@ -354,6 +427,8 @@ mod tests {
 
             let old_document_type = DocumentType::try_from_schema(
                 data_contract_id,
+                1,
+                config.version(),
                 document_type_name,
                 schema,
                 None,
@@ -382,6 +457,8 @@ mod tests {
 
             let new_document_type = DocumentType::try_from_schema(
                 data_contract_id,
+                1,
+                config.version(),
                 document_type_name,
                 schema,
                 None,
@@ -428,6 +505,8 @@ mod tests {
 
             let old_document_type = DocumentType::try_from_schema(
                 data_contract_id,
+                1,
+                config.version(),
                 document_type_name,
                 schema,
                 None,
@@ -456,6 +535,8 @@ mod tests {
 
             let new_document_type = DocumentType::try_from_schema(
                 data_contract_id,
+                1,
+                config.version(),
                 document_type_name,
                 schema,
                 None,
@@ -502,6 +583,8 @@ mod tests {
 
             let old_document_type = DocumentType::try_from_schema(
                 data_contract_id,
+                1,
+                config.version(),
                 document_type_name,
                 schema,
                 None,
@@ -530,6 +613,8 @@ mod tests {
 
             let new_document_type = DocumentType::try_from_schema(
                 data_contract_id,
+                1,
+                config.version(),
                 document_type_name,
                 schema,
                 None,
@@ -576,6 +661,8 @@ mod tests {
 
             let old_document_type = DocumentType::try_from_schema(
                 data_contract_id,
+                1,
+                config.version(),
                 document_type_name,
                 schema,
                 None,
@@ -604,6 +691,8 @@ mod tests {
 
             let new_document_type = DocumentType::try_from_schema(
                 data_contract_id,
+                1,
+                config.version(),
                 document_type_name,
                 schema,
                 None,
@@ -650,6 +739,8 @@ mod tests {
 
             let old_document_type = DocumentType::try_from_schema(
                 data_contract_id,
+                1,
+                config.version(),
                 document_type_name,
                 schema,
                 None,
@@ -678,6 +769,8 @@ mod tests {
 
             let new_document_type = DocumentType::try_from_schema(
                 data_contract_id,
+                1,
+                config.version(),
                 document_type_name,
                 schema,
                 None,
@@ -724,6 +817,8 @@ mod tests {
 
             let old_document_type = DocumentType::try_from_schema(
                 data_contract_id,
+                1,
+                config.version(),
                 document_type_name,
                 schema,
                 None,
@@ -749,6 +844,8 @@ mod tests {
 
             let new_document_type = DocumentType::try_from_schema(
                 data_contract_id,
+                1,
+                config.version(),
                 document_type_name,
                 schema,
                 None,
@@ -795,6 +892,8 @@ mod tests {
 
             let old_document_type = DocumentType::try_from_schema(
                 data_contract_id,
+                1,
+                config.version(),
                 document_type_name,
                 schema,
                 None,
@@ -820,6 +919,8 @@ mod tests {
 
             let new_document_type = DocumentType::try_from_schema(
                 data_contract_id,
+                1,
+                config.version(),
                 document_type_name,
                 schema,
                 None,
@@ -866,6 +967,8 @@ mod tests {
 
             let old_document_type = DocumentType::try_from_schema(
                 data_contract_id,
+                1,
+                config.version(),
                 document_type_name,
                 schema,
                 None,
@@ -891,6 +994,8 @@ mod tests {
 
             let new_document_type = DocumentType::try_from_schema(
                 data_contract_id,
+                1,
+                config.version(),
                 document_type_name,
                 schema,
                 None,
@@ -911,6 +1016,168 @@ mod tests {
                 [ConsensusError::StateError(
                     StateError::DocumentTypeUpdateError(e)
                 )] if e.additional_message() == "document type can not change the security level requirement for its updates: changing from MASTER to CRITICAL"
+            );
+        }
+
+        #[test]
+        fn should_return_invalid_result_when_documents_countable_is_changed() {
+            let platform_version = PlatformVersion::latest();
+            let data_contract_id = Identifier::random();
+            let document_type_name = "test";
+
+            let schema = platform_value!({
+                "type": "object",
+                "properties": {
+                    "test": {
+                        "type": "string",
+                        "position": 0,
+                    }
+                },
+                "documentsCountable": true,
+                "additionalProperties": false,
+            });
+
+            let config = DataContractConfig::default_for_version(platform_version)
+                .expect("should create a default config");
+
+            let old_document_type = DocumentType::try_from_schema(
+                data_contract_id,
+                1,
+                config.version(),
+                document_type_name,
+                schema,
+                None,
+                &BTreeMap::new(),
+                &config,
+                false,
+                &mut Vec::new(),
+                platform_version,
+            )
+            .expect("failed to create old document type");
+
+            let schema = platform_value!({
+                "type": "object",
+                "properties": {
+                    "test": {
+                        "type": "string",
+                        "position": 0,
+                    }
+                },
+                "documentsCountable": false,
+                "additionalProperties": false,
+            });
+
+            let config = DataContractConfig::default_for_version(platform_version)
+                .expect("should create a default config");
+
+            let new_document_type = DocumentType::try_from_schema(
+                data_contract_id,
+                1,
+                config.version(),
+                document_type_name,
+                schema,
+                None,
+                &BTreeMap::new(),
+                &config,
+                false,
+                &mut Vec::new(),
+                platform_version,
+            )
+            .expect("failed to create new document type");
+
+            let result = old_document_type
+                .as_ref()
+                .validate_config(new_document_type.as_ref());
+
+            assert_matches!(
+                result.errors.as_slice(),
+                [ConsensusError::StateError(
+                    StateError::DocumentTypeUpdateError(e)
+                )] if e.additional_message() == "document type can not change whether its documents are countable: changing from true to false"
+            );
+        }
+
+        #[test]
+        fn should_return_invalid_result_when_range_countable_is_changed() {
+            // documents_countable must remain equal across old/new so that
+            // validate_config reaches the range_countable check below it.
+            // Setting documentsCountable: true on both keeps the
+            // documents_countable() getter true regardless of range_countable.
+            let platform_version = PlatformVersion::latest();
+            let data_contract_id = Identifier::random();
+            let document_type_name = "test";
+
+            let schema = platform_value!({
+                "type": "object",
+                "properties": {
+                    "test": {
+                        "type": "string",
+                        "position": 0,
+                    }
+                },
+                "documentsCountable": true,
+                "rangeCountable": false,
+                "additionalProperties": false,
+            });
+
+            let config = DataContractConfig::default_for_version(platform_version)
+                .expect("should create a default config");
+
+            let old_document_type = DocumentType::try_from_schema(
+                data_contract_id,
+                1,
+                config.version(),
+                document_type_name,
+                schema,
+                None,
+                &BTreeMap::new(),
+                &config,
+                false,
+                &mut Vec::new(),
+                platform_version,
+            )
+            .expect("failed to create old document type");
+
+            let schema = platform_value!({
+                "type": "object",
+                "properties": {
+                    "test": {
+                        "type": "string",
+                        "position": 0,
+                    }
+                },
+                "documentsCountable": true,
+                "rangeCountable": true,
+                "additionalProperties": false,
+            });
+
+            let config = DataContractConfig::default_for_version(platform_version)
+                .expect("should create a default config");
+
+            let new_document_type = DocumentType::try_from_schema(
+                data_contract_id,
+                1,
+                config.version(),
+                document_type_name,
+                schema,
+                None,
+                &BTreeMap::new(),
+                &config,
+                false,
+                &mut Vec::new(),
+                platform_version,
+            )
+            .expect("failed to create new document type");
+
+            let result = old_document_type
+                .as_ref()
+                .validate_config(new_document_type.as_ref());
+
+            assert_matches!(
+                result.errors.as_slice(),
+                [ConsensusError::StateError(
+                    StateError::DocumentTypeUpdateError(e)
+                )] if e.additional_message() == "document type can not change whether it is range countable: changing from false to true"
             );
         }
     }
@@ -943,6 +1210,8 @@ mod tests {
 
             let old_document_type = DocumentType::try_from_schema(
                 data_contract_id,
+                1,
+                config.version(),
                 document_type_name,
                 schema.clone(),
                 None,
@@ -959,6 +1228,8 @@ mod tests {
 
             let new_document_type = DocumentType::try_from_schema(
                 data_contract_id,
+                1,
+                config.version(),
                 document_type_name,
                 schema,
                 None,
@@ -1001,6 +1272,8 @@ mod tests {
 
             let old_document_type = DocumentType::try_from_schema(
                 data_contract_id,
+                1,
+                config.version(),
                 document_type_name,
                 schema.clone(),
                 None,
@@ -1026,6 +1299,8 @@ mod tests {
 
             let new_document_type = DocumentType::try_from_schema(
                 data_contract_id,
+                1,
+                config.version(),
                 document_type_name,
                 schema,
                 None,

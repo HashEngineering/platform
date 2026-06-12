@@ -12,20 +12,20 @@ use crate::errors::consensus::basic::identity::{
     IdentityAssetLockTransactionIsNotFoundErrorWasm,
     IdentityAssetLockTransactionOutPointAlreadyExistsErrorWasm,
     IdentityAssetLockTransactionOutPointNotEnoughBalanceErrorWasm,
-    IdentityAssetLockTransactionOutputNotFoundErrorWasm, IdentityCreditTransferToSelfErrorWasm,
+    IdentityAssetLockTransactionOutputNotFoundErrorWasm,
+    IdentityAssetLockTransactionTooManyInputsErrorWasm, IdentityCreditTransferToSelfErrorWasm,
     IdentityInsufficientBalanceErrorWasm, InvalidAssetLockProofCoreChainHeightErrorWasm,
     InvalidAssetLockProofTransactionHeightErrorWasm,
     InvalidAssetLockTransactionOutputReturnSizeErrorWasm,
+    InvalidCreditWithdrawalTransitionCoreFeeErrorWasm,
+    InvalidCreditWithdrawalTransitionOutputScriptErrorWasm,
     InvalidIdentityAssetLockProofChainLockValidationErrorWasm,
     InvalidIdentityAssetLockTransactionErrorWasm,
     InvalidIdentityAssetLockTransactionOutputErrorWasm,
-    InvalidIdentityCreditTransferAmountErrorWasm,
-    InvalidIdentityCreditWithdrawalTransitionCoreFeeErrorWasm,
-    InvalidIdentityCreditWithdrawalTransitionOutputScriptErrorWasm,
-    InvalidIdentityKeySignatureErrorWasm, InvalidIdentityPublicKeyDataErrorWasm,
-    InvalidIdentityPublicKeySecurityLevelErrorWasm, InvalidInstantAssetLockProofErrorWasm,
-    InvalidInstantAssetLockProofSignatureErrorWasm, MissingMasterPublicKeyErrorWasm,
-    NotImplementedIdentityCreditWithdrawalTransitionPoolingErrorWasm,
+    InvalidIdentityCreditTransferAmountErrorWasm, InvalidIdentityKeySignatureErrorWasm,
+    InvalidIdentityPublicKeyDataErrorWasm, InvalidIdentityPublicKeySecurityLevelErrorWasm,
+    InvalidInstantAssetLockProofErrorWasm, InvalidInstantAssetLockProofSignatureErrorWasm,
+    MissingMasterPublicKeyErrorWasm, NotImplementedCreditWithdrawalTransitionPoolingErrorWasm,
 };
 
 use crate::errors::consensus::state::identity::{
@@ -39,17 +39,18 @@ use dpp::consensus::basic::BasicError::{
     IdentityAssetLockStateTransitionReplayError, IdentityAssetLockTransactionIsNotFoundError,
     IdentityAssetLockTransactionOutPointAlreadyConsumedError,
     IdentityAssetLockTransactionOutPointNotEnoughBalanceError,
-    IdentityAssetLockTransactionOutputNotFoundError, IncompatibleProtocolVersionError,
+    IdentityAssetLockTransactionOutputNotFoundError,
+    IdentityAssetLockTransactionTooManyInputsError, IncompatibleProtocolVersionError,
     IncompatibleRe2PatternError, InvalidAssetLockProofCoreChainHeightError,
     InvalidAssetLockProofTransactionHeightError, InvalidAssetLockTransactionOutputReturnSizeError,
+    InvalidCreditWithdrawalTransitionCoreFeeError,
+    InvalidCreditWithdrawalTransitionOutputScriptError,
     InvalidIdentityAssetLockProofChainLockValidationError,
     InvalidIdentityAssetLockTransactionError, InvalidIdentityAssetLockTransactionOutputError,
-    InvalidIdentityCreditTransferAmountError,
-    InvalidIdentityCreditWithdrawalTransitionCoreFeeError,
-    InvalidIdentityCreditWithdrawalTransitionOutputScriptError, InvalidIdentityPublicKeyDataError,
+    InvalidIdentityCreditTransferAmountError, InvalidIdentityPublicKeyDataError,
     InvalidIdentityPublicKeySecurityLevelError, InvalidInstantAssetLockProofError,
     InvalidInstantAssetLockProofSignatureError, MissingMasterPublicKeyError,
-    NotImplementedIdentityCreditWithdrawalTransitionPoolingError, ProtocolVersionParsingError,
+    NotImplementedCreditWithdrawalTransitionPoolingError, ProtocolVersionParsingError,
     UnsupportedProtocolVersionError, UnsupportedVersionError,
 };
 use dpp::consensus::basic::{BasicError, UnsupportedFeatureError};
@@ -66,7 +67,7 @@ use dpp::consensus::basic::document::{ContestedDocumentsTemporarilyNotAllowedErr
 use dpp::consensus::basic::group::GroupActionNotAllowedOnTransitionError;
 use dpp::consensus::basic::identity::{DataContractBoundsNotPresentError, DisablingKeyIdAlsoBeingAddedInSameTransitionError, InvalidIdentityCreditWithdrawalTransitionAmountError, InvalidIdentityUpdateTransitionDisableKeysError, InvalidIdentityUpdateTransitionEmptyError, InvalidKeyPurposeForContractBoundsError, TooManyMasterPublicKeyError, WithdrawalOutputScriptNotAllowedWhenSigningWithOwnerKeyError};
 use dpp::consensus::basic::overflow_error::OverflowError;
-use dpp::consensus::basic::token::{ChoosingTokenMintRecipientNotAllowedError, ContractHasNoTokensError, DestinationIdentityForTokenMintingNotSetError, InvalidActionIdError, InvalidTokenAmountError, InvalidTokenConfigUpdateNoChangeError, InvalidTokenIdError, InvalidTokenNoteTooBigError, InvalidTokenPositionError, MissingDefaultLocalizationError, TokenNoteOnlyAllowedWhenProposerError, TokenTransferToOurselfError, InvalidTokenDistributionTimeIntervalNotMinuteAlignedError, InvalidTokenDistributionTimeIntervalTooShortError, InvalidTokenDistributionBlockIntervalTooShortError};
+use dpp::consensus::basic::token::{ChoosingTokenMintRecipientNotAllowedError, ContractHasNoTokensError, DestinationIdentityForTokenMintingNotSetError, InvalidActionIdError, InvalidTokenAmountError, InvalidTokenConfigUpdateNoChangeError, InvalidTokenIdError, InvalidTokenNoteTooBigError, InvalidTokenPositionError, MissingDefaultLocalizationError, TokenNoteOnlyAllowedWhenProposerError, TokenPricingScheduleEmptyError, TokenTransferToOurselfError, InvalidTokenDistributionTimeIntervalNotMinuteAlignedError, InvalidTokenDistributionTimeIntervalTooShortError, InvalidTokenDistributionBlockIntervalTooShortError};
 use dpp::consensus::state::data_contract::data_contract_not_found_error::DataContractNotFoundError;
 use dpp::consensus::state::data_contract::data_contract_update_action_not_allowed_error::DataContractUpdateActionNotAllowedError;
 use dpp::consensus::state::data_contract::document_type_update_error::DocumentTypeUpdateError;
@@ -88,6 +89,13 @@ use dpp::consensus::state::identity::RecipientIdentityDoesNotExistError;
 use dpp::consensus::state::prefunded_specialized_balances::prefunded_specialized_balance_insufficient_error::PrefundedSpecializedBalanceInsufficientError;
 use dpp::consensus::state::prefunded_specialized_balances::prefunded_specialized_balance_not_found_error::PrefundedSpecializedBalanceNotFoundError;
 use dpp::consensus::state::token::{IdentityDoesNotHaveEnoughTokenBalanceError, IdentityTokenAccountNotFrozenError, IdentityTokenAccountFrozenError, TokenIsPausedError, IdentityTokenAccountAlreadyFrozenError, UnauthorizedTokenActionError, TokenSettingMaxSupplyToLessThanCurrentSupplyError, TokenMintPastMaxSupplyError, NewTokensDestinationIdentityDoesNotExistError, NewAuthorizedActionTakerIdentityDoesNotExistError, NewAuthorizedActionTakerGroupDoesNotExistError, NewAuthorizedActionTakerMainGroupNotSetError, InvalidGroupPositionError, TokenAlreadyPausedError, TokenNotPausedError, InvalidTokenClaimPropertyMismatch, InvalidTokenClaimNoCurrentRewards, InvalidTokenClaimWrongClaimant, TokenTransferRecipientIdentityNotExistError, PreProgrammedDistributionTimestampInPastError, IdentityHasNotAgreedToPayRequiredTokenAmountError, RequiredTokenPaymentInfoNotSetError, IdentityTryingToPayWithWrongTokenError, TokenDirectPurchaseUserPriceTooLow, TokenAmountUnderMinimumSaleAmount, TokenNotForDirectSale, InvalidTokenPositionStateError};
+use dpp::consensus::state::address_funds::{AddressDoesNotExistError, AddressInvalidNonceError, AddressNotEnoughFundsError, AddressesNotEnoughFundsError};
+use dpp::consensus::state::shielded::insufficient_pool_notes_error::InsufficientPoolNotesError;
+use dpp::consensus::state::shielded::insufficient_shielded_fee_error::InsufficientShieldedFeeError;
+use dpp::consensus::state::shielded::invalid_anchor_error::InvalidAnchorError;
+use dpp::consensus::state::shielded::invalid_shielded_proof_error::InvalidShieldedProofError;
+use dpp::consensus::state::shielded::nullifier_already_spent_error::NullifierAlreadySpentError;
+use dpp::consensus::basic::state_transition::{StateTransitionNotActiveError, TransitionOverMaxInputsError, TransitionOverMaxOutputsError, InputWitnessCountMismatchError, TransitionNoInputsError, TransitionNoOutputsError, FeeStrategyEmptyError, FeeStrategyDuplicateError, FeeStrategyIndexOutOfBoundsError, FeeStrategyTooManyStepsError, InputBelowMinimumError, OutputBelowMinimumError, InputOutputBalanceMismatchError, OutputsNotGreaterThanInputsError, WithdrawalBalanceMismatchError, InsufficientFundingAmountError, InputsNotLessThanOutputsError, OutputAddressAlsoInputError, InvalidRemainderOutputCountError, WithdrawalBelowMinAmountError, ShieldedNoActionsError, ShieldedTooManyActionsError, ShieldedEmptyProofError, ShieldedZeroAnchorError, ShieldedInvalidValueBalanceError, ShieldedEncryptedNoteSizeMismatchError, ShieldedImplicitFeeCapExceededError, ShieldedInvalidDenominationError};
 use dpp::consensus::state::voting::masternode_incorrect_voter_identity_id_error::MasternodeIncorrectVoterIdentityIdError;
 use dpp::consensus::state::voting::masternode_incorrect_voting_address_error::MasternodeIncorrectVotingAddressError;
 use dpp::consensus::state::voting::masternode_not_found_error::MasternodeNotFoundError;
@@ -115,7 +123,7 @@ use crate::errors::consensus::basic::state_transition::{
 };
 use crate::errors::consensus::signature::{
     BasicBLSErrorWasm, BasicECDSAErrorWasm, IdentityNotFoundErrorWasm,
-    SignatureShouldNotBePresentErrorWasm,
+    SignatureShouldNotBePresentErrorWasm, UncompressedPublicKeyNotAllowedErrorWasm,
 };
 use crate::errors::consensus::state::data_contract::data_trigger::{
     DataTriggerConditionErrorWasm, DataTriggerExecutionErrorWasm, DataTriggerInvalidResultErrorWasm,
@@ -430,6 +438,31 @@ pub fn from_state_error(state_error: &StateError) -> JsValue {
         StateError::InvalidTokenPositionStateError(e) => {
             generic_consensus_error!(InvalidTokenPositionStateError, e).into()
         }
+        StateError::AddressDoesNotExistError(e) => {
+            generic_consensus_error!(AddressDoesNotExistError, e).into()
+        }
+        StateError::AddressNotEnoughFundsError(e) => {
+            generic_consensus_error!(AddressNotEnoughFundsError, e).into()
+        }
+        StateError::AddressesNotEnoughFundsError(e) => {
+            generic_consensus_error!(AddressesNotEnoughFundsError, e).into()
+        }
+        StateError::AddressInvalidNonceError(e) => {
+            generic_consensus_error!(AddressInvalidNonceError, e).into()
+        }
+        StateError::InvalidAnchorError(e) => generic_consensus_error!(InvalidAnchorError, e).into(),
+        StateError::NullifierAlreadySpentError(e) => {
+            generic_consensus_error!(NullifierAlreadySpentError, e).into()
+        }
+        StateError::InvalidShieldedProofError(e) => {
+            generic_consensus_error!(InvalidShieldedProofError, e).into()
+        }
+        StateError::InsufficientPoolNotesError(e) => {
+            generic_consensus_error!(InsufficientPoolNotesError, e).into()
+        }
+        StateError::InsufficientShieldedFeeError(e) => {
+            generic_consensus_error!(InsufficientShieldedFeeError, e).into()
+        }
     }
 }
 
@@ -583,6 +616,9 @@ fn from_basic_error(basic_error: &BasicError) -> JsValue {
         InvalidIdentityAssetLockTransactionError(e) => {
             InvalidIdentityAssetLockTransactionErrorWasm::from(e).into()
         }
+        IdentityAssetLockTransactionTooManyInputsError(e) => {
+            IdentityAssetLockTransactionTooManyInputsErrorWasm::from(e).into()
+        }
         InvalidInstantAssetLockProofError(e) => {
             InvalidInstantAssetLockProofErrorWasm::from(e).into()
         }
@@ -607,14 +643,14 @@ fn from_basic_error(basic_error: &BasicError) -> JsValue {
         InvalidIdentityCreditTransferAmountError(e) => {
             InvalidIdentityCreditTransferAmountErrorWasm::from(e).into()
         }
-        InvalidIdentityCreditWithdrawalTransitionCoreFeeError(e) => {
-            InvalidIdentityCreditWithdrawalTransitionCoreFeeErrorWasm::from(e).into()
+        InvalidCreditWithdrawalTransitionCoreFeeError(e) => {
+            InvalidCreditWithdrawalTransitionCoreFeeErrorWasm::from(e).into()
         }
-        InvalidIdentityCreditWithdrawalTransitionOutputScriptError(e) => {
-            InvalidIdentityCreditWithdrawalTransitionOutputScriptErrorWasm::from(e).into()
+        InvalidCreditWithdrawalTransitionOutputScriptError(e) => {
+            InvalidCreditWithdrawalTransitionOutputScriptErrorWasm::from(e).into()
         }
-        NotImplementedIdentityCreditWithdrawalTransitionPoolingError(e) => {
-            NotImplementedIdentityCreditWithdrawalTransitionPoolingErrorWasm::from(e).into()
+        NotImplementedCreditWithdrawalTransitionPoolingError(e) => {
+            NotImplementedCreditWithdrawalTransitionPoolingErrorWasm::from(e).into()
         }
         IncompatibleRe2PatternError(err) => IncompatibleRe2PatternErrorWasm::from(err).into(),
         BasicError::VersionError(err) => generic_consensus_error!(VersionError, err).into(),
@@ -850,6 +886,93 @@ fn from_basic_error(basic_error: &BasicError) -> JsValue {
         BasicError::InvalidKeyPurposeForContractBoundsError(e) => {
             generic_consensus_error!(InvalidKeyPurposeForContractBoundsError, e).into()
         }
+        BasicError::StateTransitionNotActiveError(e) => {
+            generic_consensus_error!(StateTransitionNotActiveError, e).into()
+        }
+        BasicError::TransitionOverMaxInputsError(e) => {
+            generic_consensus_error!(TransitionOverMaxInputsError, e).into()
+        }
+        BasicError::TransitionOverMaxOutputsError(e) => {
+            generic_consensus_error!(TransitionOverMaxOutputsError, e).into()
+        }
+        BasicError::InputWitnessCountMismatchError(e) => {
+            generic_consensus_error!(InputWitnessCountMismatchError, e).into()
+        }
+        BasicError::TransitionNoInputsError(e) => {
+            generic_consensus_error!(TransitionNoInputsError, e).into()
+        }
+        BasicError::TransitionNoOutputsError(e) => {
+            generic_consensus_error!(TransitionNoOutputsError, e).into()
+        }
+        BasicError::FeeStrategyEmptyError(e) => {
+            generic_consensus_error!(FeeStrategyEmptyError, e).into()
+        }
+        BasicError::FeeStrategyDuplicateError(e) => {
+            generic_consensus_error!(FeeStrategyDuplicateError, e).into()
+        }
+        BasicError::FeeStrategyIndexOutOfBoundsError(e) => {
+            generic_consensus_error!(FeeStrategyIndexOutOfBoundsError, e).into()
+        }
+        BasicError::FeeStrategyTooManyStepsError(e) => {
+            generic_consensus_error!(FeeStrategyTooManyStepsError, e).into()
+        }
+        BasicError::InputBelowMinimumError(e) => {
+            generic_consensus_error!(InputBelowMinimumError, e).into()
+        }
+        BasicError::OutputBelowMinimumError(e) => {
+            generic_consensus_error!(OutputBelowMinimumError, e).into()
+        }
+        BasicError::InputOutputBalanceMismatchError(e) => {
+            generic_consensus_error!(InputOutputBalanceMismatchError, e).into()
+        }
+        BasicError::OutputsNotGreaterThanInputsError(e) => {
+            generic_consensus_error!(OutputsNotGreaterThanInputsError, e).into()
+        }
+        BasicError::WithdrawalBalanceMismatchError(e) => {
+            generic_consensus_error!(WithdrawalBalanceMismatchError, e).into()
+        }
+        BasicError::InsufficientFundingAmountError(e) => {
+            generic_consensus_error!(InsufficientFundingAmountError, e).into()
+        }
+        BasicError::InputsNotLessThanOutputsError(e) => {
+            generic_consensus_error!(InputsNotLessThanOutputsError, e).into()
+        }
+        BasicError::OutputAddressAlsoInputError(e) => {
+            generic_consensus_error!(OutputAddressAlsoInputError, e).into()
+        }
+        BasicError::InvalidRemainderOutputCountError(e) => {
+            generic_consensus_error!(InvalidRemainderOutputCountError, e).into()
+        }
+        BasicError::WithdrawalBelowMinAmountError(e) => {
+            generic_consensus_error!(WithdrawalBelowMinAmountError, e).into()
+        }
+        BasicError::ShieldedNoActionsError(e) => {
+            generic_consensus_error!(ShieldedNoActionsError, e).into()
+        }
+        BasicError::ShieldedTooManyActionsError(e) => {
+            generic_consensus_error!(ShieldedTooManyActionsError, e).into()
+        }
+        BasicError::ShieldedEmptyProofError(e) => {
+            generic_consensus_error!(ShieldedEmptyProofError, e).into()
+        }
+        BasicError::ShieldedZeroAnchorError(e) => {
+            generic_consensus_error!(ShieldedZeroAnchorError, e).into()
+        }
+        BasicError::ShieldedInvalidValueBalanceError(e) => {
+            generic_consensus_error!(ShieldedInvalidValueBalanceError, e).into()
+        }
+        BasicError::ShieldedEncryptedNoteSizeMismatchError(e) => {
+            generic_consensus_error!(ShieldedEncryptedNoteSizeMismatchError, e).into()
+        }
+        BasicError::ShieldedImplicitFeeCapExceededError(e) => {
+            generic_consensus_error!(ShieldedImplicitFeeCapExceededError, e).into()
+        }
+        BasicError::ShieldedInvalidDenominationError(e) => {
+            generic_consensus_error!(ShieldedInvalidDenominationError, e).into()
+        }
+        BasicError::TokenPricingScheduleEmptyError(e) => {
+            generic_consensus_error!(TokenPricingScheduleEmptyError, e).into()
+        }
     }
 }
 
@@ -882,6 +1005,9 @@ fn from_signature_error(signature_error: &SignatureError) -> JsValue {
         SignatureError::BasicBLSError(err) => BasicBLSErrorWasm::from(err).into(),
         SignatureError::InvalidSignaturePublicKeyPurposeError(err) => {
             InvalidSignaturePublicKeyPurposeErrorWasm::from(err).into()
+        }
+        SignatureError::UncompressedPublicKeyNotAllowedError(err) => {
+            UncompressedPublicKeyNotAllowedErrorWasm::from(err).into()
         }
     }
 }

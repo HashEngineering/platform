@@ -3,7 +3,7 @@ use crate::error::execution::ExecutionError;
 use crate::error::Error;
 use crate::execution::types::block_execution_context::v0::BlockExecutionContextV0Getters;
 use crate::platform_types::cleaned_abci_messages::finalized_block_cleaned_request::v0::FinalizeBlockCleanedRequest;
-use crate::platform_types::platform_state::v0::PlatformStateV0Methods;
+use crate::platform_types::platform_state::PlatformStateV0Methods;
 use crate::rpc::core::CoreRPCLike;
 use dpp::dashcore::Network;
 use std::sync::atomic::Ordering;
@@ -77,7 +77,7 @@ where
     // For the mainnet chain, we enable these fixes at the block when we consider the state is consistent.
     let config = &app.platform().config;
 
-    if app.platform().config.network == Network::Dash
+    if app.platform().config.network == Network::Mainnet
         && config.abci.chain_id == "evo1"
         && block_height < 33000
     {
@@ -96,5 +96,72 @@ where
         .committed_block_height_guard
         .store(block_height, Ordering::Relaxed);
 
+    // Create GroveDB checkpoint after the transaction is committed (so it captures committed state)
+    if block_finalization_outcome.checkpoint_needed {
+        app.platform().create_grovedb_checkpoint(platform_version)?;
+    }
+
     Ok(proto::ResponseFinalizeBlock { retain_height: 0 })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::abci::app::{FullAbciApplication, TransactionalApplication};
+    use crate::rpc::core::MockCoreRPCLike;
+    use crate::test::helpers::setup::TestPlatformBuilder;
+
+    #[test]
+    fn finalize_block_fails_when_no_transaction() {
+        let platform = TestPlatformBuilder::new()
+            .with_latest_protocol_version()
+            .build_with_mock_rpc();
+
+        let app = FullAbciApplication::<MockCoreRPCLike>::new(&platform.platform);
+
+        // No transaction started, no block execution context
+        let request = proto::RequestFinalizeBlock {
+            hash: vec![0u8; 32],
+            height: 1,
+            round: 0,
+            ..Default::default()
+        };
+
+        let result = finalize_block::<_, MockCoreRPCLike>(&app, request);
+        assert!(
+            matches!(
+                result,
+                Err(Error::Execution(ExecutionError::NotInTransaction(_)))
+            ),
+            "Expected NotInTransaction error, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn finalize_block_fails_when_no_block_execution_context() {
+        let platform = TestPlatformBuilder::new()
+            .with_latest_protocol_version()
+            .build_with_mock_rpc();
+
+        let app = FullAbciApplication::<MockCoreRPCLike>::new(&platform.platform);
+
+        // Start a transaction but do not set block execution context
+        app.start_transaction();
+
+        let request = proto::RequestFinalizeBlock {
+            hash: vec![0u8; 32],
+            height: 1,
+            round: 0,
+            ..Default::default()
+        };
+
+        let result = finalize_block::<_, MockCoreRPCLike>(&app, request);
+        assert!(
+            matches!(
+                result,
+                Err(Error::Execution(ExecutionError::CorruptedCodeExecution(_)))
+            ),
+            "Expected CorruptedCodeExecution error, got: {result:?}"
+        );
+    }
 }

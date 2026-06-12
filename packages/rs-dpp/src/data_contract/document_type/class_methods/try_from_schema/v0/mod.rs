@@ -37,7 +37,7 @@ use crate::data_contract::config::DataContractConfig;
 #[cfg(feature = "validation")]
 use crate::data_contract::document_type::class_methods::try_from_schema::{
     MAX_INDEXED_BYTE_ARRAY_PROPERTY_LENGTH, MAX_INDEXED_STRING_PROPERTY_LENGTH,
-    NOT_ALLOWED_SYSTEM_PROPERTIES, SYSTEM_PROPERTIES,
+    NOT_ALLOWED_SYSTEM_PROPERTIES,
 };
 use crate::data_contract::document_type::class_methods::{
     consensus_or_protocol_data_contract_error, consensus_or_protocol_value_error, try_from_schema,
@@ -51,7 +51,7 @@ use crate::data_contract::errors::DataContractError;
 use crate::data_contract::storage_requirements::keys_for_document_type::StorageKeyRequirements;
 use crate::identity::SecurityLevel;
 #[cfg(feature = "validation")]
-use crate::validation::meta_validators::DOCUMENT_META_SCHEMA_V0;
+use crate::validation::meta_validators::{DOCUMENT_META_SCHEMA_V0, DOCUMENT_META_SCHEMA_V1};
 use crate::validation::operations::ProtocolValidationOperation;
 use crate::version::PlatformVersion;
 use crate::ProtocolError;
@@ -63,12 +63,14 @@ impl DocumentTypeV0 {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn try_from_schema(
         data_contract_id: Identifier,
+        data_contract_system_version: u16,
+        contract_config_version: u16,
         name: &str,
         schema: Value,
         schema_defs: Option<&BTreeMap<String, Value>>,
         data_contact_config: &DataContractConfig,
         full_validation: bool, // we don't need to validate if loaded from state
-        validation_operations: &mut Vec<ProtocolValidationOperation>,
+        validation_operations: &mut impl Extend<ProtocolValidationOperation>,
         platform_version: &PlatformVersion,
     ) -> Result<Self, ProtocolError> {
         // Create a full root JSON Schema from shorten contract document type schema
@@ -82,9 +84,7 @@ impl DocumentTypeV0 {
         if full_validation {
             // TODO we are silently dropping this error when we shouldn't be
             // but returning this error causes tests to fail; investigate more.
-            ProtocolError::CorruptedCodeExecution(
-                "validation is not enabled but is being called on try_from_schema".to_string(),
-            );
+            "validation is not enabled but is being called on try_from_schema".to_string();
         }
 
         #[cfg(feature = "validation")]
@@ -112,18 +112,18 @@ impl DocumentTypeV0 {
 
                 let schema_size = result.into_data()?.size;
 
-                validation_operations.push(
+                validation_operations.extend(std::iter::once(
                     ProtocolValidationOperation::DocumentTypeSchemaValidationForSize(schema_size),
-                );
+                ));
 
                 return Err(ProtocolError::ConsensusError(Box::new(error)));
             }
 
             let schema_size = result.into_data()?.size;
 
-            validation_operations.push(
+            validation_operations.extend(std::iter::once(
                 ProtocolValidationOperation::DocumentTypeSchemaValidationForSize(schema_size),
-            );
+            ));
 
             // Make sure JSON Schema is compilable
             let root_json_schema = root_schema.try_to_validating_json().map_err(|e| {
@@ -132,8 +132,28 @@ impl DocumentTypeV0 {
                 )
             })?;
 
+            // Select the appropriate document meta-schema based on platform version
+            let meta_schema = match platform_version
+                .dpp
+                .contract_versions
+                .document_type_versions
+                .schema
+                .document_type_schema
+            {
+                0 => &*DOCUMENT_META_SCHEMA_V0,
+                1 => &*DOCUMENT_META_SCHEMA_V1,
+                version => {
+                    return Err(ProtocolError::UnknownVersionMismatch {
+                        method: "DocumentTypeV0::try_from_schema (document_type_schema)"
+                            .to_string(),
+                        known_versions: vec![0, 1],
+                        received: version,
+                    })
+                }
+            };
+
             // Validate against JSON Schema
-            DOCUMENT_META_SCHEMA_V0
+            meta_schema
                 .validate(&root_json_schema)
                 .map_err(|mut errs| ConsensusError::from(errs.next().unwrap()))?;
 
@@ -200,11 +220,11 @@ impl DocumentTypeV0 {
 
         #[cfg(feature = "validation")]
         if full_validation {
-            validation_operations.push(
+            validation_operations.extend(std::iter::once(
                 ProtocolValidationOperation::DocumentTypeSchemaPropertyValidation(
                     property_values.values().len() as u64,
                 ),
-            );
+            ));
 
             // We should validate that the positions are continuous
             for (pos, value) in property_values.values().enumerate() {
@@ -302,12 +322,12 @@ impl DocumentTypeV0 {
 
                         #[cfg(feature = "validation")]
                         if full_validation {
-                            validation_operations.push(
+                            validation_operations.extend(std::iter::once(
                                 ProtocolValidationOperation::DocumentTypeSchemaIndexValidation(
                                     index.properties.len() as u64,
                                     index.unique,
                                 ),
-                            );
+                            ));
 
                             // Unique indices produces significant load on the system during state validation
                             // so we need to limit their number to prevent of spikes and DoS attacks
@@ -426,7 +446,14 @@ impl DocumentTypeV0 {
                                 }
 
                                 // Indexed property must be defined in user schema if it's not a system one
-                                if !SYSTEM_PROPERTIES.contains(&index_property.name.as_str()) {
+                                if !DocumentType::system_properties_contains(
+                                    data_contract_system_version,
+                                    contract_config_version,
+                                    documents_transferable,
+                                    trade_mode,
+                                    index_property.name.as_str(),
+                                    platform_version,
+                                )? {
                                     let property_definition = flattened_document_properties
                                         .get(&index_property.name)
                                         .ok_or_else(|| {
@@ -598,6 +625,8 @@ mod tests {
 
             let _result = DocumentTypeV0::try_from_schema(
                 Identifier::new([1; 32]),
+                0,
+                config.version(),
                 "valid_name-a-b-123",
                 schema,
                 None,
@@ -629,6 +658,8 @@ mod tests {
 
             let result = DocumentTypeV0::try_from_schema(
                 Identifier::new([1; 32]),
+                0,
+                config.version(),
                 "",
                 schema,
                 None,
@@ -671,6 +702,8 @@ mod tests {
 
             let result = DocumentTypeV0::try_from_schema(
                 Identifier::new([1; 32]),
+                0,
+                config.version(),
                 &"a".repeat(65),
                 schema,
                 None,
@@ -713,6 +746,8 @@ mod tests {
 
             let result = DocumentTypeV0::try_from_schema(
                 Identifier::new([1; 32]),
+                0,
+                config.version(),
                 "invalid name",
                 schema.clone(),
                 None,
@@ -739,6 +774,8 @@ mod tests {
 
             let result = DocumentTypeV0::try_from_schema(
                 Identifier::new([1; 32]),
+                0,
+                config.version(),
                 "invalid&name",
                 schema,
                 None,
@@ -759,6 +796,463 @@ mod tests {
                     )
                 }
             );
+        }
+    }
+
+    mod error_paths {
+        use super::*;
+
+        fn default_config() -> DataContractConfig {
+            DataContractConfig::default_for_version(PlatformVersion::latest())
+                .expect("should create a default config")
+        }
+
+        // -------- MissingPositionsInDocumentTypePropertiesError --------
+        #[test]
+        fn non_continuous_positions_returns_missing_positions_error() {
+            let platform_version = PlatformVersion::latest();
+            // positions 0 and 2 — 1 is missing
+            let schema = platform_value!({
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string", "position": 0, "maxLength": 10_u32},
+                    "c": {"type": "string", "position": 2, "maxLength": 10_u32},
+                },
+                "additionalProperties": false,
+            });
+            let result = DocumentTypeV0::try_from_schema(
+                Identifier::new([1; 32]),
+                0,
+                default_config().version(),
+                "doc",
+                schema,
+                None,
+                &default_config(),
+                true,
+                &mut vec![],
+                platform_version,
+            );
+            assert_matches!(
+                result,
+                Err(ProtocolError::ConsensusError(boxed)) => {
+                    assert_matches!(
+                        boxed.as_ref(),
+                        ConsensusError::BasicError(
+                            BasicError::MissingPositionsInDocumentTypePropertiesError(_)
+                        )
+                    )
+                }
+            );
+        }
+
+        // -------- DuplicateIndexNameError --------
+        #[test]
+        fn duplicate_index_name_returns_error() {
+            let platform_version = PlatformVersion::latest();
+            let schema = platform_value!({
+                "type": "object",
+                "properties": {
+                    "field_a": {"type": "string", "position": 0, "maxLength": 60_u32},
+                    "field_b": {"type": "string", "position": 1, "maxLength": 60_u32},
+                },
+                "indices": [
+                    {
+                        "name": "dup",
+                        "properties": [{"field_a": "asc"}],
+                    },
+                    {
+                        "name": "dup",
+                        "properties": [{"field_b": "asc"}],
+                    },
+                ],
+                "additionalProperties": false,
+            });
+
+            let result = DocumentTypeV0::try_from_schema(
+                Identifier::new([1; 32]),
+                0,
+                default_config().version(),
+                "doc",
+                schema,
+                None,
+                &default_config(),
+                true,
+                &mut vec![],
+                platform_version,
+            );
+            assert_matches!(
+                result,
+                Err(ProtocolError::ConsensusError(boxed)) => {
+                    assert_matches!(
+                        boxed.as_ref(),
+                        ConsensusError::BasicError(BasicError::DuplicateIndexNameError(_))
+                    )
+                }
+            );
+        }
+
+        // -------- UndefinedIndexPropertyError --------
+        #[test]
+        fn undefined_index_property_returns_error() {
+            let platform_version = PlatformVersion::latest();
+            let schema = platform_value!({
+                "type": "object",
+                "properties": {
+                    "field_a": {"type": "string", "position": 0, "maxLength": 60_u32},
+                },
+                "indices": [
+                    {
+                        "name": "by_unknown",
+                        "properties": [{"unknown_field": "asc"}],
+                    },
+                ],
+                "additionalProperties": false,
+            });
+
+            let result = DocumentTypeV0::try_from_schema(
+                Identifier::new([1; 32]),
+                0,
+                default_config().version(),
+                "doc",
+                schema,
+                None,
+                &default_config(),
+                true,
+                &mut vec![],
+                platform_version,
+            );
+            assert_matches!(
+                result,
+                Err(ProtocolError::ConsensusError(boxed)) => {
+                    assert_matches!(
+                        boxed.as_ref(),
+                        ConsensusError::BasicError(BasicError::UndefinedIndexPropertyError(_))
+                    )
+                }
+            );
+        }
+
+        // -------- InvalidIndexedPropertyConstraintError: string maxLength too large --------
+        #[test]
+        fn indexed_string_exceeding_max_length_returns_error() {
+            let platform_version = PlatformVersion::latest();
+            let schema = platform_value!({
+                "type": "object",
+                "properties": {
+                    "big_string": {
+                        "type": "string",
+                        "position": 0,
+                        // Above MAX_INDEXED_STRING_PROPERTY_LENGTH (63)
+                        "maxLength": 1000_u32,
+                    },
+                },
+                "indices": [
+                    {
+                        "name": "byBigString",
+                        "properties": [{"big_string": "asc"}],
+                    },
+                ],
+                "additionalProperties": false,
+            });
+
+            let result = DocumentTypeV0::try_from_schema(
+                Identifier::new([1; 32]),
+                0,
+                default_config().version(),
+                "doc",
+                schema,
+                None,
+                &default_config(),
+                true,
+                &mut vec![],
+                platform_version,
+            );
+            assert_matches!(
+                result,
+                Err(ProtocolError::ConsensusError(boxed)) => {
+                    assert_matches!(
+                        boxed.as_ref(),
+                        ConsensusError::BasicError(
+                            BasicError::InvalidIndexedPropertyConstraintError(_)
+                        )
+                    )
+                }
+            );
+        }
+
+        // -------- InvalidIndexedPropertyConstraintError: byte-array maxItems too large --------
+        #[test]
+        fn indexed_byte_array_exceeding_max_items_returns_error() {
+            let platform_version = PlatformVersion::latest();
+            let schema = platform_value!({
+                "type": "object",
+                "properties": {
+                    "big_bytes": {
+                        "type": "array",
+                        "byteArray": true,
+                        // Above MAX_INDEXED_BYTE_ARRAY_PROPERTY_LENGTH (255)
+                        "maxItems": 1000_u32,
+                        "position": 0,
+                    },
+                },
+                "indices": [
+                    {
+                        "name": "byBigBytes",
+                        "properties": [{"big_bytes": "asc"}],
+                    },
+                ],
+                "additionalProperties": false,
+            });
+
+            let result = DocumentTypeV0::try_from_schema(
+                Identifier::new([1; 32]),
+                0,
+                default_config().version(),
+                "doc",
+                schema,
+                None,
+                &default_config(),
+                true,
+                &mut vec![],
+                platform_version,
+            );
+            assert_matches!(
+                result,
+                Err(ProtocolError::ConsensusError(boxed)) => {
+                    assert_matches!(
+                        boxed.as_ref(),
+                        ConsensusError::BasicError(
+                            BasicError::InvalidIndexedPropertyConstraintError(_)
+                        )
+                    )
+                }
+            );
+        }
+
+        // -------- Valid: indexed string at the size limit succeeds --------
+        #[test]
+        fn indexed_string_at_exact_max_length_is_accepted() {
+            let platform_version = PlatformVersion::latest();
+            let schema = platform_value!({
+                "type": "object",
+                "properties": {
+                    "ok_string": {
+                        "type": "string",
+                        "position": 0,
+                        "maxLength": MAX_INDEXED_STRING_PROPERTY_LENGTH as u32,
+                    },
+                },
+                "indices": [
+                    {
+                        "name": "byOk",
+                        "properties": [{"ok_string": "asc"}],
+                    },
+                ],
+                "additionalProperties": false,
+            });
+
+            let result = DocumentTypeV0::try_from_schema(
+                Identifier::new([1; 32]),
+                0,
+                default_config().version(),
+                "doc",
+                schema,
+                None,
+                &default_config(),
+                true,
+                &mut vec![],
+                platform_version,
+            );
+            assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
+        }
+
+        // -------- Valid: full_validation=false skips all validation --------
+        #[test]
+        fn skip_validation_accepts_invalid_name_when_full_validation_false() {
+            let platform_version = PlatformVersion::latest();
+            let schema = platform_value!({
+                "type": "object",
+                "properties": {
+                    "field_a": {"type": "string", "position": 0, "maxLength": 10_u32}
+                },
+                "additionalProperties": false,
+            });
+
+            // Name "invalid name" has a space which is not allowed — but skipping
+            // validation should let this through.
+            let result = DocumentTypeV0::try_from_schema(
+                Identifier::new([1; 32]),
+                0,
+                default_config().version(),
+                "invalid name",
+                schema,
+                None,
+                &default_config(),
+                false, // full_validation = false
+                &mut vec![],
+                platform_version,
+            );
+            assert!(
+                result.is_ok(),
+                "full_validation=false should skip name check, got {:?}",
+                result.err()
+            );
+        }
+
+        // -------- schema_map error path: schema must be object --------
+        #[test]
+        fn non_object_schema_returns_error() {
+            let platform_version = PlatformVersion::latest();
+            let schema = platform_value!("not_an_object");
+
+            let result = DocumentTypeV0::try_from_schema(
+                Identifier::new([1; 32]),
+                0,
+                default_config().version(),
+                "doc",
+                schema,
+                None,
+                &default_config(),
+                false, // skip JSON-schema validation so we exercise .to_map() error path
+                &mut vec![],
+                platform_version,
+            );
+            assert!(
+                result.is_err(),
+                "non-object schema must fail, got {:?}",
+                result
+            );
+        }
+
+        // -------- System properties and required_fields interplay --------
+        #[test]
+        fn required_fields_are_tracked_on_successful_build() {
+            let platform_version = PlatformVersion::latest();
+            let schema = platform_value!({
+                "type": "object",
+                "properties": {
+                    "field_a": {"type": "string", "position": 0, "maxLength": 10_u32},
+                    "field_b": {"type": "string", "position": 1, "maxLength": 10_u32},
+                },
+                "required": ["field_a"],
+                "additionalProperties": false,
+            });
+
+            let dt = DocumentTypeV0::try_from_schema(
+                Identifier::new([1; 32]),
+                0,
+                default_config().version(),
+                "doc",
+                schema,
+                None,
+                &default_config(),
+                true,
+                &mut vec![],
+                platform_version,
+            )
+            .expect("should succeed");
+            assert!(dt.required_fields.contains("field_a"));
+            assert!(!dt.required_fields.contains("field_b"));
+        }
+
+        // -------- transient_fields handling --------
+        #[test]
+        fn transient_fields_are_tracked_on_successful_build() {
+            let platform_version = PlatformVersion::latest();
+            let schema = platform_value!({
+                "type": "object",
+                "properties": {
+                    "temp_field": {"type": "string", "position": 0, "maxLength": 10_u32},
+                    "perm_field": {"type": "string", "position": 1, "maxLength": 10_u32},
+                },
+                "transient": ["temp_field"],
+                "additionalProperties": false,
+            });
+
+            let dt = DocumentTypeV0::try_from_schema(
+                Identifier::new([1; 32]),
+                0,
+                default_config().version(),
+                "doc",
+                schema,
+                None,
+                &default_config(),
+                true,
+                &mut vec![],
+                platform_version,
+            )
+            .expect("should succeed");
+            assert!(dt.transient_fields.contains("temp_field"));
+            assert!(!dt.transient_fields.contains("perm_field"));
+        }
+
+        // -------- Nested object properties produce flattened + nested ----
+        #[test]
+        fn nested_object_properties_are_both_flattened_and_nested() {
+            let platform_version = PlatformVersion::latest();
+            let schema = platform_value!({
+                "type": "object",
+                "properties": {
+                    "outer": {
+                        "type": "object",
+                        "position": 0,
+                        "properties": {
+                            "inner": {
+                                "type": "string",
+                                "position": 0,
+                                "maxLength": 10_u32,
+                            }
+                        },
+                        "additionalProperties": false,
+                    }
+                },
+                "additionalProperties": false,
+            });
+            let dt = DocumentTypeV0::try_from_schema(
+                Identifier::new([1; 32]),
+                0,
+                default_config().version(),
+                "doc",
+                schema,
+                None,
+                &default_config(),
+                true,
+                &mut vec![],
+                platform_version,
+            )
+            .expect("should succeed");
+            // flattened form uses dotted path
+            assert!(dt.flattened_properties.contains_key("outer.inner"));
+            // nested form keeps the Object wrapper
+            assert!(dt.properties.contains_key("outer"));
+        }
+
+        // -------- TRANSFERABLE u8 conversion --------
+        #[test]
+        fn invalid_transferable_integer_returns_error() {
+            let platform_version = PlatformVersion::latest();
+            let schema = platform_value!({
+                "type": "object",
+                // 3 is not a valid Transferable value (only 0 or 1)
+                "transferable": 3_u64,
+                "properties": {
+                    "field_a": {"type": "string", "position": 0, "maxLength": 10_u32}
+                },
+                "additionalProperties": false,
+            });
+            let result = DocumentTypeV0::try_from_schema(
+                Identifier::new([1; 32]),
+                0,
+                default_config().version(),
+                "doc",
+                schema,
+                None,
+                &default_config(),
+                false, // skip schema validation; this is the try_into() failure path
+                &mut vec![],
+                platform_version,
+            );
+            assert!(result.is_err());
         }
     }
 }

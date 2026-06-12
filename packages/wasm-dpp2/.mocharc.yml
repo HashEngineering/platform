@@ -1,0 +1,6 @@
+node-option:
+  - import=ts-node/esm
+extensions:
+  - ts
+recursive: true
+timeout: 8000

@@ -1,0 +1,108 @@
+[package]
+name = "rs-sdk-ffi"
+version.workspace = true
+authors = ["Dash Core Group <dev@dash.org>"]
+edition = "2021"
+license = "MIT"
+description = "FFI bindings for Dash Platform SDK - C-compatible interface for cross-platform integration"
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+
+[dependencies]
+dash-sdk = { path = "../rs-sdk", features = [
+    "dpns-contract",
+    "dashpay-contract",
+] }
+drive-proof-verifier = { path = "../rs-drive-proof-verifier" }
+rs-sdk-trusted-context-provider = { path = "../rs-sdk-trusted-context-provider", features = [
+    "dpns-contract",
+    "dashpay-contract",
+    "withdrawals-contract",
+    "wallet-utils-contract",
+    "token-history-contract",
+    "keywords-contract",
+] }
+simple-signer = { path = "../simple-signer" }
+async-trait = { version = "0.1.83" }
+dash-async = { path = "../rs-dash-async" }
+
+# Used by `dash_sdk_sign_with_mnemonic_and_path` to derive an
+# ECDSA key from `(mnemonic, path)` for one-shot signing without
+# any FFI key export. `Mnemonic`, `bip32::*`, `Network` come from
+# this crate.
+key-wallet = { workspace = true }
+
+# Single source of truth for the Network enum and its `#[repr(C)]`
+# FFI variant, both used directly across this crate's FFI surface.
+dash-network = { workspace = true, features = ["ffi"] }
+
+# FFI and serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = { version = "=2.0.1", features = ["serde"] }
+
+# Async runtime
+tokio = { version = "1.41", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+# Error handling
+thiserror = "2.0"
+
+# Logging
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
+
+# Encoding
+bs58 = "0.5"
+hex = "0.4"
+
+# System APIs
+libc = "0.2"
+
+# Cryptography
+getrandom = "0.2"
+zeroize = "1.8"
+
+# Concurrency
+once_cell = "1.20"
+
+# HTTP client for diagnostics
+reqwest = { version = "0.12", features = ["json", "rustls-tls-native-roots"] }
+
+[build-dependencies]
+cbindgen = "0.27"
+
+[profile.release]
+lto = "fat"       # Enable cross-crate optimization
+codegen-units = 1 # Single codegen unit for better optimization
+strip = "symbols" # Strip debug symbols for smaller size
+opt-level = "z"   # Optimize for size
+panic = "abort"   # Required for iOS
+
+[dev-dependencies]
+hex = "0.4"
+env_logger = "0.11"
+dotenvy = "0.15"
+envy = "0.4"
+zeroize = "1.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+
+[features]
+default = []
+
+# Optional mocks for development/testing; maps to dash-sdk's mocks
+mocks = ["dash-sdk/mocks"]
+
+# Compile stubbed Core SDK FFI symbols for tests if needed.
+# Will only be used when 'dash_spv' is disabled to avoid symbol clashes.
+ffi_core_stubs = []
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+[package.metadata.cargo-machete]
+ignored = ["cbindgen"]

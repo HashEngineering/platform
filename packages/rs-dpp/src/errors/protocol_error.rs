@@ -3,6 +3,7 @@ use thiserror::Error;
 use crate::consensus::basic::state_transition::InvalidStateTransitionTypeError;
 use crate::consensus::signature::{
     InvalidSignaturePublicKeySecurityLevelError, PublicKeyIsDisabledError,
+    UncompressedPublicKeyNotAllowedError,
 };
 use crate::consensus::ConsensusError;
 use crate::data_contract::errors::*;
@@ -14,10 +15,7 @@ use crate::document::errors::*;
 ))]
 use crate::state_transition::errors::InvalidIdentityPublicKeyTypeError;
 
-#[cfg(any(
-    all(feature = "state-transitions", feature = "validation"),
-    feature = "state-transition-validation"
-))]
+#[cfg(all(feature = "state-transitions", feature = "validation"))]
 use crate::state_transition::errors::StateTransitionError;
 
 #[cfg(any(
@@ -45,6 +43,7 @@ use crate::version::FeatureVersion;
 use platform_value::{Error as ValueError, Value};
 use platform_version::error::PlatformVersionError;
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Error, Debug)]
 pub enum ProtocolError {
     #[error("Identifier Error: {0}")]
@@ -141,6 +140,30 @@ pub enum ProtocolError {
     #[error("Generic Error: {0}")]
     Generic(String),
 
+    /// External signer (e.g. Swift Keychain-backed
+    /// `MnemonicResolverCoreSigner`) reported a failure or returned a
+    /// non-conformant result. This is a distinct surface from
+    /// [`Self::Generic`] so callers (FFI layer, retry policies) can
+    /// distinguish a signer-side failure from a generic protocol
+    /// invariant.
+    ///
+    /// Examples of failures that surface here:
+    /// - The signer's `sign_ecdsa` future returned an error (resolver
+    ///   miss, derivation failure, invalid mnemonic, etc.).
+    /// - The signer returned a signature whose recovery id does not
+    ///   match the returned public key (invariant violation by a
+    ///   non-conformant signer — distinct from a soft failure, but
+    ///   surfaced uniformly here so the FFI layer doesn't need to
+    ///   pattern-match on signer-specific shapes).
+    #[error("External signer error: {0}")]
+    ExternalSignerError(String),
+
+    #[error("Address witness verification error: {0}")]
+    AddressWitnessError(String),
+
+    #[error("Shielded transaction build error: {0}")]
+    ShieldedBuildError(String),
+
     #[error("Not supported Error: {0}")]
     NotSupported(String),
 
@@ -196,6 +219,9 @@ pub enum ProtocolError {
 
     #[error(transparent)]
     PublicKeyIsDisabledError(PublicKeyIsDisabledError),
+
+    #[error(transparent)]
+    UncompressedPublicKeyNotAllowedError(UncompressedPublicKeyNotAllowedError),
 
     #[error(transparent)]
     IdentityNotPresentError(IdentityNotPresentError),
@@ -289,6 +315,14 @@ pub enum ProtocolError {
     InvalidBatchedTransitionActionVariant {
         expected: &'static str,
         found: &'static str,
+    },
+    #[error(
+        "Invalid verification wrong number of elements: needed {needed}, using {using}, {msg}"
+    )]
+    InvalidVerificationWrongNumberOfElements {
+        needed: u16,
+        using: u16,
+        msg: &'static str,
     },
 }
 

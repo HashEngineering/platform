@@ -1,11 +1,30 @@
 use crate::masternodes::MasternodeListItemWithUpdates;
 use crate::query::QueryStrategy;
-use crate::BlockHeight;
 use dpp::block::block_info::BlockInfo;
 use dpp::dashcore::{Network, PrivateKey};
 use dpp::dashcore::{ProTxHash, QuorumHash};
+// TODO: Re-enable when OperationType has shielded variants
+// use dpp::shielded::{compute_platform_sighash, SerializedAction};
 use dpp::state_transition::identity_topup_transition::methods::IdentityTopUpTransitionMethodsV0;
+// TODO: Re-enable when OperationType has shielded variants
+// use dpp::state_transition::shield_from_asset_lock_transition::methods::ShieldFromAssetLockTransitionMethodsV0;
+// use dpp::state_transition::shield_from_asset_lock_transition::ShieldFromAssetLockTransition;
+// use dpp::state_transition::shield_transition::methods::ShieldTransitionMethodsV0;
+// use dpp::state_transition::shield_transition::ShieldTransition;
+// use dpp::state_transition::shielded_transfer_transition::methods::ShieldedTransferTransitionMethodsV0;
+// use dpp::state_transition::shielded_transfer_transition::ShieldedTransferTransition;
+// use dpp::state_transition::shielded_withdrawal_transition::methods::ShieldedWithdrawalTransitionMethodsV0;
+// use dpp::state_transition::shielded_withdrawal_transition::ShieldedWithdrawalTransition;
+// use dpp::state_transition::unshield_transition::methods::UnshieldTransitionMethodsV0;
+// use dpp::state_transition::unshield_transition::UnshieldTransition;
 use dpp::ProtocolError;
+// TODO: Re-enable when OperationType has shielded variants
+// use grovedb_commitment_tree::{
+//     Anchor, Authorized as OrchardAuthorized, Builder, Bundle, BundleType,
+//     ClientMemoryCommitmentTree, DashMemo, ExtractedNoteCommitment, Flags as OrchardFlags,
+//     FullViewingKey, MerklePath, Note, NoteValue, Position, ProvingKey, RandomSeed, Retention, Rho,
+//     Scope, SpendAuthorizingKey, SpendingKey,
+// };
 
 use dpp::dashcore::secp256k1::SecretKey;
 use dpp::data_contract::document_type::random_document::CreateRandomDocument;
@@ -14,10 +33,14 @@ use dpp::state_transition::identity_topup_transition::IdentityTopUpTransition;
 use strategy_tests::frequency::Frequency;
 use strategy_tests::operations::FinalizeBlockOperation::IdentityAddKeys;
 use strategy_tests::operations::{
-    AmountRange, DocumentAction, DocumentOp, FinalizeBlockOperation, IdentityUpdateOp,
-    OperationType, TokenOp,
+    AmountRange, DocumentAction, DocumentOp, ExtraKeys, FinalizeBlockOperation, IdentityUpdateOp,
+    MaybeOutputAmount, OperationType, OutputCountRange, TokenOp,
+    UseExistingAddressesAsOutputChance,
 };
+use strategy_tests::KeyMaps;
 
+use dpp::address_funds::fee_strategy::AddressFundsFeeStrategyStep;
+use dpp::address_funds::{AddressFundsFeeStrategy, PlatformAddress};
 use dpp::document::DocumentV0Getters;
 use dpp::fee::Credits;
 use dpp::identity::{Identity, IdentityPublicKey, KeyID, KeyType, Purpose, SecurityLevel};
@@ -31,6 +54,7 @@ use drive::drive::identity::key::fetch::{IdentityKeysRequest, KeyRequestType};
 use drive::drive::Drive;
 use drive::util::storage_flags::StorageFlags::SingleEpoch;
 
+use crate::addresses_with_balance::AddressesWithBalance;
 use crate::strategy::CoreHeightIncrease::NoCoreHeightIncrease;
 use dpp::dashcore::hashes::Hash;
 use dpp::data_contract::accessors::v0::{DataContractV0Getters, DataContractV0Setters};
@@ -38,11 +62,20 @@ use dpp::data_contract::document_type::accessors::DocumentTypeV0Getters;
 use dpp::data_contract::document_type::v0::DocumentTypeV0;
 use dpp::identifier::MasternodeIdentifiers;
 use dpp::identity::accessors::IdentityGettersV0;
+use dpp::identity::core_script::CoreScript;
 use dpp::identity::identity_public_key::v0::IdentityPublicKeyV0;
+use dpp::identity::signer::Signer;
 use dpp::identity::state_transition::asset_lock_proof::InstantAssetLockProof;
+use dpp::identity::KeyCount;
 use dpp::identity::KeyType::ECDSA_SECP256K1;
 use dpp::platform_value::{BinaryData, Value};
-use dpp::prelude::{AssetLockProof, Identifier, IdentityNonce};
+use dpp::prelude::{AssetLockProof, BlockHeight, Identifier, IdentityNonce};
+use dpp::state_transition::address_credit_withdrawal_transition::methods::AddressCreditWithdrawalTransitionMethodsV0;
+use dpp::state_transition::address_credit_withdrawal_transition::AddressCreditWithdrawalTransition;
+use dpp::state_transition::address_funding_from_asset_lock_transition::methods::AddressFundingFromAssetLockTransitionMethodsV0;
+use dpp::state_transition::address_funding_from_asset_lock_transition::v0::AddressFundingFromAssetLockTransitionV0;
+use dpp::state_transition::address_funds_transfer_transition::methods::AddressFundsTransferTransitionMethodsV0;
+use dpp::state_transition::address_funds_transfer_transition::AddressFundsTransferTransition;
 use dpp::state_transition::batch_transition::batched_transition::document_delete_transition::DocumentDeleteTransitionV0;
 use dpp::state_transition::batch_transition::batched_transition::document_replace_transition::DocumentReplaceTransitionV0;
 use dpp::state_transition::batch_transition::batched_transition::document_transfer_transition::DocumentTransferTransitionV0;
@@ -63,6 +96,10 @@ use dpp::state_transition::batch_transition::{
 };
 use dpp::state_transition::data_contract_create_transition::methods::v0::DataContractCreateTransitionMethodsV0;
 use dpp::state_transition::data_contract_update_transition::methods::DataContractUpdateTransitionMethodsV0;
+use dpp::state_transition::identity_create_from_addresses_transition::methods::IdentityCreateFromAddressesTransitionMethodsV0;
+use dpp::state_transition::identity_create_from_addresses_transition::v0::IdentityCreateFromAddressesTransitionV0;
+use dpp::state_transition::identity_topup_from_addresses_transition::methods::IdentityTopUpFromAddressesTransitionMethodsV0;
+use dpp::state_transition::identity_topup_from_addresses_transition::v0::IdentityTopUpFromAddressesTransitionV0;
 use dpp::state_transition::masternode_vote_transition::methods::MasternodeVoteTransitionMethodsV0;
 use dpp::state_transition::masternode_vote_transition::MasternodeVoteTransition;
 use dpp::tokens::calculate_token_id;
@@ -72,13 +109,14 @@ use dpp::voting::vote_polls::VotePoll;
 use dpp::voting::votes::resource_vote::v0::ResourceVoteV0;
 use dpp::voting::votes::resource_vote::ResourceVote;
 use dpp::voting::votes::Vote;
+use dpp::withdrawal::Pooling;
 use drive::drive::document::query::QueryDocumentsOutcomeV0Methods;
 use drive::query::DriveDocumentQuery;
 use drive_abci::abci::app::FullAbciApplication;
 use drive_abci::config::PlatformConfig;
 use drive_abci::mimic::test_quorum::TestQuorumInfo;
 use drive_abci::platform_types::platform::Platform;
-use drive_abci::platform_types::platform_state::v0::PlatformStateV0Methods;
+use drive_abci::platform_types::platform_state::PlatformStateV0Methods;
 use drive_abci::platform_types::signature_verification_quorum_set::{
     QuorumConfig, Quorums, SigningQuorum,
 };
@@ -91,12 +129,50 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::RangeInclusive;
 use std::str::FromStr;
+// TODO: Re-enable when OperationType has shielded variants
+// use std::sync::OnceLock;
 use strategy_tests::transitions::{
-    create_state_transitions_for_identities, create_state_transitions_for_identities_and_proofs,
+    create_identity_credit_transfer_to_addresses_transition,
+    create_identity_credit_transfer_to_addresses_transition_with_outputs,
+    create_identity_credit_transfer_transition, create_state_transitions_for_identities,
+    create_state_transitions_for_identities_and_proofs,
     instant_asset_lock_proof_fixture_with_dynamic_range,
 };
 use strategy_tests::Strategy;
 use tenderdash_abci::proto::abci::{ExecTxResult, ValidatorSetUpdate};
+
+// TODO: Re-enable when OperationType has shielded variants
+// /// Cached Orchard proving key for strategy tests (~30s to build, reused across tests).
+// static TEST_PROVING_KEY: OnceLock<ProvingKey> = OnceLock::new();
+//
+// fn get_proving_key() -> &'static ProvingKey {
+//     TEST_PROVING_KEY.get_or_init(ProvingKey::build)
+// }
+//
+// /// Deterministic Orchard spending key seed used throughout all shielded strategy tests.
+// const TEST_SK_BYTES: [u8; 32] = [0u8; 32];
+
+/// Stub type for shielded pool state in strategy tests.
+/// TODO: Re-enable full implementation when OperationType has shielded variants.
+/// The full implementation with commitment tree tracking, spendable notes, and
+/// Orchard key management is commented out below until the shielded OperationType
+/// variants (Shield, ShieldFromAssetLock, ShieldedTransfer, Unshield,
+/// ShieldedWithdrawal) are added back to the OperationType enum.
+pub struct ShieldedState;
+
+// TODO: Re-enable when OperationType has shielded variants
+// Original ShieldedState had fields: tree (ClientMemoryCommitmentTree),
+// spendable_notes, checkpoint_counter, sk, fvk, ask, rho_counter
+// and methods: new(), record_shielded_note(), checkpoint(),
+// take_spendable_note(), has_spendable_notes()
+//
+// Also commented out: serialize_authorized_bundle() function and
+// the 5 helper methods on NetworkStrategy:
+//   create_shield_transition()
+//   create_shield_from_asset_lock_transition()
+//   create_shielded_transfer_transition()
+//   create_unshield_transition()
+//   create_shielded_withdrawal_transition()
 
 #[derive(Clone, Debug, Default)]
 pub struct MasternodeListChangesStrategy {
@@ -201,15 +277,6 @@ pub struct FailureStrategy {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct MasternodeChanges {
-    /// The masternode ban chance should be always quite low
-    pub masternode_ban_chance: Frequency,
-    pub masternode_unban_chance: Frequency,
-    pub masternode_change_ip_chance: Frequency,
-    pub masternode_change_port_chance: Frequency,
-}
-
-#[derive(Clone, Debug, Default)]
 pub enum CoreHeightIncrease {
     #[default]
     NoCoreHeightIncrease,
@@ -283,6 +350,7 @@ pub struct NetworkStrategy {
     pub query_testing: Option<QueryStrategy>,
     pub verify_state_transition_results: bool,
     pub max_tx_bytes_per_block: u64,
+    pub max_addresses_to_choose_from_in_cache: Option<u32>,
     pub independent_process_proposal_verification: bool,
     pub sign_chain_locks: bool,
     pub sign_instant_locks: bool,
@@ -306,6 +374,7 @@ impl Default for NetworkStrategy {
             query_testing: None,
             verify_state_transition_results: false,
             max_tx_bytes_per_block: 44800,
+            max_addresses_to_choose_from_in_cache: Some(50),
             independent_process_proposal_verification: false,
             sign_chain_locks: false,
             sign_instant_locks: false,
@@ -376,7 +445,8 @@ impl NetworkStrategy {
         drive: &Drive,
         platform_version: &PlatformVersion,
     ) {
-        for op in &self.strategy.operations {
+        let operations_to_execute = self.strategy.operations.clone();
+        for op in operations_to_execute.iter() {
             if let OperationType::Document(doc_op) = &op.op_type {
                 let serialize = doc_op
                     .contract
@@ -397,7 +467,7 @@ impl NetworkStrategy {
         }
     }
 
-    pub fn identity_state_transitions_for_block(
+    pub async fn identity_state_transitions_for_block(
         &self,
         block_info: &BlockInfo,
         signer: &mut SimpleSigner,
@@ -409,14 +479,20 @@ impl NetworkStrategy {
         let mut state_transitions = vec![];
         if block_info.height == 1 {
             if self.strategy.start_identities.number_of_identities > 0 {
-                let mut new_transitions = self.create_identities_state_transitions(
-                    self.strategy.start_identities.number_of_identities,
-                    signer,
-                    rng,
-                    instant_lock_quorums,
-                    platform_config,
-                    platform_version,
-                );
+                let mut new_transitions = self
+                    .create_identities_state_transitions(
+                        self.strategy.start_identities.number_of_identities,
+                        self.strategy.start_identities.keys_per_identity as KeyID,
+                        &self.strategy.start_identities.extra_keys,
+                        &(self.strategy.start_identities.starting_balances
+                            ..=self.strategy.start_identities.starting_balances),
+                        signer,
+                        rng,
+                        instant_lock_quorums,
+                        platform_config,
+                        platform_version,
+                    )
+                    .await;
                 state_transitions.append(&mut new_transitions);
             }
             // Extend the state transitions with the strategy's hard coded start identities
@@ -436,20 +512,25 @@ impl NetworkStrategy {
         let frequency = &self.strategy.identity_inserts.frequency;
         if frequency.check_hit(rng) {
             let count = frequency.events(rng);
-            let mut new_transitions = self.create_identities_state_transitions(
-                count,
-                signer,
-                rng,
-                instant_lock_quorums,
-                platform_config,
-                platform_version,
-            );
+            let mut new_transitions = self
+                .create_identities_state_transitions(
+                    count,
+                    self.strategy.identity_inserts.start_keys as KeyID,
+                    &self.strategy.identity_inserts.extra_keys,
+                    &self.strategy.identity_inserts.start_balance_range,
+                    signer,
+                    rng,
+                    instant_lock_quorums,
+                    platform_config,
+                    platform_version,
+                )
+                .await;
             state_transitions.append(&mut new_transitions);
         }
         Ok(state_transitions)
     }
 
-    pub fn initial_contract_state_transitions(
+    pub async fn initial_contract_state_transitions(
         &mut self,
         current_identities: &Vec<Identity>,
         signer: &SimpleSigner,
@@ -457,79 +538,80 @@ impl NetworkStrategy {
         rng: &mut StdRng,
         platform_version: &PlatformVersion,
     ) -> Vec<StateTransition> {
-        self.strategy
-            .start_contracts
-            .iter_mut()
-            .map(|(created_contract, contract_updates)| {
-                let identity_num = rng.gen_range(0..current_identities.len());
-                let identity = current_identities
-                    .get(identity_num)
-                    .unwrap()
-                    .clone()
-                    .into_partial_identity_info();
+        let mut result = Vec::with_capacity(self.strategy.start_contracts.len());
+        // Need to avoid borrow conflict on self.strategy. Drain start_contracts
+        // temporarily so we can also mutate self.strategy.operations inside the loop.
+        let mut start_contracts = std::mem::take(&mut self.strategy.start_contracts);
+        for (created_contract, contract_updates) in start_contracts.iter_mut() {
+            let identity_num = rng.gen_range(0..current_identities.len());
+            let identity = current_identities
+                .get(identity_num)
+                .unwrap()
+                .clone()
+                .into_partial_identity_info();
 
-                let identity_nonce = created_contract.identity_nonce();
+            let identity_nonce = created_contract.identity_nonce();
 
-                let contract = created_contract.data_contract_mut();
+            let contract = created_contract.data_contract_mut();
 
-                contract.set_owner_id(identity.id);
-                let old_id = contract.id();
-                let new_id =
-                    DataContract::generate_data_contract_id_v0(identity.id, identity_nonce);
-                contract.set_id(new_id);
+            contract.set_owner_id(identity.id);
+            let old_id = contract.id();
+            let new_id = DataContract::generate_data_contract_id_v0(identity.id, identity_nonce);
+            contract.set_id(new_id);
 
-                if let Some(contract_updates) = contract_updates {
-                    for (_, updated_contract) in contract_updates.iter_mut() {
-                        updated_contract.data_contract_mut().set_id(contract.id());
-                        updated_contract
-                            .data_contract_mut()
-                            .set_owner_id(contract.owner_id());
+            if let Some(contract_updates) = contract_updates {
+                for (_, updated_contract) in contract_updates.iter_mut() {
+                    updated_contract.data_contract_mut().set_id(contract.id());
+                    updated_contract
+                        .data_contract_mut()
+                        .set_owner_id(contract.owner_id());
+                }
+            }
+
+            // since we are changing the id, we need to update all the strategy
+            for operation in self.strategy.operations.iter_mut() {
+                if let OperationType::Document(document_op) = &mut operation.op_type {
+                    if document_op.contract.id() == old_id {
+                        document_op.contract.set_id(contract.id());
+                        document_op.document_type = document_op
+                            .contract
+                            .document_type_for_name(document_op.document_type.name())
+                            .expect("document type must exist")
+                            .to_owned_document_type();
+                    }
+                } else if let OperationType::Token(token_op) = &mut operation.op_type {
+                    if token_op.contract.id() == old_id {
+                        token_op.contract.set_id(contract.id());
+                        token_op.token_id =
+                            calculate_token_id(contract.id_ref().as_bytes(), token_op.token_pos)
+                                .into();
                     }
                 }
+            }
 
-                // since we are changing the id, we need to update all the strategy
-                self.strategy.operations.iter_mut().for_each(|operation| {
-                    if let OperationType::Document(document_op) = &mut operation.op_type {
-                        if document_op.contract.id() == old_id {
-                            document_op.contract.set_id(contract.id());
-                            document_op.document_type = document_op
-                                .contract
-                                .document_type_for_name(document_op.document_type.name())
-                                .expect("document type must exist")
-                                .to_owned_document_type();
-                        }
-                    } else if let OperationType::Token(token_op) = &mut operation.op_type {
-                        if token_op.contract.id() == old_id {
-                            token_op.contract.set_id(contract.id());
-                            token_op.token_id = calculate_token_id(
-                                contract.id_ref().as_bytes(),
-                                token_op.token_pos,
-                            )
-                            .into();
-                        }
-                    }
-                });
+            let identity_contract_nonce = contract_nonce_counter
+                .entry((identity.id, contract.id()))
+                .or_default();
+            *identity_contract_nonce += 1;
 
-                let identity_contract_nonce = contract_nonce_counter
-                    .entry((identity.id, contract.id()))
-                    .or_default();
-                *identity_contract_nonce += 1;
-
-                DataContractCreateTransition::new_from_data_contract(
-                    contract.clone(),
-                    identity_nonce,
-                    &identity,
-                    1, //key id 1 should always be a high or critical auth key in these tests
-                    signer,
-                    platform_version,
-                    None,
-                )
-                .expect("expected to create a create state transition from a data contract")
-            })
-            .collect()
+            let state_transition = DataContractCreateTransition::new_from_data_contract(
+                contract.clone(),
+                identity_nonce,
+                &identity,
+                1, //key id 1 should always be a high or critical auth key in these tests
+                signer,
+                platform_version,
+                None,
+            )
+            .await
+            .expect("expected to create a create state transition from a data contract");
+            result.push(state_transition);
+        }
+        self.strategy.start_contracts = start_contracts;
+        result
     }
 
-    pub fn initial_contract_update_state_transitions(
+    pub async fn initial_contract_update_state_transitions(
         &mut self,
         current_identities: &Vec<Identity>,
         block_height: u64,
@@ -537,51 +619,51 @@ impl NetworkStrategy {
         contract_nonce_counter: &mut BTreeMap<(Identifier, Identifier), u64>,
         platform_version: &PlatformVersion,
     ) -> Vec<StateTransition> {
-        self.strategy
-            .start_contracts
-            .iter_mut()
-            .filter_map(|(_, contract_updates)| {
-                let Some(contract_updates) = contract_updates else {
-                    return None;
-                };
-                let Some(contract_update) = contract_updates.get(&block_height) else {
-                    return None;
-                };
-                let identity = current_identities
-                    .iter()
-                    .find(|identity| identity.id() == contract_update.data_contract().owner_id())
-                    .expect("expected to find an identity")
-                    .clone()
-                    .into_partial_identity_info();
+        let mut result = Vec::new();
+        for (_, contract_updates) in self.strategy.start_contracts.iter_mut() {
+            let Some(contract_updates) = contract_updates else {
+                continue;
+            };
+            let Some(contract_update) = contract_updates.get(&block_height) else {
+                continue;
+            };
+            let identity = current_identities
+                .iter()
+                .find(|identity| identity.id() == contract_update.data_contract().owner_id())
+                .expect("expected to find an identity")
+                .clone()
+                .into_partial_identity_info();
 
-                let identity_contract_nonce = contract_nonce_counter
-                    .entry((identity.id, contract_update.data_contract().id()))
-                    .or_default();
-                *identity_contract_nonce += 1;
+            let identity_contract_nonce = contract_nonce_counter
+                .entry((identity.id, contract_update.data_contract().id()))
+                .or_default();
+            *identity_contract_nonce += 1;
 
-                let state_transition = DataContractUpdateTransition::new_from_data_contract(
-                    contract_update.data_contract().clone(),
-                    &identity,
-                    1, //key id 1 should always be a high or critical auth key in these tests
-                    *identity_contract_nonce,
-                    0,
-                    signer,
-                    platform_version,
-                    None,
-                )
-                .expect("expected to create a create state transition from a data contract");
-                Some(state_transition)
-            })
-            .collect()
+            let state_transition = DataContractUpdateTransition::new_from_data_contract(
+                contract_update.data_contract().clone(),
+                &identity,
+                1, //key id 1 should always be a high or critical auth key in these tests
+                *identity_contract_nonce,
+                0,
+                signer,
+                platform_version,
+                None,
+            )
+            .await
+            .expect("expected to create a create state transition from a data contract");
+            result.push(state_transition);
+        }
+        result
     }
 
     // TODO: this belongs to `DocumentOp`, also randomization details are common for all operations
     // and could be moved out of here
-    pub fn operations_based_transitions(
-        &self,
+    pub async fn operations_based_transitions(
+        &mut self,
         platform: &Platform<MockCoreRPCLike>,
         block_info: &BlockInfo,
         current_identities: &mut Vec<Identity>,
+        current_addresses_with_balance: &mut AddressesWithBalance,
         signer: &mut SimpleSigner,
         identity_nonce_counter: &mut BTreeMap<Identifier, u64>,
         contract_nonce_counter: &mut BTreeMap<(Identifier, Identifier), u64>,
@@ -591,6 +673,7 @@ impl NetworkStrategy {
         instant_lock_quorums: &Quorums<SigningQuorum>,
         rng: &mut StdRng,
         platform_version: &PlatformVersion,
+        _shielded_state: &mut Option<ShieldedState>, // TODO: Re-enable when OperationType has shielded variants
     ) -> (Vec<StateTransition>, Vec<FinalizeBlockOperation>) {
         let mut maybe_state = None;
         let mut operations = vec![];
@@ -600,7 +683,8 @@ impl NetworkStrategy {
         let mut deleted = vec![];
         let max_document_operation_count_without_inserts =
             self.strategy.max_document_operation_count_without_inserts();
-        for op in &self.strategy.operations {
+        let operations_to_execute = self.strategy.operations.clone();
+        for op in operations_to_execute.iter() {
             if op.frequency.check_hit(rng) {
                 let mut count = rng.gen_range(op.frequency.times_per_block_range.clone());
                 match &op.op_type {
@@ -634,83 +718,70 @@ impl NetworkStrategy {
                                 platform_version,
                             )
                             .expect("expected random_documents_with_params");
-                        documents
-                            .into_iter()
-                            .for_each(|(document, identity, entropy)| {
-                                let identity_contract_nonce = contract_nonce_counter
-                                    .entry((identity.id(), contract.id()))
-                                    .or_default();
-                                let gap = self
-                                    .strategy
-                                    .identity_contract_nonce_gaps
-                                    .as_ref()
-                                    .map_or(0, |gap_amount| gap_amount.events_if_hit(rng))
-                                    as u64;
-                                *identity_contract_nonce += 1 + gap;
+                        for (document, identity, entropy) in documents.into_iter() {
+                            let identity_contract_nonce = contract_nonce_counter
+                                .entry((identity.id(), contract.id()))
+                                .or_default();
+                            let gap = self
+                                .strategy
+                                .identity_contract_nonce_gaps
+                                .as_ref()
+                                .map_or(0, |gap_amount| gap_amount.events_if_hit(rng))
+                                as u64;
+                            *identity_contract_nonce += 1 + gap;
 
-                                let prefunded_voting_balances = document_type
-                                    .prefunded_voting_balances_for_document(
-                                        &document,
-                                        platform_version,
-                                    )
-                                    .expect(
-                                        "expected to get prefunded voting balances for document",
-                                    );
+                            let prefunded_voting_balances = document_type
+                                .prefunded_voting_balances_for_document(&document, platform_version)
+                                .expect("expected to get prefunded voting balances for document");
 
-                                let document_create_transition: DocumentCreateTransition =
-                                    DocumentCreateTransitionV0 {
-                                        base: DocumentBaseTransitionV0 {
-                                            id: document.id(),
-                                            identity_contract_nonce: *identity_contract_nonce,
-                                            document_type_name: document_type.name().clone(),
-                                            data_contract_id: contract.id(),
-                                        }
-                                        .into(),
-                                        entropy: entropy.to_buffer(),
-                                        data: document.properties_consumed(),
-                                        prefunded_voting_balance: prefunded_voting_balances,
+                            let document_create_transition: DocumentCreateTransition =
+                                DocumentCreateTransitionV0 {
+                                    base: DocumentBaseTransitionV0 {
+                                        id: document.id(),
+                                        identity_contract_nonce: *identity_contract_nonce,
+                                        document_type_name: document_type.name().clone(),
+                                        data_contract_id: contract.id(),
                                     }
-                                    .into();
+                                    .into(),
+                                    entropy: entropy.to_buffer(),
+                                    data: document.properties_consumed(),
+                                    prefunded_voting_balance: prefunded_voting_balances,
+                                }
+                                .into();
 
-                                let document_batch_transition: BatchTransition =
-                                    BatchTransitionV0 {
-                                        owner_id: identity.id(),
-                                        transitions: vec![document_create_transition.into()],
-                                        user_fee_increase: 0,
-                                        signature_public_key_id: 0,
-                                        signature: BinaryData::default(),
-                                    }
-                                    .into();
-                                let mut document_batch_transition: StateTransition =
-                                    document_batch_transition.into();
+                            let document_batch_transition: BatchTransition = BatchTransitionV0 {
+                                owner_id: identity.id(),
+                                transitions: vec![document_create_transition.into()],
+                                user_fee_increase: 0,
+                                signature_public_key_id: 0,
+                                signature: BinaryData::default(),
+                            }
+                            .into();
+                            let mut document_batch_transition: StateTransition =
+                                document_batch_transition.into();
 
-                                let identity_public_key = identity
-                                    .get_first_public_key_matching(
-                                        Purpose::AUTHENTICATION,
-                                        HashSet::from([
-                                            SecurityLevel::HIGH,
-                                            SecurityLevel::CRITICAL,
-                                        ]),
-                                        HashSet::from([
-                                            KeyType::ECDSA_SECP256K1,
-                                            KeyType::BLS12_381,
-                                        ]),
-                                        false,
-                                    )
-                                    .expect("expected to get a signing key");
+                            let identity_public_key = identity
+                                .get_first_public_key_matching(
+                                    Purpose::AUTHENTICATION,
+                                    HashSet::from([SecurityLevel::HIGH, SecurityLevel::CRITICAL]),
+                                    HashSet::from([KeyType::ECDSA_SECP256K1, KeyType::BLS12_381]),
+                                    false,
+                                )
+                                .expect("expected to get a signing key");
 
-                                document_batch_transition
-                                    .sign_external(
-                                        identity_public_key,
-                                        signer,
-                                        Some(|_data_contract_id, _document_type_name| {
-                                            Ok(SecurityLevel::HIGH)
-                                        }),
-                                    )
-                                    .expect("expected to sign");
+                            document_batch_transition
+                                .sign_external(
+                                    identity_public_key,
+                                    signer,
+                                    Some(|_data_contract_id, _document_type_name| {
+                                        Ok(SecurityLevel::HIGH)
+                                    }),
+                                )
+                                .await
+                                .expect("expected to sign");
 
-                                operations.push(document_batch_transition);
-                            });
+                            operations.push(document_batch_transition);
+                        }
                     }
                     OperationType::Document(DocumentOp {
                         action:
@@ -766,81 +837,68 @@ impl NetworkStrategy {
                                 .expect("expected random_documents_with_params")
                         };
 
-                        documents
-                            .into_iter()
-                            .for_each(|(mut document, identity, entropy)| {
-                                document
-                                    .properties_mut()
-                                    .append(&mut specific_document_key_value_pairs.clone());
+                        for (mut document, identity, entropy) in documents.into_iter() {
+                            document
+                                .properties_mut()
+                                .append(&mut specific_document_key_value_pairs.clone());
 
-                                let identity_contract_nonce = contract_nonce_counter
-                                    .entry((identity.id(), contract.id()))
-                                    .or_default();
-                                *identity_contract_nonce += 1;
+                            let identity_contract_nonce = contract_nonce_counter
+                                .entry((identity.id(), contract.id()))
+                                .or_default();
+                            *identity_contract_nonce += 1;
 
-                                let prefunded_voting_balances = document_type
-                                    .prefunded_voting_balances_for_document(
-                                        &document,
-                                        platform_version,
-                                    )
-                                    .expect(
-                                        "expected to get prefunded voting balances for document",
-                                    );
+                            let prefunded_voting_balances = document_type
+                                .prefunded_voting_balances_for_document(&document, platform_version)
+                                .expect("expected to get prefunded voting balances for document");
 
-                                let document_create_transition: DocumentCreateTransition =
-                                    DocumentCreateTransitionV0 {
-                                        base: DocumentBaseTransitionV0 {
-                                            id: document.id(),
-                                            identity_contract_nonce: *identity_contract_nonce,
-                                            document_type_name: document_type.name().clone(),
-                                            data_contract_id: contract.id(),
-                                        }
-                                        .into(),
-                                        entropy: entropy.to_buffer(),
-                                        data: document.properties_consumed(),
-                                        prefunded_voting_balance: prefunded_voting_balances,
+                            let document_create_transition: DocumentCreateTransition =
+                                DocumentCreateTransitionV0 {
+                                    base: DocumentBaseTransitionV0 {
+                                        id: document.id(),
+                                        identity_contract_nonce: *identity_contract_nonce,
+                                        document_type_name: document_type.name().clone(),
+                                        data_contract_id: contract.id(),
                                     }
-                                    .into();
+                                    .into(),
+                                    entropy: entropy.to_buffer(),
+                                    data: document.properties_consumed(),
+                                    prefunded_voting_balance: prefunded_voting_balances,
+                                }
+                                .into();
 
-                                let document_batch_transition: BatchTransition =
-                                    BatchTransitionV0 {
-                                        owner_id: identity.id(),
-                                        transitions: vec![document_create_transition.into()],
-                                        user_fee_increase: 0,
-                                        signature_public_key_id: 0,
-                                        signature: BinaryData::default(),
-                                    }
-                                    .into();
-                                let mut document_batch_transition: StateTransition =
-                                    document_batch_transition.into();
+                            let document_batch_transition: BatchTransition = BatchTransitionV0 {
+                                owner_id: identity.id(),
+                                transitions: vec![document_create_transition.into()],
+                                user_fee_increase: 0,
+                                signature_public_key_id: 0,
+                                signature: BinaryData::default(),
+                            }
+                            .into();
+                            let mut document_batch_transition: StateTransition =
+                                document_batch_transition.into();
 
-                                let identity_public_key = identity
-                                    .get_first_public_key_matching(
-                                        Purpose::AUTHENTICATION,
-                                        HashSet::from([
-                                            SecurityLevel::HIGH,
-                                            SecurityLevel::CRITICAL,
-                                        ]),
-                                        HashSet::from([
-                                            KeyType::ECDSA_SECP256K1,
-                                            KeyType::BLS12_381,
-                                        ]),
-                                        false,
-                                    )
-                                    .expect("expected to get a signing key");
+                            let identity_public_key = identity
+                                .get_first_public_key_matching(
+                                    Purpose::AUTHENTICATION,
+                                    HashSet::from([SecurityLevel::HIGH, SecurityLevel::CRITICAL]),
+                                    HashSet::from([KeyType::ECDSA_SECP256K1, KeyType::BLS12_381]),
+                                    false,
+                                )
+                                .expect("expected to get a signing key");
 
-                                document_batch_transition
-                                    .sign_external(
-                                        identity_public_key,
-                                        signer,
-                                        Some(|_data_contract_id, _document_type_name| {
-                                            Ok(SecurityLevel::HIGH)
-                                        }),
-                                    )
-                                    .expect("expected to sign");
+                            document_batch_transition
+                                .sign_external(
+                                    identity_public_key,
+                                    signer,
+                                    Some(|_data_contract_id, _document_type_name| {
+                                        Ok(SecurityLevel::HIGH)
+                                    }),
+                                )
+                                .await
+                                .expect("expected to sign");
 
-                                operations.push(document_batch_transition);
-                            });
+                            operations.push(document_batch_transition);
+                        }
                     }
                     OperationType::Document(DocumentOp {
                         action: DocumentAction::DocumentActionDelete,
@@ -934,6 +992,7 @@ impl NetworkStrategy {
                                         Ok(SecurityLevel::HIGH)
                                     }),
                                 )
+                                .await
                                 .expect("expected to sign");
 
                             operations.push(document_batch_transition);
@@ -1036,6 +1095,7 @@ impl NetworkStrategy {
                                         Ok(SecurityLevel::HIGH)
                                     }),
                                 )
+                                .await
                                 .expect("expected to sign");
 
                             operations.push(document_batch_transition);
@@ -1146,6 +1206,7 @@ impl NetworkStrategy {
                                         Ok(SecurityLevel::HIGH)
                                     }),
                                 )
+                                .await
                                 .expect("expected to sign");
 
                             operations.push(document_batch_transition);
@@ -1170,6 +1231,145 @@ impl NetworkStrategy {
                             ));
                         }
                     }
+                    OperationType::IdentityTopUpFromAddresses(amount_range)
+                        if !current_identities.is_empty() =>
+                    {
+                        let indices: Vec<usize> =
+                            (0..current_identities.len()).choose_multiple(rng, count as usize);
+                        let random_identities: Vec<&Identity> = indices
+                            .into_iter()
+                            .map(|index| &current_identities[index])
+                            .collect();
+
+                        for random_identity in random_identities {
+                            let Some(state_transition) = self
+                                .create_identity_top_up_from_addresses_transitions(
+                                    current_addresses_with_balance,
+                                    random_identity,
+                                    amount_range,
+                                    signer,
+                                    rng,
+                                    platform_version,
+                                )
+                                .await
+                            else {
+                                // no funds left
+                                break;
+                            };
+                            operations.push(state_transition);
+                        }
+                    }
+                    OperationType::IdentityCreateFromAddresses(
+                        amount_range,
+                        maybe_output_amount,
+                        fee_strategy,
+                        key_count,
+                        extra_keys,
+                    ) => {
+                        for _i in 0..count {
+                            let Some((identity, state_transition)) = self
+                                .create_identity_from_addresses_transition(
+                                    current_addresses_with_balance,
+                                    amount_range,
+                                    maybe_output_amount,
+                                    fee_strategy,
+                                    *key_count,
+                                    extra_keys,
+                                    signer,
+                                    rng,
+                                    platform_version,
+                                )
+                                .await
+                            else {
+                                // no funds left
+                                break;
+                            };
+                            operations.push(state_transition);
+                            // Add the newly created identity to the pool
+                            current_identities.push(identity);
+                        }
+                    }
+                    OperationType::AddressFundingFromCoreAssetLock(amount_range) => {
+                        for _i in 0..count {
+                            let Some(state_transition) = self
+                                .create_address_funding_from_asset_lock_transitions(
+                                    current_addresses_with_balance,
+                                    amount_range,
+                                    rng,
+                                    signer,
+                                    instant_lock_quorums,
+                                    &platform.config,
+                                    platform_version,
+                                )
+                                .await
+                            else {
+                                // no funds left
+                                break;
+                            };
+                            operations.push(state_transition);
+                        }
+                    }
+                    OperationType::AddressTransfer(
+                        amount_range,
+                        output_count_range,
+                        use_existing_outputs_chance,
+                        fee_strategy,
+                    ) => {
+                        for _i in 0..count {
+                            let Some(state_transition) = self
+                                .create_address_transfer_transition(
+                                    current_addresses_with_balance,
+                                    amount_range,
+                                    output_count_range,
+                                    *use_existing_outputs_chance,
+                                    fee_strategy,
+                                    signer,
+                                    rng,
+                                    platform_version,
+                                )
+                                .await
+                            else {
+                                tracing::debug!(
+                                    block_height = block_info.height,
+                                    ?amount_range,
+                                    available_to_spend = current_addresses_with_balance
+                                        .available_for_spending_count(),
+                                    max_available_balance =
+                                        current_addresses_with_balance.max_available_balance(),
+                                    committed = current_addresses_with_balance.committed_count(),
+                                    staged = current_addresses_with_balance.staged_count(),
+                                    "no funds for transfer"
+                                );
+                                // no funds left
+                                break;
+                            };
+                            operations.push(state_transition);
+                        }
+                    }
+                    OperationType::AddressWithdrawal(
+                        amount_range,
+                        maybe_output_range,
+                        fee_strategy,
+                    ) => {
+                        for _i in 0..count {
+                            let Some(state_transition) = self
+                                .create_address_withdrawal_transition(
+                                    current_addresses_with_balance,
+                                    amount_range,
+                                    maybe_output_range,
+                                    fee_strategy,
+                                    signer,
+                                    rng,
+                                    platform_version,
+                                )
+                                .await
+                            else {
+                                // no funds left
+                                break;
+                            };
+                            operations.push(state_transition);
+                        }
+                    }
                     OperationType::IdentityUpdate(update_op) if !current_identities.is_empty() => {
                         let indices: Vec<usize> =
                             (0..current_identities.len()).choose_multiple(rng, count as usize);
@@ -1186,7 +1386,7 @@ impl NetworkStrategy {
                                             signer,
                                             rng,
                                             platform_version,
-                                        );
+                                        ).await;
                                     operations.push(state_transition);
                                     finalize_block_operations.push(IdentityAddKeys(
                                         keys_to_add_at_end_block.0,
@@ -1203,7 +1403,7 @@ impl NetworkStrategy {
                                             signer,
                                             rng,
                                             platform_version,
-                                        );
+                                        ).await;
                                     if let Some(state_transition) = state_transition {
                                         operations.push(state_transition);
                                     }
@@ -1223,33 +1423,131 @@ impl NetworkStrategy {
                                     identity_nonce_counter,
                                     signer,
                                     rng,
-                                );
+                                )
+                                .await;
                             operations.push(state_transition);
                         }
                     }
-                    OperationType::IdentityTransfer(_) if current_identities.len() > 1 => {
-                        let identities_clone = current_identities.clone();
+                    OperationType::IdentityTransfer(identity_transfer_info)
+                        if current_identities.len() > 1 =>
+                    {
+                        for _ in 0..count {
+                            // Handle the case where specific sender, recipient, and amount are provided
+                            if let Some(transfer_info) = identity_transfer_info {
+                                let sender = current_identities
+                                    .iter()
+                                    .find(|identity| identity.id() == transfer_info.from)
+                                    .expect(
+                                        "Expected to find sender identity in hardcoded start identities",
+                                    );
+                                let recipient = current_identities
+                                    .iter()
+                                    .find(|identity| identity.id() == transfer_info.to)
+                                    .expect(
+                                        "Expected to find recipient identity in hardcoded start identities",
+                                    );
 
-                        // Sender is the first in the list, which should be loaded_identity
-                        let owner = &mut current_identities[0];
-                        // Recipient is the second in the list
-                        let recipient = &identities_clone[1];
+                                let state_transition = create_identity_credit_transfer_transition(
+                                    sender,
+                                    recipient,
+                                    identity_nonce_counter,
+                                    signer, // This means in the TUI, the loaded identity must always be the sender since we're always signing with it for now
+                                    transfer_info.amount,
+                                )
+                                .await;
+                                operations.push(state_transition);
+                            } else if current_identities.len() > 1 {
+                                // Handle the case where no sender, recipient, and amount are provided
 
-                        let fetched_owner_balance = platform
-                            .drive
-                            .fetch_identity_balance(owner.id().to_buffer(), None, platform_version)
-                            .expect("expected to be able to get identity")
-                            .expect("expected to get an identity");
+                                let identities_count = current_identities.len();
+                                if identities_count == 0 {
+                                    break;
+                                }
 
-                        let state_transition =
-                            strategy_tests::transitions::create_identity_credit_transfer_transition(
-                                owner,
-                                recipient,
-                                identity_nonce_counter,
-                                signer,
-                                fetched_owner_balance - 100,
-                            );
-                        operations.push(state_transition);
+                                // Select a random identity from the current_identities for the sender
+                                let random_index_sender = rng.gen_range(0..identities_count);
+
+                                // Clone current_identities to a Vec for manipulation
+                                let mut unused_identities: Vec<_> = current_identities.to_vec();
+                                unused_identities.remove(random_index_sender); // Remove the sender
+                                let unused_identities_count = unused_identities.len();
+
+                                // Select a random identity from the remaining ones for the recipient
+                                let random_index_recipient =
+                                    rng.gen_range(0..unused_identities_count);
+                                let recipient = &unused_identities[random_index_recipient];
+
+                                // Use the sender index on the original slice
+                                let sender = &mut current_identities[random_index_sender];
+
+                                let state_transition = create_identity_credit_transfer_transition(
+                                    sender,
+                                    recipient,
+                                    identity_nonce_counter,
+                                    signer,
+                                    300000,
+                                )
+                                .await;
+                                operations.push(state_transition);
+                            }
+                        }
+                    }
+                    OperationType::IdentityTransferToAddresses(
+                        amount_range,
+                        output_count_range,
+                        _use_existing,
+                        identity_transfer_info,
+                    ) if !current_identities.is_empty() => {
+                        for _ in 0..count {
+                            // Handle the case where specific sender and outputs are provided
+                            if let Some(transfer_info) = identity_transfer_info {
+                                let sender = current_identities
+                                    .iter()
+                                    .find(|identity| identity.id() == transfer_info.from)
+                                    .expect(
+                                        "Expected to find sender identity in hardcoded start identities",
+                                    );
+
+                                // Use the pre-specified outputs from transfer_info
+                                let state_transition = create_identity_credit_transfer_to_addresses_transition_with_outputs(
+                                    sender,
+                                    identity_nonce_counter,
+                                    signer,
+                                    transfer_info.outputs.clone(),
+                                    platform_version,
+                                ).await;
+                                operations.push(state_transition);
+                            } else {
+                                // Handle the case where no sender/outputs are provided - generate random ones
+                                let identities_count = current_identities.len();
+                                if identities_count == 0 {
+                                    break;
+                                }
+
+                                // Select a random identity from the current_identities for the sender
+                                let random_index_sender = rng.gen_range(0..identities_count);
+                                let sender = &current_identities[random_index_sender];
+
+                                // Generate random number of outputs from the provided range
+                                let output_count =
+                                    rng.gen_range(output_count_range.clone()) as usize;
+                                let total_amount = rng.gen_range(amount_range.clone());
+
+                                let (state_transition, _recipient_addresses) =
+                                    create_identity_credit_transfer_to_addresses_transition(
+                                        sender,
+                                        identity_nonce_counter,
+                                        current_addresses_with_balance,
+                                        signer,
+                                        total_amount,
+                                        output_count,
+                                        rng,
+                                        platform_version,
+                                    )
+                                    .await;
+                                operations.push(state_transition);
+                            }
+                        }
                     }
                     OperationType::ContractCreate(params, doc_type_range)
                         if !current_identities.is_empty() =>
@@ -1342,13 +1640,20 @@ impl NetworkStrategy {
                                 .expect("Expected to get identity public key in ContractCreate");
                             let mut state_transition =
                                 StateTransition::DataContractCreate(transition);
-                            if let Err(e) = state_transition.sign_external(
-                                public_key,
-                                signer,
-                                None::<
-                                    fn(Identifier, String) -> Result<SecurityLevel, ProtocolError>,
-                                >,
-                            ) {
+                            if let Err(e) = state_transition
+                                .sign_external(
+                                    public_key,
+                                    signer,
+                                    None::<
+                                        fn(
+                                            Identifier,
+                                            String,
+                                        )
+                                            -> Result<SecurityLevel, ProtocolError>,
+                                    >,
+                                )
+                                .await
+                            {
                                 panic!("Error signing state transition: {:?}", e);
                             }
 
@@ -1418,6 +1723,7 @@ impl NetworkStrategy {
                                     platform_version,
                                     None,
                                 )
+                                .await
                                 .expect("expected to make a masternode vote transition");
 
                             vote_poll_votes.insert(voting_identifier, resource_vote_choice);
@@ -1496,6 +1802,7 @@ impl NetworkStrategy {
                                     Ok(SecurityLevel::HIGH)
                                 }),
                             )
+                            .await
                             .expect("expected to sign");
 
                         operations.push(batch_transition);
@@ -1581,10 +1888,108 @@ impl NetworkStrategy {
                                     Ok(SecurityLevel::HIGH)
                                 }),
                             )
+                            .await
                             .expect("expected to sign");
 
                         operations.push(batch_transition);
                     }
+                    // TODO: Re-enable when OperationType has shielded variants
+                    // OperationType::Shield(amount_range) => {
+                    //     for _i in 0..count {
+                    //         let Some(state_transition) = self.create_shield_transition(
+                    //             current_addresses_with_balance,
+                    //             amount_range,
+                    //             signer,
+                    //             rng,
+                    //             platform_version,
+                    //         ) else {
+                    //             break;
+                    //         };
+                    //         // Record the shielded note for potential future spends.
+                    //         // The value is |-value_balance| since value_balance is negative
+                    //         // for shield transitions (money flowing into the pool).
+                    //         if let StateTransition::Shield(ref shield) = state_transition {
+                    //             let shielded_value = match shield {
+                    //                 ShieldTransition::V0(v0) => (-v0.amount) as u64,
+                    //             };
+                    //             let state = shielded_state.get_or_insert_with(ShieldedState::new);
+                    //             state.record_shielded_note(shielded_value);
+                    //             state.checkpoint();
+                    //         }
+                    //         operations.push(state_transition);
+                    //     }
+                    // }
+                    // OperationType::ShieldFromAssetLock(amount_range) => {
+                    //     for _i in 0..count {
+                    //         let Some(state_transition) = self
+                    //             .create_shield_from_asset_lock_transition(
+                    //                 amount_range,
+                    //                 rng,
+                    //                 instant_lock_quorums,
+                    //                 &platform.config,
+                    //                 platform_version,
+                    //             )
+                    //         else {
+                    //             break;
+                    //         };
+                    //         // Record the shielded note for potential future spends
+                    //         if let StateTransition::ShieldFromAssetLock(ref shield) =
+                    //             state_transition
+                    //         {
+                    //             let shielded_value = match shield {
+                    //                 ShieldFromAssetLockTransition::V0(v0) => {
+                    //                     (-v0.amount) as u64
+                    //                 }
+                    //             };
+                    //             let state = shielded_state.get_or_insert_with(ShieldedState::new);
+                    //             state.record_shielded_note(shielded_value);
+                    //             state.checkpoint();
+                    //         }
+                    //         operations.push(state_transition);
+                    //     }
+                    // }
+                    // OperationType::ShieldedTransfer(amount_range) => {
+                    //     for _i in 0..count {
+                    //         let Some(state_transition) = self.create_shielded_transfer_transition(
+                    //             amount_range,
+                    //             rng,
+                    //             shielded_state,
+                    //             platform_version,
+                    //         ) else {
+                    //             break;
+                    //         };
+                    //         operations.push(state_transition);
+                    //     }
+                    // }
+                    // OperationType::Unshield(amount_range) => {
+                    //     for _i in 0..count {
+                    //         let Some(state_transition) = self.create_unshield_transition(
+                    //             current_addresses_with_balance,
+                    //             amount_range,
+                    //             rng,
+                    //             shielded_state,
+                    //             platform_version,
+                    //         ) else {
+                    //             break;
+                    //         };
+                    //         operations.push(state_transition);
+                    //     }
+                    // }
+                    // OperationType::ShieldedWithdrawal(amount_range) => {
+                    //     for _i in 0..count {
+                    //         let Some(state_transition) = self
+                    //             .create_shielded_withdrawal_transition(
+                    //                 amount_range,
+                    //                 rng,
+                    //                 shielded_state,
+                    //                 platform_version,
+                    //             )
+                    //         else {
+                    //             break;
+                    //         };
+                    //         operations.push(state_transition);
+                    //     }
+                    // }
                     _ => {}
                 }
             }
@@ -1592,18 +1997,20 @@ impl NetworkStrategy {
         (operations, finalize_block_operations)
     }
 
-    pub fn state_transitions_for_block(
+    pub async fn state_transitions_for_block(
         &mut self,
         platform: &Platform<MockCoreRPCLike>,
         start_block_height: BlockHeight,
         block_info: &BlockInfo,
         current_identities: &mut Vec<Identity>,
+        current_addresses_with_balance: &mut AddressesWithBalance,
         identity_nonce_counter: &mut BTreeMap<Identifier, u64>,
         contract_nonce_counter: &mut BTreeMap<(Identifier, Identifier), u64>,
         current_votes: &mut BTreeMap<Identifier, BTreeMap<Identifier, ResourceVoteChoice>>,
         signer: &mut SimpleSigner,
         rng: &mut StdRng,
         instant_lock_quorums: &Quorums<SigningQuorum>,
+        shielded_state: &mut Option<ShieldedState>,
     ) -> (Vec<StateTransition>, Vec<FinalizeBlockOperation>) {
         let mut finalize_block_operations = vec![];
         let platform_state = platform.state.load();
@@ -1611,22 +2018,21 @@ impl NetworkStrategy {
             .current_platform_version()
             .expect("expected platform version");
 
-        let identity_state_transitions_result = self.identity_state_transitions_for_block(
-            block_info,
-            signer,
-            rng,
-            instant_lock_quorums,
-            &platform.config,
-            platform_version,
-        );
+        let identity_state_transitions_result = self
+            .identity_state_transitions_for_block(
+                block_info,
+                signer,
+                rng,
+                instant_lock_quorums,
+                &platform.config,
+                platform_version,
+            )
+            .await;
 
         // Handle the Result returned by identity_state_transitions_for_block
         let (mut identities, mut state_transitions) = match identity_state_transitions_result {
             Ok(transitions) => transitions.into_iter().unzip(),
-            Err(error) => {
-                eprintln!("Error creating identity state transitions: {:?}", error);
-                (vec![], vec![])
-            }
+            Err(_) => (vec![], vec![]),
         };
 
         current_identities.append(&mut identities);
@@ -1634,13 +2040,15 @@ impl NetworkStrategy {
         let should_do_operation_transitions =
             if block_info.height == start_block_height && !current_identities.is_empty() {
                 // add contracts on block 1
-                let mut contract_state_transitions = self.initial_contract_state_transitions(
-                    current_identities,
-                    signer,
-                    contract_nonce_counter,
-                    rng,
-                    platform_version,
-                );
+                let mut contract_state_transitions = self
+                    .initial_contract_state_transitions(
+                        current_identities,
+                        signer,
+                        contract_nonce_counter,
+                        rng,
+                        platform_version,
+                    )
+                    .await;
                 state_transitions.append(&mut contract_state_transitions);
                 block_info.height != 1
             } else {
@@ -1648,11 +2056,12 @@ impl NetworkStrategy {
             };
         if should_do_operation_transitions {
             // Don't do any state transitions on block 1
-            let (mut document_state_transitions, mut add_to_finalize_block_operations) = self
-                .operations_based_transitions(
+            let (mut operation_based_state_transitions, mut add_to_finalize_block_operations) =
+                self.operations_based_transitions(
                     platform,
                     block_info,
                     current_identities,
+                    current_addresses_with_balance,
                     signer,
                     identity_nonce_counter,
                     contract_nonce_counter,
@@ -1660,9 +2069,11 @@ impl NetworkStrategy {
                     instant_lock_quorums,
                     rng,
                     platform_version,
-                );
+                    shielded_state,
+                )
+                .await;
             finalize_block_operations.append(&mut add_to_finalize_block_operations);
-            state_transitions.append(&mut document_state_transitions);
+            state_transitions.append(&mut operation_based_state_transitions);
 
             // There can also be contract updates
 
@@ -1673,7 +2084,8 @@ impl NetworkStrategy {
                     signer,
                     contract_nonce_counter,
                     platform_version,
-                );
+                )
+                .await;
             state_transitions.append(&mut contract_update_state_transitions);
         }
 
@@ -1681,19 +2093,18 @@ impl NetworkStrategy {
     }
 
     // add this because strategy tests library now requires a callback and uses the actual chain.
-    fn create_identities_state_transitions(
+    async fn create_identities_state_transitions(
         &self,
         count: u16,
+        key_count: KeyID,
+        extra_keys: &KeyMaps,
+        balance_range: &RangeInclusive<Credits>,
         signer: &mut SimpleSigner,
         rng: &mut StdRng,
         instant_lock_quorums: &Quorums<SigningQuorum>,
         platform_config: &PlatformConfig,
         platform_version: &PlatformVersion,
     ) -> Vec<(Identity, StateTransition)> {
-        let key_count = self.strategy.identity_inserts.start_keys as KeyID;
-        let extra_keys = &self.strategy.identity_inserts.extra_keys;
-        let balance_range = &self.strategy.identity_inserts.start_balance_range;
-
         let (mut identities, mut keys) = Identity::random_identities_with_private_keys_with_rng::<
             Vec<_>,
         >(count, key_count, rng, platform_version)
@@ -1721,7 +2132,7 @@ impl NetworkStrategy {
             }
         }
 
-        signer.add_keys(keys);
+        signer.add_identity_public_keys(keys);
 
         if self.sign_instant_locks {
             let identities_with_proofs = create_signed_instant_asset_lock_proofs_for_identities(
@@ -1738,6 +2149,7 @@ impl NetworkStrategy {
                 signer,
                 platform_version,
             )
+            .await
         } else {
             create_state_transitions_for_identities(
                 &mut identities,
@@ -1746,6 +2158,7 @@ impl NetworkStrategy {
                 rng,
                 platform_version,
             )
+            .await
         }
     }
 
@@ -1765,7 +2178,7 @@ impl NetworkStrategy {
         let sk: [u8; 32] = pk.try_into().unwrap();
         let secret_key = SecretKey::from_str(hex::encode(sk).as_str()).unwrap();
         let mut asset_lock_proof = instant_asset_lock_proof_fixture_with_dynamic_range(
-            PrivateKey::new(secret_key, Network::Dash),
+            PrivateKey::new(secret_key, Network::Mainnet),
             amount_range,
             rng,
         );
@@ -1804,7 +2217,7 @@ impl NetworkStrategy {
                 .expect("failed to sign transaction for instant lock");
         }
 
-        IdentityTopUpTransition::try_from_identity(
+        IdentityTopUpTransition::try_from_identity_with_private_key(
             identity,
             asset_lock_proof,
             secret_key.as_ref(),
@@ -1814,6 +2227,835 @@ impl NetworkStrategy {
         )
         .expect("expected to create top up transition")
     }
+
+    fn create_asset_lock_proof_with_amount(
+        &self,
+        rng: &mut StdRng,
+        amount_range: &AmountRange,
+        instant_lock_quorums: &Quorums<SigningQuorum>,
+        platform_config: &PlatformConfig,
+        platform_version: &PlatformVersion,
+    ) -> (AssetLockProof, Vec<u8>, Credits) {
+        let (_, pk) = ECDSA_SECP256K1
+            .random_public_and_private_key_data(rng, platform_version)
+            .unwrap();
+        let sk_bytes: [u8; 32] = pk.try_into().unwrap();
+        let secret_key = SecretKey::from_str(hex::encode(sk_bytes).as_str()).unwrap();
+        let mut asset_lock_proof = instant_asset_lock_proof_fixture_with_dynamic_range(
+            PrivateKey::new(secret_key, Network::Mainnet),
+            amount_range,
+            rng,
+        );
+
+        if self.sign_instant_locks {
+            let quorum_config = QuorumConfig {
+                quorum_type: platform_config.instant_lock.quorum_type,
+                active_signers: platform_config.instant_lock.quorum_active_signers,
+                rotation: platform_config.instant_lock.quorum_rotation,
+                window: platform_config.instant_lock.quorum_window,
+            };
+
+            let AssetLockProof::Instant(InstantAssetLockProof { instant_lock, .. }) =
+                &mut asset_lock_proof
+            else {
+                panic!("must be instant lock proof");
+            };
+
+            let request_id = instant_lock
+                .request_id()
+                .expect("failed to build request id");
+
+            let (quorum_hash, quorum) = instant_lock_quorums
+                .choose_quorum(&quorum_config, request_id.as_ref())
+                .expect("failed to choose quorum for instant lock transaction signing");
+
+            instant_lock.signature = quorum
+                .sign_for_instant_lock(
+                    &quorum_config,
+                    &quorum_hash,
+                    request_id.as_ref(),
+                    &instant_lock.txid,
+                )
+                .expect("failed to sign transaction for instant lock");
+        }
+
+        let funded_amount = match &asset_lock_proof {
+            AssetLockProof::Instant(proof) => {
+                let output_index = proof.output_index() as usize;
+                proof
+                    .transaction()
+                    .output
+                    .get(output_index)
+                    .map(|output| output.value)
+                    .unwrap_or_default()
+            }
+            AssetLockProof::Chain(_chain) => 0,
+        };
+
+        (
+            asset_lock_proof,
+            secret_key.secret_bytes().to_vec(),
+            funded_amount,
+        )
+    }
+
+    async fn create_identity_top_up_from_addresses_transitions<S: Signer<PlatformAddress>>(
+        &mut self,
+        current_addresses_with_balance: &mut AddressesWithBalance,
+        recipient: &Identity,
+        amount_range: &AmountRange,
+        signer: &S,
+        rng: &mut StdRng,
+        platform_version: &PlatformVersion,
+    ) -> Option<StateTransition> {
+        let inputs =
+            current_addresses_with_balance.take_random_amounts_with_range(amount_range, rng)?;
+        tracing::trace!(
+            ?inputs,
+            "Preparing identity top-up transition with addresses"
+        );
+
+        let top_up_transition =
+            IdentityTopUpFromAddressesTransitionV0::try_from_inputs_with_signer(
+                recipient,
+                inputs,
+                signer,
+                0,
+                platform_version,
+                None,
+            )
+            .await
+            .expect("expected to create top up from addresses transition"); // if you need to upcast to StateTransition
+
+        tracing::debug!(
+            ?top_up_transition,
+            "Top up from addresses transition successfully signed"
+        );
+
+        Some(top_up_transition)
+    }
+
+    async fn create_identity_from_addresses_transition(
+        &mut self,
+        current_addresses_with_balance: &mut AddressesWithBalance,
+        amount_range: &AmountRange,
+        maybe_output_amount: &MaybeOutputAmount,
+        fee_strategy: &Option<AddressFundsFeeStrategy>,
+        key_count: KeyCount,
+        extra_keys: &ExtraKeys,
+        signer: &mut SimpleSigner,
+        rng: &mut StdRng,
+        platform_version: &PlatformVersion,
+    ) -> Option<(Identity, StateTransition)> {
+        let inputs =
+            current_addresses_with_balance.take_random_amounts_with_range(amount_range, rng)?;
+        tracing::debug!(
+            ?inputs,
+            "Preparing identity create from addresses transition"
+        );
+
+        // Create a new identity with random keys
+        let (mut identity, keys) = Identity::random_identity_with_main_keys_with_private_key::<
+            Vec<_>,
+        >(key_count, rng, platform_version)
+        .expect("Expected to create identity with keys");
+
+        // Add extra keys to the identity
+        for (purpose, security_to_key_type_map) in extra_keys.iter() {
+            for (security_level, key_types) in security_to_key_type_map {
+                for key_type in key_types {
+                    let (key, private_key) = IdentityPublicKey::random_key_with_known_attributes(
+                        (identity.public_keys().len() + 1) as KeyID,
+                        rng,
+                        *purpose,
+                        *security_level,
+                        *key_type,
+                        None,
+                        platform_version,
+                    )
+                    .expect("expected to create random key");
+                    identity.add_public_key(key.clone());
+                    signer.add_identity_public_key(key, private_key);
+                }
+            }
+        }
+
+        // Add all keys to the signer
+        signer.add_identity_public_keys(keys);
+
+        // Determine fee strategy
+        let fee_strategy = fee_strategy
+            .clone()
+            .unwrap_or(vec![AddressFundsFeeStrategyStep::DeductFromInput(0)]);
+
+        // Create output if maybe_output_amount is provided
+        let output = maybe_output_amount.as_ref().map(|output_range| {
+            let output_amount = rng.gen_range(output_range.clone());
+            let output_address = signer.add_random_address_key(rng);
+            // Register the output address with balance
+            current_addresses_with_balance.register_new_address_keep_only_highest(
+                output_address.clone(),
+                output_amount,
+                self.max_addresses_to_choose_from_in_cache,
+            );
+            (output_address, output_amount)
+        });
+
+        let transition = IdentityCreateFromAddressesTransitionV0::try_from_inputs_with_signer(
+            &identity,
+            inputs,
+            output,
+            fee_strategy,
+            signer, // identity public key signer
+            signer, // address signer
+            0,      // user_fee_increase
+            platform_version,
+        )
+        .await
+        .expect("expected to create identity from addresses transition");
+
+        tracing::debug!(
+            ?transition,
+            "Identity create from addresses transition successfully signed"
+        );
+
+        Some((identity, transition))
+    }
+
+    async fn create_address_transfer_transition(
+        &mut self,
+        current_addresses_with_balance: &mut AddressesWithBalance,
+        amount_range: &AmountRange,
+        output_count_range: &OutputCountRange,
+        use_existing_outputs_chance: UseExistingAddressesAsOutputChance,
+        fee_strategy: &Option<AddressFundsFeeStrategy>,
+        signer: &mut SimpleSigner,
+        rng: &mut StdRng,
+        platform_version: &PlatformVersion,
+    ) -> Option<StateTransition> {
+        let inputs =
+            current_addresses_with_balance.take_random_amounts_with_range(amount_range, rng)?;
+
+        tracing::debug!(?inputs, "Preparing address funds transfer transition");
+
+        // Calculate total input amount (we'll distribute this among outputs)
+        let total_input: Credits = inputs.values().map(|(_, credits)| credits).sum();
+
+        // Generate random number of outputs within the specified range
+        let output_count = rng.gen_range(output_count_range.clone()).max(1) as usize;
+
+        // Generate fee strategy: if not provided, reduce from outputs sequentially
+        // Limited to 4 steps due to max_address_fee_strategies platform constraint
+        let fee_strategy = fee_strategy.clone().unwrap_or_else(|| {
+            let max_steps = output_count.min(4);
+            (0..max_steps as u16)
+                .map(AddressFundsFeeStrategyStep::ReduceOutput)
+                .collect()
+        });
+
+        // Create output addresses and distribute funds evenly
+        let amount_per_output = total_input / output_count as Credits;
+        let mut outputs = BTreeMap::new();
+
+        // Collect existing addresses that are not used as inputs (for potential reuse as outputs)
+        let input_addresses: std::collections::HashSet<_> = inputs.keys().cloned().collect();
+        let mut available_existing_addresses: Vec<_> = current_addresses_with_balance
+            .addresses_with_balance
+            .keys()
+            .filter(|addr| !input_addresses.contains(*addr))
+            .cloned()
+            .collect();
+
+        for _ in 0..output_count {
+            // Check if we should use an existing address as output
+            let use_existing = use_existing_outputs_chance
+                .map(|chance| rng.gen::<f64>() < chance && !available_existing_addresses.is_empty())
+                .unwrap_or(false);
+
+            let address = if use_existing {
+                // Pick a random existing address and remove it from available pool
+                let idx = rng.gen_range(0..available_existing_addresses.len());
+                let existing_address = available_existing_addresses.swap_remove(idx);
+                // Update the balance for this existing address
+                if let Some((nonce, balance)) = current_addresses_with_balance
+                    .addresses_with_balance
+                    .get(&existing_address)
+                {
+                    current_addresses_with_balance
+                        .addresses_in_block_with_new_balance
+                        .insert(
+                            existing_address.clone(),
+                            (*nonce, balance + amount_per_output),
+                        );
+                }
+                existing_address
+            } else {
+                // Create a new address
+                let new_address = signer.add_random_address_key(rng);
+                current_addresses_with_balance
+                    .addresses_in_block_with_new_balance
+                    .insert(new_address.clone(), (0, amount_per_output));
+                new_address
+            };
+
+            outputs.insert(address, amount_per_output);
+        }
+
+        let transfer_transition = AddressFundsTransferTransition::try_from_inputs_with_signer(
+            inputs,
+            outputs,
+            fee_strategy,
+            signer,
+            0,
+            platform_version,
+        )
+        .await
+        .expect("expected to create address funds transfer transition");
+
+        tracing::debug!(
+            ?transfer_transition,
+            "Address funds transfer transition successfully signed"
+        );
+
+        Some(transfer_transition)
+    }
+
+    async fn create_address_withdrawal_transition(
+        &mut self,
+        current_addresses_with_balance: &mut AddressesWithBalance,
+        amount_range: &AmountRange,
+        maybe_output_amount: &MaybeOutputAmount,
+        fee_strategy: &Option<AddressFundsFeeStrategy>,
+        signer: &mut SimpleSigner,
+        rng: &mut StdRng,
+        platform_version: &PlatformVersion,
+    ) -> Option<StateTransition> {
+        let inputs =
+            current_addresses_with_balance.take_random_amounts_with_range(amount_range, rng)?;
+
+        let fee_strategy = fee_strategy
+            .clone()
+            .unwrap_or(vec![AddressFundsFeeStrategyStep::DeductFromInput(0)]);
+        tracing::debug!(?inputs, "Preparing address credit withdrawal transition");
+
+        // Determine if we have an output (change address) and its amount
+        let output = if let Some(output_amount_range) = maybe_output_amount {
+            let output_amount = rng.gen_range(output_amount_range.clone());
+            let output_address = signer.add_random_address_key(rng);
+            current_addresses_with_balance
+                .addresses_in_block_with_new_balance
+                .insert(output_address.clone(), (0, output_amount));
+            Some((output_address, output_amount))
+        } else {
+            None
+        };
+
+        // Generate a random output script for the withdrawal
+        let output_script = if rng.gen_bool(0.5) {
+            CoreScript::random_p2pkh(rng)
+        } else {
+            CoreScript::random_p2sh(rng)
+        };
+
+        let withdrawal_transition = AddressCreditWithdrawalTransition::try_from_inputs_with_signer(
+            inputs,
+            output,
+            fee_strategy,
+            1, // core_fee_per_byte
+            Pooling::Never,
+            output_script,
+            signer,
+            0,
+            platform_version,
+        )
+        .await
+        .expect("expected to create address credit withdrawal transition");
+
+        tracing::debug!(
+            ?withdrawal_transition,
+            "Address credit withdrawal transition successfully signed"
+        );
+
+        Some(withdrawal_transition)
+    }
+
+    async fn create_address_funding_from_asset_lock_transitions(
+        &mut self,
+        current_addresses_with_balance: &mut AddressesWithBalance,
+        amount_range: &AmountRange,
+        rng: &mut StdRng,
+        signer: &mut SimpleSigner,
+        instant_lock_quorums: &Quorums<SigningQuorum>,
+        platform_config: &PlatformConfig,
+        platform_version: &PlatformVersion,
+    ) -> Option<StateTransition> {
+        let (asset_lock_proof, asset_lock_private_key, funded_amount) = self
+            .create_asset_lock_proof_with_amount(
+                rng,
+                amount_range,
+                instant_lock_quorums,
+                platform_config,
+                platform_version,
+            );
+
+        let address = signer.add_random_address_key(rng);
+        current_addresses_with_balance.register_new_address_keep_only_highest(
+            address,
+            funded_amount,
+            self.max_addresses_to_choose_from_in_cache,
+        );
+        let mut outputs = BTreeMap::new();
+        outputs.insert(address.clone(), None);
+
+        tracing::debug!(?outputs, "Preparing funding transition");
+        let funding_transition =
+            AddressFundingFromAssetLockTransitionV0::try_from_asset_lock_with_signer_and_private_key(
+                asset_lock_proof,
+                asset_lock_private_key.as_slice(),
+                BTreeMap::new(),
+                outputs,
+                vec![AddressFundsFeeStrategyStep::ReduceOutput(0)],
+                signer,
+                0,
+                platform_version,
+            )
+            .await
+            .ok()?;
+
+        Some(funding_transition)
+    }
+
+    // TODO: Re-enable when OperationType has shielded variants
+    // /// Build a Shield state transition (transparent addresses -> shielded pool).
+    // ///
+    // /// Creates an output-only Orchard bundle (no spends) with a real Halo 2 proof,
+    // /// signs the address input witnesses, and returns the transition.
+    // fn create_shield_transition(
+    //     &mut self,
+    //     current_addresses_with_balance: &mut AddressesWithBalance,
+    //     amount_range: &AmountRange,
+    //     signer: &mut SimpleSigner,
+    //     rng: &mut StdRng,
+    //     platform_version: &PlatformVersion,
+    // ) -> Option<StateTransition> {
+    //     // 1. Pick input addresses with sufficient balances
+    //     let inputs =
+    //         current_addresses_with_balance.take_random_amounts_with_range(amount_range, rng)?;
+    //
+    //     let total_input: Credits = inputs.values().map(|(_, credits)| credits).sum();
+    //
+    //     tracing::debug!(?inputs, total_input, "Preparing shield transition");
+    //
+    //     // 2. Create deterministic Orchard recipient (same key each time is fine for testing)
+    //     let sk = SpendingKey::from_bytes([0u8; 32]).unwrap();
+    //     let fvk = FullViewingKey::from(&sk);
+    //     let recipient = fvk.address_at(0u32, Scope::External);
+    //
+    //     // 3. Build output-only Orchard bundle (shield = outputs only, no spends)
+    //     let anchor = Anchor::empty_tree();
+    //     let mut builder = Builder::<DashMemo>::new(
+    //         BundleType::Transactional {
+    //             flags: OrchardFlags::SPENDS_DISABLED,
+    //             bundle_required: false,
+    //         },
+    //         anchor,
+    //     );
+    //
+    //     // Use total_input as the shielded value (fee will be deducted from inputs)
+    //     // value_balance will be negative (money flowing into the pool)
+    //     let shield_value = total_input;
+    //     builder
+    //         .add_output(
+    //             None,
+    //             recipient,
+    //             NoteValue::from_raw(shield_value),
+    //             [0u8; 36],
+    //         )
+    //         .expect("expected to add output");
+    //
+    //     // 4. Build -> prove -> sign
+    //     let pk = get_proving_key();
+    //     let mut bundle_rng = rand::rngs::OsRng;
+    //     let (unauthorized, _) = builder
+    //         .build::<i64>(&mut bundle_rng)
+    //         .expect("expected to build bundle")
+    //         .expect("expected bundle to be present");
+    //
+    //     let bundle_commitment: [u8; 32] = unauthorized.commitment().into();
+    //     let sighash = compute_platform_sighash(&bundle_commitment, &[]);
+    //     let proven = unauthorized
+    //         .create_proof(pk, &mut bundle_rng)
+    //         .expect("expected to create proof");
+    //     let bundle = proven
+    //         .apply_signatures(bundle_rng, sighash, &[])
+    //         .expect("expected to apply signatures");
+    //
+    //     // 5. Decompose bundle into platform serialization fields
+    //     let (actions, flags, value_balance, anchor_bytes, proof_bytes, binding_sig) =
+    //         serialize_authorized_bundle(&bundle);
+    //
+    //     // 6. Build ShieldTransition with signed address witnesses
+    //     let fee_strategy: AddressFundsFeeStrategy =
+    //         vec![AddressFundsFeeStrategyStep::DeductFromInput(0)].into();
+    //
+    //     let shield_transition = ShieldTransition::try_from_bundle_with_signer(
+    //         inputs,
+    //         actions,
+    //         flags,
+    //         value_balance,
+    //         anchor_bytes,
+    //         proof_bytes,
+    //         binding_sig,
+    //         fee_strategy,
+    //         signer,
+    //         0,
+    //         platform_version,
+    //     )
+    //     .expect("expected to create shield transition");
+    //
+    //     tracing::debug!("Shield transition successfully built and signed");
+    //
+    //     Some(shield_transition)
+    // }
+    //
+    // /// Build a ShieldFromAssetLock state transition (core asset lock -> shielded pool).
+    // ///
+    // /// Like Shield, this is output-only (no spends). The funds come from a core
+    // /// asset lock proof rather than platform address inputs.
+    // fn create_shield_from_asset_lock_transition(
+    //     &mut self,
+    //     amount_range: &AmountRange,
+    //     rng: &mut StdRng,
+    //     instant_lock_quorums: &Quorums<SigningQuorum>,
+    //     platform_config: &PlatformConfig,
+    //     platform_version: &PlatformVersion,
+    // ) -> Option<StateTransition> {
+    //     // 1. Create asset lock proof
+    //     let (asset_lock_proof, asset_lock_private_key, funded_amount) = self
+    //         .create_asset_lock_proof_with_amount(
+    //             rng,
+    //             amount_range,
+    //             instant_lock_quorums,
+    //             platform_config,
+    //             platform_version,
+    //         );
+    //
+    //     tracing::debug!(funded_amount, "Preparing shield from asset lock transition");
+    //
+    //     // 2. Create deterministic Orchard recipient
+    //     let sk = SpendingKey::from_bytes(TEST_SK_BYTES).unwrap();
+    //     let fvk = FullViewingKey::from(&sk);
+    //     let recipient = fvk.address_at(0u32, Scope::External);
+    //
+    //     // 3. Build output-only Orchard bundle (same as Shield)
+    //     let anchor = Anchor::empty_tree();
+    //     let mut builder = Builder::<DashMemo>::new(
+    //         BundleType::Transactional {
+    //             flags: OrchardFlags::SPENDS_DISABLED,
+    //             bundle_required: false,
+    //         },
+    //         anchor,
+    //     );
+    //
+    //     builder
+    //         .add_output(
+    //             None,
+    //             recipient,
+    //             NoteValue::from_raw(funded_amount),
+    //             [0u8; 36],
+    //         )
+    //         .expect("expected to add output");
+    //
+    //     // 4. Build -> prove -> sign
+    //     let pk = get_proving_key();
+    //     let mut bundle_rng = rand::rngs::OsRng;
+    //     let (unauthorized, _) = builder
+    //         .build::<i64>(&mut bundle_rng)
+    //         .expect("expected to build bundle")
+    //         .expect("expected bundle to be present");
+    //
+    //     let bundle_commitment: [u8; 32] = unauthorized.commitment().into();
+    //     let sighash = compute_platform_sighash(&bundle_commitment, &[]);
+    //     let proven = unauthorized
+    //         .create_proof(pk, &mut bundle_rng)
+    //         .expect("expected to create proof");
+    //     let bundle = proven
+    //         .apply_signatures(bundle_rng, sighash, &[])
+    //         .expect("expected to apply signatures");
+    //
+    //     // 5. Decompose bundle
+    //     let (actions, flags, value_balance, anchor_bytes, proof_bytes, binding_sig) =
+    //         serialize_authorized_bundle(&bundle);
+    //
+    //     // 6. Build ShieldFromAssetLockTransition
+    //     let transition = ShieldFromAssetLockTransition::try_from_asset_lock_with_bundle(
+    //         asset_lock_proof,
+    //         asset_lock_private_key.as_slice(),
+    //         actions,
+    //         flags,
+    //         value_balance,
+    //         anchor_bytes,
+    //         proof_bytes,
+    //         binding_sig,
+    //         0,
+    //         platform_version,
+    //     )
+    //     .expect("expected to create shield from asset lock transition");
+    //
+    //     tracing::debug!("ShieldFromAssetLock transition successfully built and signed");
+    //
+    //     Some(transition)
+    // }
+    //
+    // /// Build a ShieldedTransfer state transition (shielded pool -> shielded pool).
+    // ///
+    // /// Spends an existing note and creates a new note with the same value.
+    // /// Requires notes from prior Shield or ShieldFromAssetLock transitions.
+    // fn create_shielded_transfer_transition(
+    //     &mut self,
+    //     _amount_range: &AmountRange,
+    //     _rng: &mut StdRng,
+    //     shielded_state: &mut Option<ShieldedState>,
+    //     platform_version: &PlatformVersion,
+    // ) -> Option<StateTransition> {
+    //     let state = shielded_state.as_mut()?;
+    //     if !state.has_spendable_notes() {
+    //         tracing::debug!("No spendable notes available for shielded transfer");
+    //         return None;
+    //     }
+    //
+    //     let (note, merkle_path, anchor) = state.take_spendable_note()?;
+    //     let note_value = note.value().inner();
+    //
+    //     tracing::debug!(note_value, "Building shielded transfer bundle");
+    //
+    //     let fvk = state.fvk.clone();
+    //     let ask = state.ask.clone();
+    //     let recipient = fvk.address_at(0u32, Scope::External);
+    //
+    //     // Build bundle: spend note -> output same value (value_balance = 0)
+    //     let mut builder = Builder::<DashMemo>::new(BundleType::DEFAULT, anchor);
+    //     builder
+    //         .add_spend(fvk, note, merkle_path)
+    //         .expect("expected to add spend");
+    //     builder
+    //         .add_output(None, recipient, NoteValue::from_raw(note_value), [0u8; 36])
+    //         .expect("expected to add output");
+    //
+    //     let pk = get_proving_key();
+    //     let mut bundle_rng = rand::rngs::OsRng;
+    //     let (unauthorized, _) = builder
+    //         .build::<i64>(&mut bundle_rng)
+    //         .expect("expected to build bundle")
+    //         .expect("expected bundle to be present");
+    //
+    //     // Shielded transfer has no extra_data in sighash
+    //     let bundle_commitment: [u8; 32] = unauthorized.commitment().into();
+    //     let sighash = compute_platform_sighash(&bundle_commitment, &[]);
+    //     let proven = unauthorized
+    //         .create_proof(pk, &mut bundle_rng)
+    //         .expect("expected to create proof");
+    //     let bundle = proven
+    //         .apply_signatures(bundle_rng, sighash, &[ask])
+    //         .expect("expected to apply signatures");
+    //
+    //     let (actions, flags, value_balance, anchor_bytes, proof_bytes, binding_sig) =
+    //         serialize_authorized_bundle(&bundle);
+    //
+    //     // value_balance should be 0 (all value stays in pool)
+    //     // Cast i64 to u64 for the ShieldedTransferTransition API
+    //     let transition = ShieldedTransferTransition::try_from_bundle(
+    //         actions,
+    //         flags,
+    //         value_balance as u64,
+    //         anchor_bytes,
+    //         proof_bytes,
+    //         binding_sig,
+    //         platform_version,
+    //     )
+    //     .expect("expected to create shielded transfer transition");
+    //
+    //     tracing::debug!("ShieldedTransfer transition successfully built");
+    //
+    //     Some(transition)
+    // }
+    //
+    // /// Build an Unshield state transition (shielded pool -> platform address).
+    // ///
+    // /// Spends an existing note and sends the value to a platform address.
+    // /// Requires notes from prior Shield or ShieldFromAssetLock transitions.
+    // fn create_unshield_transition(
+    //     &mut self,
+    //     _current_addresses_with_balance: &mut AddressesWithBalance,
+    //     _amount_range: &AmountRange,
+    //     _rng: &mut StdRng,
+    //     shielded_state: &mut Option<ShieldedState>,
+    //     platform_version: &PlatformVersion,
+    // ) -> Option<StateTransition> {
+    //     let state = shielded_state.as_mut()?;
+    //     if !state.has_spendable_notes() {
+    //         tracing::debug!("No spendable notes available for unshield");
+    //         return None;
+    //     }
+    //
+    //     let (note, merkle_path, anchor) = state.take_spendable_note()?;
+    //     let note_value = note.value().inner();
+    //
+    //     tracing::debug!(note_value, "Building unshield bundle");
+    //
+    //     let fvk = state.fvk.clone();
+    //     let ask = state.ask.clone();
+    //     let recipient = fvk.address_at(0u32, Scope::External);
+    //
+    //     // Spend full note, output half back to pool, unshield the other half
+    //     let unshield_amount = note_value / 2;
+    //     let change_amount = note_value - unshield_amount;
+    //
+    //     // Build bundle: spend note -> output change (value_balance = unshield_amount)
+    //     let mut builder = Builder::<DashMemo>::new(BundleType::DEFAULT, anchor);
+    //     builder
+    //         .add_spend(fvk, note, merkle_path)
+    //         .expect("expected to add spend");
+    //     builder
+    //         .add_output(
+    //             None,
+    //             recipient,
+    //             NoteValue::from_raw(change_amount),
+    //             [0u8; 36],
+    //         )
+    //         .expect("expected to add output");
+    //
+    //     let pk = get_proving_key();
+    //     let mut bundle_rng = rand::rngs::OsRng;
+    //     let (unauthorized, _) = builder
+    //         .build::<i64>(&mut bundle_rng)
+    //         .expect("expected to build bundle")
+    //         .expect("expected bundle to be present");
+    //
+    //     // Unshield extra_data = output_address.to_bytes() || amount.to_le_bytes()
+    //     let output_address = PlatformAddress::P2pkh([42u8; 20]);
+    //     let amount = unshield_amount;
+    //     let mut extra_sighash_data = output_address.to_bytes();
+    //     extra_sighash_data.extend_from_slice(&amount.to_le_bytes());
+    //
+    //     let bundle_commitment: [u8; 32] = unauthorized.commitment().into();
+    //     let sighash = compute_platform_sighash(&bundle_commitment, &extra_sighash_data);
+    //     let proven = unauthorized
+    //         .create_proof(pk, &mut bundle_rng)
+    //         .expect("expected to create proof");
+    //     let bundle = proven
+    //         .apply_signatures(bundle_rng, sighash, &[ask])
+    //         .expect("expected to apply signatures");
+    //
+    //     let (actions, flags, value_balance, anchor_bytes, proof_bytes, binding_sig) =
+    //         serialize_authorized_bundle(&bundle);
+    //
+    //     let transition = UnshieldTransition::try_from_bundle(
+    //         output_address,
+    //         amount,
+    //         actions,
+    //         flags,
+    //         value_balance,
+    //         anchor_bytes,
+    //         proof_bytes,
+    //         binding_sig,
+    //         platform_version,
+    //     )
+    //     .expect("expected to create unshield transition");
+    //
+    //     tracing::debug!(amount, "Unshield transition successfully built");
+    //
+    //     Some(transition)
+    // }
+    //
+    // /// Build a ShieldedWithdrawal state transition (shielded pool -> core L1 address).
+    // ///
+    // /// Spends an existing note and withdraws the value to a core script.
+    // /// Requires notes from prior Shield or ShieldFromAssetLock transitions.
+    // fn create_shielded_withdrawal_transition(
+    //     &mut self,
+    //     _amount_range: &AmountRange,
+    //     _rng: &mut StdRng,
+    //     shielded_state: &mut Option<ShieldedState>,
+    //     platform_version: &PlatformVersion,
+    // ) -> Option<StateTransition> {
+    //     let state = shielded_state.as_mut()?;
+    //     if !state.has_spendable_notes() {
+    //         tracing::debug!("No spendable notes available for shielded withdrawal");
+    //         return None;
+    //     }
+    //
+    //     let (note, merkle_path, anchor) = state.take_spendable_note()?;
+    //     let note_value = note.value().inner();
+    //
+    //     tracing::debug!(note_value, "Building shielded withdrawal bundle");
+    //
+    //     let fvk = state.fvk.clone();
+    //     let ask = state.ask.clone();
+    //     let recipient = fvk.address_at(0u32, Scope::External);
+    //
+    //     // Spend full note, output half back to pool, withdraw the other half
+    //     let withdrawal_amount = note_value / 2;
+    //     let change_amount = note_value - withdrawal_amount;
+    //
+    //     // Build bundle: spend note -> output change (value_balance = withdrawal_amount)
+    //     let mut builder = Builder::<DashMemo>::new(BundleType::DEFAULT, anchor);
+    //     builder
+    //         .add_spend(fvk, note, merkle_path)
+    //         .expect("expected to add spend");
+    //     builder
+    //         .add_output(
+    //             None,
+    //             recipient,
+    //             NoteValue::from_raw(change_amount),
+    //             [0u8; 36],
+    //         )
+    //         .expect("expected to add output");
+    //
+    //     let pk = get_proving_key();
+    //     let mut bundle_rng = rand::rngs::OsRng;
+    //     let (unauthorized, _) = builder
+    //         .build::<i64>(&mut bundle_rng)
+    //         .expect("expected to build bundle")
+    //         .expect("expected bundle to be present");
+    //
+    //     // ShieldedWithdrawal extra_data = output_script.as_bytes() || amount.to_le_bytes()
+    //     let output_script = CoreScript::new_p2pkh([7u8; 20]);
+    //     let amount = withdrawal_amount;
+    //     let mut extra_sighash_data = output_script.as_bytes().to_vec();
+    //     extra_sighash_data.extend_from_slice(&amount.to_le_bytes());
+    //
+    //     let bundle_commitment: [u8; 32] = unauthorized.commitment().into();
+    //     let sighash = compute_platform_sighash(&bundle_commitment, &extra_sighash_data);
+    //     let proven = unauthorized
+    //         .create_proof(pk, &mut bundle_rng)
+    //         .expect("expected to create proof");
+    //     let bundle = proven
+    //         .apply_signatures(bundle_rng, sighash, &[ask])
+    //         .expect("expected to apply signatures");
+    //
+    //     let (actions, flags, value_balance, anchor_bytes, proof_bytes, binding_sig) =
+    //         serialize_authorized_bundle(&bundle);
+    //
+    //     let transition = ShieldedWithdrawalTransition::try_from_bundle(
+    //         amount,
+    //         actions,
+    //         flags,
+    //         value_balance,
+    //         anchor_bytes,
+    //         proof_bytes,
+    //         binding_sig,
+    //         1, // core_fee_per_byte
+    //         Pooling::Never,
+    //         output_script,
+    //         platform_version,
+    //     )
+    //     .expect("expected to create shielded withdrawal transition");
+    //
+    //     tracing::debug!(amount, "ShieldedWithdrawal transition successfully built");
+    //
+    //     Some(transition)
+    // }
 }
 
 pub enum StrategyRandomness {
@@ -1833,6 +3075,7 @@ pub struct ChainExecutionOutcome<'a> {
     pub abci_app: FullAbciApplication<'a, MockCoreRPCLike>,
     pub masternode_identity_balances: BTreeMap<[u8; 32], Credits>,
     pub identities: Vec<Identity>,
+    pub addresses_with_balance: AddressesWithBalance,
     pub proposers: Vec<MasternodeListItemWithUpdates>,
     pub validator_quorums: BTreeMap<QuorumHash, TestQuorumInfo>,
     pub current_validator_quorum_hash: QuorumHash,
@@ -1862,6 +3105,7 @@ impl ChainExecutionOutcome<'_> {
 
 pub struct ChainExecutionParameters {
     pub block_start: u64,
+    #[allow(dead_code)]
     pub core_height_start: u32,
     pub block_count: u64,
     pub proposers: Vec<MasternodeListItemWithUpdates>,
@@ -1877,6 +3121,7 @@ pub struct ChainExecutionParameters {
     pub start_time_ms: u64,
     pub current_time_ms: u64,
     pub current_identities: Vec<Identity>,
+    pub current_addresses_with_balance: AddressesWithBalance,
 }
 
 fn create_signed_instant_asset_lock_proofs_for_identities(
@@ -1904,7 +3149,7 @@ fn create_signed_instant_asset_lock_proofs_for_identities(
 
             let pk_fixed: [u8; 32] = pk.try_into().unwrap();
             let secret_key = SecretKey::from_str(hex::encode(pk_fixed).as_str()).unwrap();
-            let private_key = PrivateKey::new(secret_key, Network::Dash);
+            let private_key = PrivateKey::new(secret_key, Network::Mainnet);
 
             let mut asset_lock_proof = instant_asset_lock_proof_fixture_with_dynamic_range(
                 private_key,

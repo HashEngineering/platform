@@ -8,10 +8,13 @@
 # ignore VSCode project specific files
 .vscode
 
+# ignore Serena MCP project-local cache/config
+.serena
+
 # Env file
 .env
 
-# NYC test runnner
+# NYC test runner
 .nyc_output
 
 node_modules
@@ -24,7 +27,6 @@ node_modules
 # Yarn
 .yarn/*
 !.yarn/cache
-!.yarn/constraints.pro
 !.yarn/patches
 !.yarn/plugins
 !.yarn/releases
@@ -33,7 +35,70 @@ node_modules
 
 # Rust build artifacts
 /target
+packages/*/target
 .gitaipconfig
+
+# Swift build artifacts and IDE files
+.build/
+.swiftpm/
+.index-build/
+DerivedData/
+*.xcworkspace
+xcuserdata/
+*.dSYM/
+*.o
+*.swiftdeps
+*.d
+
+# Generated Swift SDK header files
+packages/swift-sdk/Sources/CDashSDKFFI/DashSDKFFI.h
+packages/swift-sdk/generated/DashSDKFFI.h
+
+# Generated Swift SDK files
+packages/swift-sdk/Sources/CDashSDKFFI/librs_sdk_ffi.pc
+packages/swift-sdk/SwiftExampleApp/DashSDK.xcframework/
+packages/swift-sdk/*.xcframework/
+packages/swift-sdk/**/*.xcframework/
+
+# rs-sdk-ffi build directory
+packages/rs-sdk-ffi/build/
+
+# Swift SDK build outputs
+packages/swift-sdk/build_output.txt
+packages/swift-sdk/build/
+
+# wasm-drive-verify build artifacts
+packages/wasm-drive-verify/target/
+packages/wasm-drive-verify/wasm/
+packages/wasm-drive-verify/pkg/
+packages/wasm-drive-verify/dist/
+packages/wasm-drive-verify/analysis-results/
+packages/wasm-drive-verify/size-analysis/
+packages/wasm-drive-verify/test-tree-shaking/
+
+# wasm-sdk build artifacts
+packages/wasm-sdk/target/
+packages/wasm-sdk/.cargo/
+packages/wasm-sdk/pkg/
+packages/wasm-sdk/dist/
+packages/wasm-sdk/*.bak
+packages/wasm-sdk/wasm_sdk.js
+packages/wasm-sdk/wasm_sdk_bg.wasm
+packages/wasm-sdk/documentation-check-report.txt
+packages/wasm-sdk/extracted_definitions.json
+
+# mdBook build output (built by CI)
+book/book/
 
 # gRPC coverage report
 grpc-coverage-report.txt
+
+__pycache__/
+.claude/settings.local.json
+.claude/worktrees/
+.claude/scheduled_tasks.lock
+.mcp.json
+.codex/
+
+# Security audit reports (local-only, not committed)
+audits/

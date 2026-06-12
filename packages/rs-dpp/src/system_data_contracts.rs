@@ -4,8 +4,69 @@ use crate::ProtocolError;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::data_contract::accessors::v0::DataContractV0Setters;
+use crate::data_contract::config::v1::DataContractConfigSettersV1;
+use crate::data_contract::config::DataContractConfig;
 pub use data_contracts::*;
 use platform_version::version::PlatformVersion;
+
+pub trait ConfigurationForSystemContract {
+    fn configuration_in_platform_version(
+        &self,
+        version: &PlatformVersion,
+    ) -> Result<DataContractConfig, ProtocolError>;
+}
+
+impl ConfigurationForSystemContract for SystemDataContract {
+    fn configuration_in_platform_version(
+        &self,
+        platform_version: &PlatformVersion,
+    ) -> Result<DataContractConfig, ProtocolError> {
+        match self {
+            SystemDataContract::Withdrawals => {
+                let mut config = DataContractConfig::default_for_version(platform_version)?;
+                config.set_sized_integer_types_enabled(false);
+                Ok(config)
+            }
+            SystemDataContract::MasternodeRewards => {
+                let mut config = DataContractConfig::default_for_version(platform_version)?;
+                config.set_sized_integer_types_enabled(false);
+                Ok(config)
+            }
+            // Reserved slot with no implementation. Any caller that reaches here
+            // has a bug (they should have short-circuited on `source()` returning
+            // `ContractReserved`). Return a harmless default config rather than
+            // panicking so this failure mode stays non-fatal.
+            SystemDataContract::FeatureFlags => {
+                DataContractConfig::default_for_version(platform_version)
+            }
+            SystemDataContract::DPNS => {
+                let mut config = DataContractConfig::default_for_version(platform_version)?;
+                config.set_sized_integer_types_enabled(false);
+                Ok(config)
+            }
+            SystemDataContract::Dashpay => {
+                let mut config = DataContractConfig::default_for_version(platform_version)?;
+                config.set_sized_integer_types_enabled(false);
+                Ok(config)
+            }
+            SystemDataContract::WalletUtils => {
+                let mut config = DataContractConfig::default_for_version(platform_version)?;
+                config.set_sized_integer_types_enabled(false);
+                Ok(config)
+            }
+            SystemDataContract::TokenHistory => {
+                let mut config = DataContractConfig::default_for_version(platform_version)?;
+                config.set_sized_integer_types_enabled(true);
+                Ok(config)
+            }
+            SystemDataContract::KeywordSearch => {
+                let mut config = DataContractConfig::default_for_version(platform_version)?;
+                config.set_sized_integer_types_enabled(true);
+                Ok(config)
+            }
+        }
+    }
+}
 
 fn create_data_contract(
     factory: &DataContractFactory,
@@ -25,11 +86,11 @@ fn create_data_contract(
     let id = Identifier::from(id_bytes);
     let owner_id = Identifier::from(owner_id_bytes);
 
-    let mut data_contract = factory.create_with_value_config(
+    let mut data_contract = factory.create(
         owner_id,
         0,
         document_schemas.into(),
-        None,
+        Some(system_contract.configuration_in_platform_version(platform_version)?),
         definitions.map(|def| def.into()),
     )?;
 
@@ -101,35 +162,35 @@ mod tests {
         assert_ne!(contract_1, contract_2);
         let v1_ser: DataContractInSerializationFormat = contract_1
             .clone()
-            .try_into_platform_versioned(&PlatformVersion::get(1).unwrap())
+            .try_into_platform_versioned(PlatformVersion::get(1).unwrap())
             .expect("expected to serialize");
         let v2_ser: DataContractInSerializationFormat = contract_2
             .clone()
-            .try_into_platform_versioned(&PlatformVersion::get(1).unwrap())
+            .try_into_platform_versioned(PlatformVersion::get(1).unwrap())
             .expect("expected to serialize");
         assert_eq!(v1_ser, v2_ser);
 
         let v1_bytes = contract_1
-            .serialize_to_bytes_with_platform_version(&PlatformVersion::get(1).unwrap())
+            .serialize_to_bytes_with_platform_version(PlatformVersion::get(1).unwrap())
             .expect("expected to serialize");
         let v8_bytes = contract_1
-            .serialize_to_bytes_with_platform_version(&PlatformVersion::get(8).unwrap())
+            .serialize_to_bytes_with_platform_version(PlatformVersion::get(8).unwrap())
             .expect("expected to serialize");
         let v9_bytes = contract_1
-            .serialize_to_bytes_with_platform_version(&PlatformVersion::get(9).unwrap())
+            .serialize_to_bytes_with_platform_version(PlatformVersion::get(9).unwrap())
             .expect("expected to serialize");
         assert_eq!(v1_bytes.len(), 1747);
         assert_eq!(v8_bytes.len(), 1747);
         assert_eq!(v9_bytes.len(), 1757); // this will still use a config v0 without sized_integer_types
 
         let v1_bytes = contract_2
-            .serialize_to_bytes_with_platform_version(&PlatformVersion::get(8).unwrap())
+            .serialize_to_bytes_with_platform_version(PlatformVersion::get(8).unwrap())
             .expect("expected to serialize");
         let v8_bytes = contract_2
-            .serialize_to_bytes_with_platform_version(&PlatformVersion::get(8).unwrap())
+            .serialize_to_bytes_with_platform_version(PlatformVersion::get(8).unwrap())
             .expect("expected to serialize");
         let v9_bytes = contract_2
-            .serialize_to_bytes_with_platform_version(&PlatformVersion::get(9).unwrap())
+            .serialize_to_bytes_with_platform_version(PlatformVersion::get(9).unwrap())
             .expect("expected to serialize");
         assert_eq!(v1_bytes.len(), 1747);
         assert_eq!(v8_bytes.len(), 1747);

@@ -24,18 +24,18 @@ It uses Envoy, a high-performance proxy, to route HTTP requests to the appropria
              ┌───────────────────┬┴─────────────┐      │                   │
              │                   │              │      │  Rate Limiter     │
              │                   │              │      │  Redis Storage    │
-      ┌──────▼─────┐     ┌──────▼─────┐  ┌─────▼─────┐ └───────────────────┘
-      │            │     │            │  │           │
-      │  DAPI API  │     │  DAPI Core │  │ Drive ABCI│
-      │            │     │  Streams   │  │           │
-      └────────────┘     └────────────┘  └───────────┘
+      ┌──────▼─────┐                      ┌─────▼─────┐ └───────────────────┘
+      │            │                      │           │
+      │  rs-dapi   │                      │ Drive ABCI│
+      │            │                      │           │
+      └────────────┘                      └───────────┘
 ```
 
 ## Overview
 
 The Gateway service performs several key functions:
 
-1. **Request Routing**: Directs incoming API requests to the appropriate backend services (DAPI API, DAPI Core Streams, Drive gRPC)
+1. **Request Routing**: Directs incoming API requests to the appropriate backend services (rs-dapi, Drive gRPC)
 2. **Protocol Support**: Handles HTTP/1.1, HTTP/2, and gRPC-Web protocols
 3. **Connection Management**: Controls connection timeouts, idle timeouts, and concurrent stream limits
 4. **Load Protection**: Implements circuit breaking, rate limiting, and resource monitoring
@@ -58,9 +58,8 @@ Listeners define how the Gateway accepts connections:
 
 Clusters define the backend services the Gateway connects to:
 
-- **dapi_api**: Handles general DAPI requests
-- **dapi_core_streams**: Handles streaming Core endpoints
-- **dapi_json_rpc**: Handles JSON-RPC requests
+- **rs_dapi**: Handles gRPC/gRPC-Web and streaming endpoints
+- **rs_dapi_json_rpc**: Handles JSON-RPC requests
 - **drive_grpc**: Handles Platform requests
 - **ratelimit_service**: Optional service for rate limiting
 - **admin**: Internal administrative interface
@@ -69,11 +68,12 @@ Clusters define the backend services the Gateway connects to:
 
 The Gateway routes requests to different backend services based on URL path:
 
-- Core streaming endpoints (`/org.dash.platform.dapi.v0.Core/subscribeTo*`): routed to `dapi_core_streams`
-- Other Core endpoints (`/org.dash.platform.dapi.v0.Core*`): routed to `dapi_api`
-- Platform waitForStateTransitionResult (`/org.dash.platform.dapi.v0.Platform/waitForStateTransitionResult`): routed to `dapi_api` with extended timeout
-- Platform endpoints (`/org.dash.platform.dapi.v0.Platform*`): routed to `drive_grpc`
-- JSON-RPC endpoints (`/`): routed to `dapi_json_rpc`
+- Core streaming endpoints (`/org.dash.platform.dapi.v0.Core/subscribeTo*`): routed to `rs_dapi`
+- Other Core endpoints (`/org.dash.platform.dapi.v0.Core*`): routed to `rs_dapi`
+- Platform streaming endpoints (`/org.dash.platform.dapi.v0.Platform/subscribePlatformEvents`): routed to `rs_dapi` with extended timeout
+- Platform waitForStateTransitionResult (`/org.dash.platform.dapi.v0.Platform/waitForStateTransitionResult`): routed to `rs_dapi` with extended timeout
+- Other Platform endpoints (`/org.dash.platform.dapi.v0.Platform*`): routed to `rs_dapi`
+- JSON-RPC endpoints (`/`): routed to `rs_dapi_json_rpc`
 
 ## Configuration Options
 
@@ -125,9 +125,8 @@ circuit_breakers:
 Each backend service has its own circuit breaker configuration with a default of 100 max requests.
 
 **Config options**:
-- DAPI API: `platform.gateway.upstreams.dapiApi.maxRequests`
-- DAPI Core Streams: `platform.gateway.upstreams.dapiCoreStreams.maxRequests`
-- DAPI JSON-RPC: `platform.gateway.upstreams.dapiJsonRpc.maxRequests`
+- rs-dapi gRPC: `platform.gateway.upstreams.rsDapi.maxRequests`
+- rs-dapi JSON-RPC: `platform.gateway.upstreams.dapiJsonRpc.maxRequests`
 - Drive gRPC: `platform.gateway.upstreams.driveGrpc.maxRequests`
 
 ### Resource Monitoring and Overload Protection
@@ -259,9 +258,9 @@ Metrics include:
 **Config options**:
 - Enable/disable metrics: `platform.gateway.metrics.enabled` (default: false)
 - Host: `platform.gateway.metrics.host` (default: 127.0.0.1)
-- Port: `platform.gateway.metrics.port` (default: 9090)
+- Port: `platform.gateway.metrics.port` (default: 9090 mainnet, 19090 testnet, 29090 local)
 
-**Note:** admin interface must be enabled too.
+**Note:** Dashmate automatically enables the Envoy admin endpoint whenever metrics are turned on so the Prometheus listener can proxy `/stats/prometheus`. If the admin service remains disabled, this socket is not exposed outside Docker; once you explicitly enable admin, it uses the host you configure.
 
 ### Security Considerations
 
@@ -298,7 +297,7 @@ The admin interface offers:
 **Config options**:
 - Enable/disable admin: `platform.gateway.admin.enabled` (default: false)
 - Host: `platform.gateway.admin.host` (default: 127.0.0.1)
-- Port: `platform.gateway.admin.port` (default: 9901)
+- Port: `platform.gateway.admin.port` (default: 9901 mainnet, 19901 testnet, 29901 local)
 
 ### Security Considerations
 
@@ -313,12 +312,12 @@ The admin interface is a powerful tool but presents security risks:
 
 | Service                   | Port Purpose         | Default Value | Config Path                                      | Default Host Binding  | Host Config Path |
 |---------------------------|----------------------|---------------|--------------------------------------------------|-----------------------|-----------------|
-| **Gateway**               | DAPI and Drive API   | 443           | `platform.gateway.listeners.dapiAndDrive.port`   | 0.0.0.0 (all)         | `platform.gateway.listeners.dapiAndDrive.host` |
-|                           | Metrics              | 9090          | `platform.gateway.metrics.port`                  | 127.0.0.1 (local)     | `platform.gateway.metrics.host` |
-|                           | Admin                | 9901          | `platform.gateway.admin.port`                    | 127.0.0.1 (local)     | `platform.gateway.admin.host` |
+| **Gateway**               | DAPI and Drive API   | 443 (mainnet), 1443 (testnet), 2443 (local) | `platform.gateway.listeners.dapiAndDrive.port`   | 0.0.0.0 (all)         | `platform.gateway.listeners.dapiAndDrive.host` |
+|                           | Metrics              | 9090 (mainnet), 19090 (testnet), 29090 (local) | `platform.gateway.metrics.port`                  | 127.0.0.1 (local)     | `platform.gateway.metrics.host` |
+|                           | Admin                | 9901 (mainnet), 19901 (testnet), 29901 (local) | `platform.gateway.admin.port`                    | 127.0.0.1 (local)     | `platform.gateway.admin.host` |
 | **Gateway Rate Limiter**  | gRPC                 | 8081          | (fixed internal)                                 | (internal)            | -               |
 | **Rate Limiter Metrics**  | StatsD               | 9125          | (fixed internal)                                 | (internal)            | -               |
-|                           | Prometheus           | 9102          | `platform.gateway.rateLimiter.metrics.port`      | 127.0.0.1 (local)     | `platform.gateway.rateLimiter.metrics.host` |
+|                           | Prometheus           | 9102 (mainnet), 19102 (testnet), 29102 (local) | `platform.gateway.rateLimiter.metrics.port`      | 127.0.0.1 (local)     | `platform.gateway.rateLimiter.metrics.host` |
 | **Rate Limiter Redis**    | Redis                | 6379          | (fixed internal)                                 | (internal)            | -               |
 
 

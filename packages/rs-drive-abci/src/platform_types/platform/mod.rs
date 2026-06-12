@@ -8,12 +8,14 @@ use crate::rpc::core::{CoreRPCLike, DefaultCoreRPC};
 use drive::drive::Drive;
 use std::fmt::{Debug, Formatter};
 
-use crate::platform_types::platform_state::v0::PlatformStateV0Methods;
-use crate::platform_types::platform_state::PlatformState;
+use crate::platform_types::platform_state::{PlatformState, PlatformStateV0Methods};
 use arc_swap::ArcSwap;
+use dpp::prelude::BlockHeight;
+use dpp::serialization::PlatformDeserializableFromVersionedStructure;
 use dpp::version::ProtocolVersion;
 use dpp::version::INITIAL_PROTOCOL_VERSION;
 use dpp::version::{PlatformVersion, PlatformVersionCurrentVersion};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -30,6 +32,9 @@ pub struct Platform<C> {
     // for query and check tx and we don't want to block affect the
     // state update on finalize block, and vise versa.
     pub state: ArcSwap<PlatformState>,
+    /// Platform states corresponding to each checkpoint, keyed by block height.
+    /// This allows queries against checkpoints to return the correct platform state.
+    pub checkpoint_platform_states: ArcSwap<BTreeMap<BlockHeight, Arc<PlatformState>>>,
     /// block height guard
     pub committed_block_height_guard: AtomicU64,
     /// Configuration
@@ -126,10 +131,18 @@ impl<C> Platform<C> {
     where
         C: CoreRPCLike,
     {
-        let config = config.unwrap_or(PlatformConfig::default_testnet());
+        let config = match config {
+            Some(config) => config,
+            None => {
+                // When using default config, set db_path to the provided path
+                let mut config = PlatformConfig::default_testnet();
+                config.db_path = path.as_ref().to_path_buf();
+                config
+            }
+        };
 
         let (drive, current_platform_version) =
-            Drive::open(path, Some(config.drive.clone())).map_err(Error::Drive)?;
+            Drive::open(&config.db_path, Some(config.drive.clone())).map_err(Error::Drive)?;
 
         if let Some(initial_protocol_version) = initial_protocol_version {
             if initial_protocol_version > 1 {
@@ -155,11 +168,53 @@ impl<C> Platform<C> {
                     .reload_system_contracts(platform_version)?;
             }
 
+            // Load checkpoint platform states from disk
+            let mut checkpoint_platform_states = BTreeMap::new();
+            let checkpoints = drive.checkpoints.load();
+            for (&block_height, _checkpoint_info) in checkpoints.iter() {
+                let checkpoint_state_path = config
+                    .db_path
+                    .join("checkpoints")
+                    .join(block_height.to_string())
+                    .join("platform_state.bin");
+
+                if checkpoint_state_path.exists() {
+                    match std::fs::read(&checkpoint_state_path) {
+                        Ok(state_bytes) => {
+                            match PlatformState::versioned_deserialize(
+                                &state_bytes,
+                                platform_version,
+                            ) {
+                                Ok(state) => {
+                                    checkpoint_platform_states
+                                        .insert(block_height, Arc::new(state));
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to deserialize checkpoint platform state at height {}: {:?}",
+                                        block_height,
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to read checkpoint platform state file at {:?}: {:?}",
+                                checkpoint_state_path,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+
             return Platform::open_with_client_saved_state::<P>(
                 drive,
                 core_rpc,
                 config,
                 execution_state,
+                checkpoint_platform_states,
             );
         }
 
@@ -177,29 +232,22 @@ impl<C> Platform<C> {
         drive: Drive,
         core_rpc: C,
         config: PlatformConfig,
-        mut platform_state: PlatformState,
+        platform_state: PlatformState,
+        checkpoint_platform_states: BTreeMap<BlockHeight, Arc<PlatformState>>,
     ) -> Result<Platform<C>, Error>
     where
         C: CoreRPCLike,
     {
         let height = platform_state.last_committed_block_height();
-
-        // Set patched or original platform version as current
-        let platform_version = platform_state
-            .apply_all_patches_to_platform_version_up_to_height(height)
-            .transpose()
-            .unwrap_or_else(|| {
-                let platform_version =
-                    PlatformVersion::get(platform_state.current_protocol_version_in_consensus())
-                        .map_err(Error::from);
-
-                platform_version
-            })?;
+        let platform_version =
+            PlatformVersion::get(platform_state.current_protocol_version_in_consensus())
+                .map_err(Error::from)?;
 
         PlatformVersion::set_current(platform_version);
 
         let platform: Platform<C> = Platform {
             drive,
+            checkpoint_platform_states: ArcSwap::from_pointee(checkpoint_platform_states),
             state: ArcSwap::new(Arc::new(platform_state)),
             committed_block_height_guard: AtomicU64::from(height),
             config,
@@ -232,6 +280,7 @@ impl<C> Platform<C> {
 
         Ok(Platform {
             drive,
+            checkpoint_platform_states: ArcSwap::from_pointee(BTreeMap::new()),
             state: ArcSwap::new(Arc::new(platform_state)),
             committed_block_height_guard: AtomicU64::from(height),
             config,
@@ -248,5 +297,82 @@ impl<C> Drop for Platform<C> {
             tracing::error!(?error, "grovedb flush failed");
         }
         tracing::debug!("platform shutdown complete");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test::helpers::setup::TestPlatformBuilder;
+
+    #[test]
+    fn debug_platform_state_ref_contains_state_and_config() {
+        let platform = TestPlatformBuilder::new().build_with_mock_rpc();
+        let state = platform.state.load();
+        let psr = PlatformStateRef {
+            drive: &platform.drive,
+            state: &state,
+            config: &platform.config,
+        };
+        let s = format!("{:?}", psr);
+        assert!(s.contains("state"));
+        assert!(s.contains("config"));
+    }
+
+    #[test]
+    fn debug_platform_is_minimal() {
+        let platform = TestPlatformBuilder::new().build_with_mock_rpc();
+        let s = format!("{:?}", platform.platform);
+        // The Debug impl intentionally outputs just "Platform"
+        assert_eq!(s, "Platform");
+    }
+
+    #[test]
+    fn platform_state_ref_from_platform_ref_forwards_fields() {
+        let platform = TestPlatformBuilder::new().build_with_mock_rpc();
+        let state = platform.state.load();
+        let pref = PlatformRef {
+            drive: &platform.drive,
+            state: &state,
+            config: &platform.config,
+            core_rpc: &platform.core_rpc,
+        };
+        let psr: PlatformStateRef = (&pref).into();
+        // Both references should point at the same config and state
+        assert!(std::ptr::eq(psr.config, pref.config));
+        assert!(std::ptr::eq(psr.state, pref.state));
+        assert!(std::ptr::eq(psr.drive, pref.drive));
+    }
+
+    #[test]
+    fn open_with_latest_protocol_version_succeeds() {
+        let tp = TestPlatformBuilder::new()
+            .with_latest_protocol_version()
+            .build_with_mock_rpc();
+        // Protocol version set correctly
+        let state = tp.state.load();
+        assert_eq!(
+            state.current_protocol_version_in_consensus(),
+            PlatformVersion::latest().protocol_version
+        );
+        // No checkpoint states on fresh DB
+        assert!(tp.checkpoint_platform_states.load().is_empty());
+    }
+
+    #[test]
+    fn open_with_initial_protocol_version_first_succeeds() {
+        let first = PlatformVersion::first().protocol_version;
+        let tp = TestPlatformBuilder::new()
+            .with_initial_protocol_version(first)
+            .build_with_mock_rpc();
+        let state = tp.state.load();
+        assert_eq!(state.current_protocol_version_in_consensus(), first);
+    }
+
+    #[test]
+    fn committed_block_height_guard_initialized_to_zero_on_fresh_db() {
+        let tp = TestPlatformBuilder::new().build_with_mock_rpc();
+        use std::sync::atomic::Ordering;
+        assert_eq!(tp.committed_block_height_guard.load(Ordering::Relaxed), 0);
     }
 }

@@ -24,13 +24,13 @@ impl Drive {
     ///
     /// # Type Parameters
     /// - `T`: The output container type that implements `FromIterator`. This is used to collect the verified action information
-    ///        as pairs of [`Identifier`] and [`GroupAction`].
+    ///   as pairs of [`Identifier`] and [`GroupAction`].
     ///
     /// # Arguments
     /// - `proof`: A byte slice containing the cryptographic proof for the active_action information.
     /// - `contract_id`: The identifier of the contract whose active_action information is being verified.
     /// - `start_active_action_contract_position`: An optional starting position for the active_action query, combined with a [`StartAtIncluded`] flag
-    ///                                     to indicate whether the start position is inclusive.
+    ///   to indicate whether the start position is inclusive.
     /// - `limit`: An optional limit on the number of active_actions to verify.
     /// - `verify_subset_of_proof`: A boolean flag indicating whether to verify only a subset of the proof (useful for optimizations).
     /// - `platform_version`: A reference to the platform version, used to determine the appropriate versioned implementation.
@@ -78,5 +78,42 @@ impl Drive {
                 received: version,
             })),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dpp::version::PlatformVersion;
+
+    #[test]
+    fn test_verify_action_infos_in_contract_unknown_version_mismatch() {
+        let mut platform_version = PlatformVersion::latest().clone();
+        platform_version
+            .drive
+            .methods
+            .verify
+            .group
+            .verify_action_infos = 255;
+
+        let result = Drive::verify_action_infos_in_contract::<Vec<(Identifier, GroupAction)>>(
+            &[],
+            Identifier::from([0u8; 32]),
+            0,
+            GroupActionStatus::ActionActive,
+            None,
+            None,
+            false,
+            &platform_version,
+        );
+
+        assert!(
+            matches!(
+                result,
+                Err(Error::Drive(DriveError::UnknownVersionMismatch { .. }))
+            ),
+            "expected UnknownVersionMismatch, got {:?}",
+            result,
+        );
     }
 }

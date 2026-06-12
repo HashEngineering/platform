@@ -1,6 +1,5 @@
 mod action_validation;
 mod advanced_structure;
-mod balance;
 mod data_triggers;
 mod identity_contract_nonce;
 mod is_allowed;
@@ -10,14 +9,17 @@ mod transformer;
 #[cfg(test)]
 mod tests;
 
+use dpp::address_funds::PlatformAddress;
 use dpp::block::block_info::BlockInfo;
 use dpp::dashcore::Network;
+use dpp::fee::Credits;
 use dpp::identity::PartialIdentity;
 use dpp::prelude::*;
 use dpp::state_transition::batch_transition::BatchTransition;
 use dpp::validation::SimpleConsensusValidationResult;
 use dpp::version::PlatformVersion;
 use drive::state_transition_action::StateTransitionAction;
+use std::collections::BTreeMap;
 
 use drive::grovedb::TransactionArg;
 
@@ -31,14 +33,14 @@ use crate::rpc::core::CoreRPCLike;
 use crate::execution::validation::state_transition::batch::advanced_structure::v0::DocumentsBatchStateTransitionStructureValidationV0;
 use crate::execution::validation::state_transition::batch::identity_contract_nonce::v0::DocumentsBatchStateTransitionIdentityContractNonceV0;
 use crate::execution::validation::state_transition::batch::state::v0::DocumentsBatchStateTransitionStateValidationV0;
-
-use crate::execution::validation::state_transition::processor::v0::{
-    StateTransitionBasicStructureValidationV0, StateTransitionNonceValidationV0,
-    StateTransitionStateValidationV0, StateTransitionStructureKnownInStateValidationV0,
-};
-use crate::execution::validation::state_transition::transformer::StateTransitionActionTransformerV0;
+use crate::execution::validation::state_transition::batch::state::v1::DocumentsBatchStateTransitionStateValidationV1;
+use crate::execution::validation::state_transition::processor::advanced_structure_with_state::StateTransitionStructureKnownInStateValidationV0;
+use crate::execution::validation::state_transition::processor::basic_structure::StateTransitionBasicStructureValidationV0;
+use crate::execution::validation::state_transition::processor::identity_nonces::StateTransitionIdentityNonceValidationV0;
+use crate::execution::validation::state_transition::processor::state::StateTransitionStateValidation;
+use crate::execution::validation::state_transition::transformer::StateTransitionActionTransformer;
 use crate::execution::validation::state_transition::ValidationMode;
-use crate::platform_types::platform_state::v0::PlatformStateV0Methods;
+use crate::platform_types::platform_state::PlatformStateV0Methods;
 
 impl ValidationMode {
     /// Returns a bool on whether we should validate that batched transitions are valid against the state
@@ -52,13 +54,16 @@ impl ValidationMode {
     }
 }
 
-impl StateTransitionActionTransformerV0 for BatchTransition {
+impl StateTransitionActionTransformer for BatchTransition {
     fn transform_into_action<C: CoreRPCLike>(
         &self,
         platform: &PlatformRef<C>,
         block_info: &BlockInfo,
+        _remaining_address_input_balances: &Option<
+            BTreeMap<PlatformAddress, (AddressNonce, Credits)>,
+        >,
         validation_mode: ValidationMode,
-        _execution_context: &mut StateTransitionExecutionContext,
+        execution_context: &mut StateTransitionExecutionContext,
         tx: TransactionArg,
     ) -> Result<ConsensusValidationResult<StateTransitionAction>, Error> {
         let platform_version = platform.state.current_platform_version()?;
@@ -70,10 +75,24 @@ impl StateTransitionActionTransformerV0 for BatchTransition {
             .batch_state_transition
             .transform_into_action
         {
+            // PROTOCOL_VERSION_11 and below: legacy `_v0` drops every
+            // transformer-phase fee_result via a local execution_context.
+            // Preserved verbatim for chain replay.
             0 => self.transform_into_action_v0(&platform.into(), block_info, validation_mode, tx),
+            // PROTOCOL_VERSION_12+: `_v1` threads the outer execution_context
+            // into the transformer so per-transition fees accumulated by
+            // `try_from_borrowed_*_with_contract_lookup` are billed to the
+            // user instead of being dropped via a local ctx.
+            1 => self.transform_into_action_v1(
+                &platform.into(),
+                block_info,
+                validation_mode,
+                execution_context,
+                tx,
+            ),
             version => Err(Error::Execution(ExecutionError::UnknownVersionMismatch {
                 method: "documents batch transition: transform_into_action".to_string(),
-                known_versions: vec![0],
+                known_versions: vec![0, 1],
                 received: version,
             })),
         }
@@ -107,8 +126,8 @@ impl StateTransitionBasicStructureValidationV0 for BatchTransition {
     }
 }
 
-impl StateTransitionNonceValidationV0 for BatchTransition {
-    fn validate_nonces(
+impl StateTransitionIdentityNonceValidationV0 for BatchTransition {
+    fn validate_identity_nonces(
         &self,
         platform: &PlatformStateRef,
         block_info: &BlockInfo,
@@ -193,7 +212,7 @@ impl StateTransitionStructureKnownInStateValidationV0 for BatchTransition {
     }
 }
 
-impl StateTransitionStateValidationV0 for BatchTransition {
+impl StateTransitionStateValidation for BatchTransition {
     fn validate_state<C: CoreRPCLike>(
         &self,
         action: Option<StateTransitionAction>,

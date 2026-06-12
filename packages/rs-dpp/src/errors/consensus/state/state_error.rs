@@ -3,6 +3,12 @@ use bincode::{Decode, Encode};
 use platform_serialization_derive::{PlatformDeserialize, PlatformSerialize};
 use thiserror::Error;
 
+use crate::consensus::state::address_funds::{AddressDoesNotExistError, AddressInvalidNonceError, AddressNotEnoughFundsError, AddressesNotEnoughFundsError};
+use crate::consensus::state::shielded::insufficient_pool_notes_error::InsufficientPoolNotesError;
+use crate::consensus::state::shielded::insufficient_shielded_fee_error::InsufficientShieldedFeeError;
+use crate::consensus::state::shielded::invalid_anchor_error::InvalidAnchorError;
+use crate::consensus::state::shielded::invalid_shielded_proof_error::InvalidShieldedProofError;
+use crate::consensus::state::shielded::nullifier_already_spent_error::NullifierAlreadySpentError;
 use crate::consensus::state::data_contract::data_contract_already_present_error::DataContractAlreadyPresentError;
 use crate::consensus::state::data_contract::data_contract_config_update_error::DataContractConfigUpdateError;
 use crate::consensus::state::data_contract::data_contract_is_readonly_error::DataContractIsReadonlyError;
@@ -321,6 +327,33 @@ pub enum StateError {
 
     #[error(transparent)]
     InvalidTokenPositionStateError(InvalidTokenPositionStateError),
+
+    #[error(transparent)]
+    AddressDoesNotExistError(AddressDoesNotExistError),
+
+    #[error(transparent)]
+    AddressNotEnoughFundsError(AddressNotEnoughFundsError),
+
+    #[error(transparent)]
+    AddressesNotEnoughFundsError(AddressesNotEnoughFundsError),
+
+    #[error(transparent)]
+    AddressInvalidNonceError(AddressInvalidNonceError),
+
+    #[error(transparent)]
+    InvalidAnchorError(InvalidAnchorError),
+
+    #[error(transparent)]
+    NullifierAlreadySpentError(NullifierAlreadySpentError),
+
+    #[error(transparent)]
+    InvalidShieldedProofError(InvalidShieldedProofError),
+
+    #[error(transparent)]
+    InsufficientPoolNotesError(InsufficientPoolNotesError),
+
+    #[error(transparent)]
+    InsufficientShieldedFeeError(InsufficientShieldedFeeError),
 }
 
 impl From<StateError> for ConsensusError {

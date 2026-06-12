@@ -1,17 +1,17 @@
 use dpp::consensus::basic::identity::{
+    InvalidCreditWithdrawalTransitionCoreFeeError,
+    InvalidCreditWithdrawalTransitionOutputScriptError,
     InvalidIdentityCreditWithdrawalTransitionAmountError,
-    InvalidIdentityCreditWithdrawalTransitionCoreFeeError,
-    InvalidIdentityCreditWithdrawalTransitionOutputScriptError,
-    NotImplementedIdentityCreditWithdrawalTransitionPoolingError,
+    NotImplementedCreditWithdrawalTransitionPoolingError,
 };
 use dpp::consensus::ConsensusError;
 
 use crate::error::Error;
 use dpp::state_transition::identity_credit_withdrawal_transition::accessors::IdentityCreditWithdrawalTransitionAccessorsV0;
 use dpp::state_transition::identity_credit_withdrawal_transition::{
-    IdentityCreditWithdrawalTransition, MIN_CORE_FEE_PER_BYTE, MIN_WITHDRAWAL_AMOUNT,
+    IdentityCreditWithdrawalTransition, MIN_CORE_FEE_PER_BYTE,
 };
-use dpp::util::is_fibonacci_number::is_fibonacci_number;
+use dpp::util::is_non_zero_fibonacci_number::is_non_zero_fibonacci_number;
 use dpp::validation::SimpleConsensusValidationResult;
 use dpp::version::PlatformVersion;
 use dpp::withdrawal::Pooling;
@@ -30,33 +30,37 @@ impl IdentityCreditWithdrawalStateTransitionStructureValidationV1
         let mut result = SimpleConsensusValidationResult::default();
 
         let amount = self.amount();
-        if amount < MIN_WITHDRAWAL_AMOUNT
+        if amount < platform_version.system_limits.min_withdrawal_amount
             || amount > platform_version.system_limits.max_withdrawal_amount
         {
             result.add_error(ConsensusError::from(
                 InvalidIdentityCreditWithdrawalTransitionAmountError::new(
                     self.amount(),
-                    MIN_WITHDRAWAL_AMOUNT,
+                    platform_version.system_limits.min_withdrawal_amount,
                     platform_version.system_limits.max_withdrawal_amount,
                 ),
             ));
         }
 
+        // NOTE: the shielded-withdrawal path (v12) re-validates these same three Core-facing
+        // fields — `pooling`, `core_fee_per_byte`, `output_script` — in
+        // `dpp .../shielded/shielded_withdrawal_transition/v0/state_transition_validation.rs`,
+        // reusing the same error types and `MIN_CORE_FEE_PER_BYTE`. Keep the two in sync (or, if
+        // touching both, factor a shared helper).
+
         // currently we do not support pooling, so we must validate that pooling is `Never`
 
         if self.pooling() != Pooling::Never {
-            result.add_error(
-                NotImplementedIdentityCreditWithdrawalTransitionPoolingError::new(
-                    self.pooling() as u8
-                ),
-            );
+            result.add_error(NotImplementedCreditWithdrawalTransitionPoolingError::new(
+                self.pooling() as u8,
+            ));
 
             return Ok(result);
         }
 
         // validate core_fee is in fibonacci sequence
-        if !is_fibonacci_number(self.core_fee_per_byte() as u64) {
-            result.add_error(InvalidIdentityCreditWithdrawalTransitionCoreFeeError::new(
+        if !is_non_zero_fibonacci_number(self.core_fee_per_byte() as u64) {
+            result.add_error(InvalidCreditWithdrawalTransitionCoreFeeError::new(
                 self.core_fee_per_byte(),
                 MIN_CORE_FEE_PER_BYTE,
             ));
@@ -67,11 +71,9 @@ impl IdentityCreditWithdrawalStateTransitionStructureValidationV1
         if let Some(output_script) = self.output_script() {
             // validate output_script types
             if !output_script.is_p2pkh() && !output_script.is_p2sh() {
-                result.add_error(
-                    InvalidIdentityCreditWithdrawalTransitionOutputScriptError::new(
-                        output_script.clone(),
-                    ),
-                );
+                result.add_error(InvalidCreditWithdrawalTransitionOutputScriptError::new(
+                    output_script.clone(),
+                ));
             }
         }
 
@@ -193,7 +195,7 @@ mod tests {
             assert_matches!(
                 result.errors.as_slice(),
                 [ConsensusError::BasicError(
-                    BasicError::NotImplementedIdentityCreditWithdrawalTransitionPoolingError(err),
+                    BasicError::NotImplementedCreditWithdrawalTransitionPoolingError(err),
                 )] if err.pooling() == Pooling::Standard as u8
             );
         }
@@ -222,7 +224,7 @@ mod tests {
             assert_matches!(
                 result.errors.as_slice(),
                 [ConsensusError::BasicError(
-                    BasicError::InvalidIdentityCreditWithdrawalTransitionCoreFeeError(err)
+                    BasicError::InvalidCreditWithdrawalTransitionCoreFeeError(err)
                 )] if err.min_core_fee_per_byte() == 1 && err.core_fee_per_byte() == 0
             );
         }
@@ -253,7 +255,7 @@ mod tests {
             assert_matches!(
                 result.errors.as_slice(),
                 [ConsensusError::BasicError(
-                    BasicError::InvalidIdentityCreditWithdrawalTransitionOutputScriptError(err)
+                    BasicError::InvalidCreditWithdrawalTransitionOutputScriptError(err)
                 )] if err.output_script() == output_script
             );
         }

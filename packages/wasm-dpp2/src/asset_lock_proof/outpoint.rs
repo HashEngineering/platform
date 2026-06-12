@@ -1,0 +1,151 @@
+use crate::error::{WasmDppError, WasmDppResult};
+use crate::impl_wasm_type_info;
+use crate::utils::{IntoWasm, try_vec_to_fixed_bytes};
+use dpp::dashcore::{OutPoint, Txid};
+use dpp::platform_value::string_encoding::Encoding::{Base64, Hex};
+use dpp::platform_value::string_encoding::{decode, encode};
+use wasm_bindgen::JsValue;
+use wasm_bindgen::prelude::wasm_bindgen;
+
+#[wasm_bindgen(typescript_custom_section)]
+const TS_TYPES: &str = r#"
+/**
+ * OutPoint serialized as a plain object.
+ */
+export interface OutPointObject {
+    txid: string;
+    vout: number;
+}
+
+/**
+ * OutPoint serialized as JSON.
+ */
+export interface OutPointJSON {
+    txid: string;
+    vout: number;
+}
+"#;
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(typescript_type = "OutPointObject")]
+    pub type OutPointObjectJs;
+
+    #[wasm_bindgen(typescript_type = "OutPointJSON")]
+    pub type OutPointJSONJs;
+}
+
+#[wasm_bindgen(js_name = "OutPoint")]
+#[derive(Clone)]
+pub struct OutPointWasm(OutPoint);
+
+impl From<OutPoint> for OutPointWasm {
+    fn from(outpoint: OutPoint) -> Self {
+        OutPointWasm(outpoint)
+    }
+}
+
+impl From<OutPointWasm> for OutPoint {
+    fn from(outpoint: OutPointWasm) -> Self {
+        outpoint.0
+    }
+}
+
+impl TryFrom<&JsValue> for OutPointWasm {
+    type Error = WasmDppError;
+
+    fn try_from(value: &JsValue) -> Result<Self, Self::Error> {
+        let value = value.to_wasm::<OutPointWasm>("OutPoint")?;
+
+        Ok(value.clone())
+    }
+}
+
+impl TryFrom<JsValue> for OutPointWasm {
+    type Error = WasmDppError;
+
+    fn try_from(value: JsValue) -> Result<Self, Self::Error> {
+        Self::try_from(&value)
+    }
+}
+
+#[wasm_bindgen(js_class = OutPoint)]
+impl OutPointWasm {
+    #[wasm_bindgen(constructor)]
+    pub fn constructor(
+        #[wasm_bindgen(js_name = "txidHex")] txid_hex: String,
+        vout: u32,
+    ) -> WasmDppResult<OutPointWasm> {
+        let out_point = Txid::from_hex(&txid_hex)
+            .map_err(|err| WasmDppError::serialization(err.to_string()))?;
+
+        Ok(OutPointWasm(OutPoint {
+            txid: out_point,
+            vout,
+        }))
+    }
+
+    #[wasm_bindgen(getter = "vout")]
+    pub fn vout(&self) -> u32 {
+        self.0.vout
+    }
+
+    #[wasm_bindgen(getter = "txid")]
+    pub fn txid(&self) -> String {
+        self.0.txid.to_hex()
+    }
+
+    #[wasm_bindgen(js_name = "toBytes")]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let slice: [u8; 36] = self.0.into();
+        slice.to_vec()
+    }
+
+    #[wasm_bindgen(js_name = "toHex")]
+    pub fn to_hex(&self) -> String {
+        let slice: [u8; 36] = self.0.into();
+
+        encode(slice.as_slice(), Hex)
+    }
+
+    #[wasm_bindgen(js_name = "toBase64")]
+    pub fn to_base64(&self) -> String {
+        let slice: [u8; 36] = self.0.into();
+
+        encode(slice.as_slice(), Base64)
+    }
+
+    #[wasm_bindgen(js_name = "fromBytes")]
+    pub fn from_bytes(buffer: Vec<u8>) -> WasmDppResult<OutPointWasm> {
+        let out_buffer: [u8; 36] = try_vec_to_fixed_bytes(buffer, "outPoint")?;
+
+        Ok(OutPointWasm(OutPoint::from(out_buffer)))
+    }
+
+    #[wasm_bindgen(js_name = "fromHex")]
+    pub fn from_hex(hex: String) -> WasmDppResult<OutPointWasm> {
+        let bytes =
+            decode(hex.as_str(), Hex).map_err(|e| WasmDppError::serialization(e.to_string()))?;
+        OutPointWasm::from_bytes(bytes)
+    }
+
+    #[wasm_bindgen(js_name = "fromBase64")]
+    pub fn from_base64(base64: String) -> WasmDppResult<OutPointWasm> {
+        let bytes = decode(base64.as_str(), Base64)
+            .map_err(|e| WasmDppError::serialization(e.to_string()))?;
+        OutPointWasm::from_bytes(bytes)
+    }
+}
+
+impl OutPointWasm {
+    pub fn vec_from_js_value(outpoints: &js_sys::Array) -> WasmDppResult<Vec<OutPointWasm>> {
+        let outpoints: Vec<OutPointWasm> = outpoints
+            .iter()
+            .map(OutPointWasm::try_from)
+            .collect::<Result<Vec<OutPointWasm>, WasmDppError>>()?;
+
+        Ok(outpoints)
+    }
+}
+
+impl_wasm_type_info!(OutPointWasm, OutPoint);

@@ -1,3 +1,10 @@
+#[cfg(all(
+    feature = "json-conversion",
+    any(feature = "fixtures-and-mocks", feature = "serde-conversion")
+))]
+use crate::serialization::JsonConvertible;
+#[cfg(any(feature = "fixtures-and-mocks", feature = "value-conversion"))]
+use crate::serialization::ValueConvertible;
 use crate::tokens::info::v0::IdentityTokenInfoV0;
 use crate::ProtocolError;
 use bincode::Encode;
@@ -6,12 +13,16 @@ use platform_serialization::de::Decode;
 use platform_serialization_derive::{PlatformDeserialize, PlatformSerialize};
 use platform_version::version::PlatformVersion;
 use platform_versioning::PlatformVersioned;
-#[cfg(feature = "fixtures-and-mocks")]
-use serde::{Deserialize, Serialize};
-
 mod methods;
 pub mod v0;
 
+#[cfg_attr(
+    all(
+        feature = "json-conversion",
+        any(feature = "fixtures-and-mocks", feature = "serde-conversion")
+    ),
+    derive(JsonConvertible)
+)]
 #[derive(
     Debug,
     Clone,
@@ -24,8 +35,20 @@ pub mod v0;
     PartialEq,
 )]
 #[platform_serialize(unversioned)] //versioned directly, no need to use platform_version
-#[cfg_attr(feature = "fixtures-and-mocks", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    any(feature = "fixtures-and-mocks", feature = "serde-conversion"),
+    derive(serde::Serialize, serde::Deserialize),
+    serde(tag = "$formatVersion")
+)]
+#[cfg_attr(
+    any(feature = "fixtures-and-mocks", feature = "value-conversion"),
+    derive(ValueConvertible)
+)]
 pub enum IdentityTokenInfo {
+    #[cfg_attr(
+        any(feature = "fixtures-and-mocks", feature = "serde-conversion"),
+        serde(rename = "0")
+    )]
     V0(IdentityTokenInfoV0),
 }
 
@@ -43,5 +66,45 @@ impl IdentityTokenInfo {
                 received: version,
             }),
         }
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "json-conversion",
+    any(feature = "fixtures-and-mocks", feature = "serde-conversion")
+))]
+mod tests {
+    use super::*;
+    use crate::serialization::JsonConvertible;
+
+    #[test]
+    fn identity_token_info_json_round_trip() {
+        let info = IdentityTokenInfo::V0(IdentityTokenInfoV0 { frozen: true });
+
+        let json = info.to_json().expect("to_json should succeed");
+
+        // Verify the version tag
+        assert_eq!(
+            json["$formatVersion"].as_str().unwrap(),
+            "0",
+            "Version tag should be '0'"
+        );
+
+        // Verify the boolean field
+        assert!(json["frozen"].as_bool().unwrap());
+
+        // round-trip
+        let restored = IdentityTokenInfo::from_json(json).expect("from_json should succeed");
+        assert_eq!(info, restored);
+    }
+
+    #[test]
+    fn identity_token_info_unfrozen_json_round_trip() {
+        let info = IdentityTokenInfo::V0(IdentityTokenInfoV0 { frozen: false });
+
+        let json = info.to_json().expect("to_json should succeed");
+        let restored = IdentityTokenInfo::from_json(json).expect("from_json should succeed");
+        assert_eq!(info, restored);
     }
 }

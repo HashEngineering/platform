@@ -10,7 +10,6 @@ use crate::error::execution::ExecutionError;
 
 use crate::execution::validation::state_transition::identity_create::basic_structure::v0::IdentityCreateStateTransitionBasicStructureValidationV0;
 use crate::execution::validation::state_transition::identity_create::state::v0::IdentityCreateStateTransitionStateValidationV0;
-use crate::execution::validation::state_transition::processor::v0::StateTransitionBasicStructureValidationV0;
 use crate::platform_types::platform::PlatformRef;
 
 use crate::rpc::core::CoreRPCLike;
@@ -23,8 +22,9 @@ use dpp::version::PlatformVersion;
 
 use crate::execution::types::state_transition_execution_context::StateTransitionExecutionContext;
 use crate::execution::validation::state_transition::identity_create::advanced_structure::v0::IdentityCreateStateTransitionAdvancedStructureValidationV0;
+use crate::execution::validation::state_transition::processor::basic_structure::StateTransitionBasicStructureValidationV0;
 use crate::execution::validation::state_transition::ValidationMode;
-use crate::platform_types::platform_state::v0::PlatformStateV0Methods;
+use crate::platform_types::platform_state::PlatformStateV0Methods;
 use drive::grovedb::TransactionArg;
 use drive::state_transition_action::identity::identity_create::IdentityCreateTransitionAction;
 use drive::state_transition_action::StateTransitionAction;
@@ -215,9 +215,10 @@ mod tests {
     use rand::SeedableRng;
     use simple_signer::signer::SimpleSigner;
     use std::collections::BTreeMap;
+    use std::ops::Div;
 
-    #[test]
-    fn test_identity_create_validation_first_protocol_version() {
+    #[tokio::test]
+    async fn test_identity_create_validation_first_protocol_version() {
         let platform_version = PlatformVersion::first();
         let platform_config = PlatformConfig {
             testing_configs: PlatformTestConfig {
@@ -247,7 +248,7 @@ mod tests {
             )
             .expect("expected to get key pair");
 
-        signer.add_key(master_key.clone(), master_private_key);
+        signer.add_identity_public_key(master_key.clone(), master_private_key);
 
         let (key, private_key) = IdentityPublicKey::random_ecdsa_critical_level_authentication_key(
             1,
@@ -256,14 +257,14 @@ mod tests {
         )
         .expect("expected to get key pair");
 
-        signer.add_key(key.clone(), private_key);
+        signer.add_identity_public_key(key.clone(), private_key);
 
         let (_, pk) = ECDSA_SECP256K1
             .random_public_and_private_key_data(&mut rng, platform_version)
             .unwrap();
 
         let asset_lock_proof = instant_asset_lock_proof_fixture(
-            Some(PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap()),
+            Some(PrivateKey::from_byte_array(&pk, Network::Testnet).unwrap()),
             None,
         );
 
@@ -280,7 +281,7 @@ mod tests {
         .into();
 
         let identity_create_transition: StateTransition =
-            IdentityCreateTransition::try_from_identity_with_signer(
+            IdentityCreateTransition::try_from_identity_with_signer_and_private_key(
                 &identity,
                 asset_lock_proof,
                 pk.as_slice(),
@@ -289,6 +290,7 @@ mod tests {
                 0,
                 platform_version,
             )
+            .await
             .expect("expected an identity create transition");
 
         let identity_create_serialized_transition = identity_create_transition
@@ -330,8 +332,8 @@ mod tests {
         assert_eq!(identity_balance, 99913915760);
     }
 
-    #[test]
-    fn test_identity_create_validation_latest_protocol_version() {
+    #[tokio::test]
+    async fn test_identity_create_validation_latest_protocol_version() {
         let platform_version = PlatformVersion::latest();
         let platform_config = PlatformConfig {
             testing_configs: PlatformTestConfig {
@@ -360,7 +362,7 @@ mod tests {
             )
             .expect("expected to get key pair");
 
-        signer.add_key(master_key.clone(), master_private_key);
+        signer.add_identity_public_key(master_key.clone(), master_private_key);
 
         let (key, private_key) = IdentityPublicKey::random_ecdsa_critical_level_authentication_key(
             1,
@@ -369,14 +371,14 @@ mod tests {
         )
         .expect("expected to get key pair");
 
-        signer.add_key(key.clone(), private_key);
+        signer.add_identity_public_key(key.clone(), private_key);
 
         let (_, pk) = ECDSA_SECP256K1
             .random_public_and_private_key_data(&mut rng, platform_version)
             .unwrap();
 
         let asset_lock_proof = instant_asset_lock_proof_fixture(
-            Some(PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap()),
+            Some(PrivateKey::from_byte_array(&pk, Network::Testnet).unwrap()),
             None,
         );
 
@@ -393,7 +395,7 @@ mod tests {
         .into();
 
         let identity_create_transition: StateTransition =
-            IdentityCreateTransition::try_from_identity_with_signer(
+            IdentityCreateTransition::try_from_identity_with_signer_and_private_key(
                 &identity,
                 asset_lock_proof,
                 pk.as_slice(),
@@ -402,6 +404,7 @@ mod tests {
                 0,
                 platform_version,
             )
+            .await
             .expect("expected an identity create transition");
 
         let identity_create_serialized_transition = identity_create_transition
@@ -443,8 +446,8 @@ mod tests {
         assert_eq!(identity_balance, 99913867460);
     }
 
-    #[test]
-    fn test_identity_create_asset_lock_reuse_after_issue_first_protocol_version() {
+    #[tokio::test]
+    async fn test_identity_create_asset_lock_reuse_after_issue_first_protocol_version() {
         let platform_version = PlatformVersion::first();
         let platform_config = PlatformConfig {
             testing_configs: PlatformTestConfig {
@@ -474,7 +477,7 @@ mod tests {
             )
             .expect("expected to get key pair");
 
-        signer.add_key(master_key.clone(), master_private_key);
+        signer.add_identity_public_key(master_key.clone(), master_private_key);
 
         let (critical_public_key_that_is_already_in_system, private_key) =
             IdentityPublicKey::random_ecdsa_critical_level_authentication_key(
@@ -518,7 +521,7 @@ mod tests {
             )
             .expect("expected to add a new identity");
 
-        signer.add_key(
+        signer.add_identity_public_key(
             critical_public_key_that_is_already_in_system.clone(),
             private_key,
         );
@@ -528,7 +531,7 @@ mod tests {
             .unwrap();
 
         let asset_lock_proof = instant_asset_lock_proof_fixture(
-            Some(PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap()),
+            Some(PrivateKey::from_byte_array(&pk, Network::Testnet).unwrap()),
             None,
         );
 
@@ -548,7 +551,7 @@ mod tests {
         .into();
 
         let identity_create_transition: StateTransition =
-            IdentityCreateTransition::try_from_identity_with_signer(
+            IdentityCreateTransition::try_from_identity_with_signer_and_private_key(
                 &identity,
                 asset_lock_proof.clone(),
                 pk.as_slice(),
@@ -557,6 +560,7 @@ mod tests {
                 0,
                 platform_version,
             )
+            .await
             .expect("expected an identity create transition");
 
         let identity_create_serialized_transition = identity_create_transition
@@ -603,7 +607,7 @@ mod tests {
             )
             .expect("expected to get key pair");
 
-        signer.add_key(new_public_key.clone(), new_private_key);
+        signer.add_identity_public_key(new_public_key.clone(), new_private_key);
 
         // let's set the new key to the identity (replacing the one that was causing the issue
         identity.set_public_keys(BTreeMap::from([
@@ -612,7 +616,7 @@ mod tests {
         ]));
 
         let identity_create_transition: StateTransition =
-            IdentityCreateTransition::try_from_identity_with_signer(
+            IdentityCreateTransition::try_from_identity_with_signer_and_private_key(
                 &identity,
                 asset_lock_proof,
                 pk.as_slice(),
@@ -621,6 +625,7 @@ mod tests {
                 0,
                 platform_version,
             )
+            .await
             .expect("expected an identity create transition");
 
         let identity_create_serialized_transition = identity_create_transition
@@ -666,8 +671,8 @@ mod tests {
         assert_eq!(identity_balance, 99909310400); // The identity balance is smaller than if there hadn't been any issue
     }
 
-    #[test]
-    fn test_identity_create_asset_lock_reuse_after_issue_latest_protocol_version() {
+    #[tokio::test]
+    async fn test_identity_create_asset_lock_reuse_after_issue_latest_protocol_version() {
         let platform_version = PlatformVersion::latest();
         let platform_config = PlatformConfig {
             testing_configs: PlatformTestConfig {
@@ -696,7 +701,7 @@ mod tests {
             )
             .expect("expected to get key pair");
 
-        signer.add_key(master_key.clone(), master_private_key);
+        signer.add_identity_public_key(master_key.clone(), master_private_key);
 
         let (critical_public_key_that_is_already_in_system, private_key) =
             IdentityPublicKey::random_ecdsa_critical_level_authentication_key(
@@ -740,7 +745,7 @@ mod tests {
             )
             .expect("expected to add a new identity");
 
-        signer.add_key(
+        signer.add_identity_public_key(
             critical_public_key_that_is_already_in_system.clone(),
             private_key,
         );
@@ -750,7 +755,7 @@ mod tests {
             .unwrap();
 
         let asset_lock_proof = instant_asset_lock_proof_fixture(
-            Some(PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap()),
+            Some(PrivateKey::from_byte_array(&pk, Network::Testnet).unwrap()),
             None,
         );
 
@@ -770,7 +775,7 @@ mod tests {
         .into();
 
         let identity_create_transition: StateTransition =
-            IdentityCreateTransition::try_from_identity_with_signer(
+            IdentityCreateTransition::try_from_identity_with_signer_and_private_key(
                 &identity,
                 asset_lock_proof.clone(),
                 pk.as_slice(),
@@ -779,6 +784,7 @@ mod tests {
                 0,
                 platform_version,
             )
+            .await
             .expect("expected an identity create transition");
 
         let identity_create_serialized_transition = identity_create_transition
@@ -825,7 +831,7 @@ mod tests {
             )
             .expect("expected to get key pair");
 
-        signer.add_key(new_public_key.clone(), new_private_key);
+        signer.add_identity_public_key(new_public_key.clone(), new_private_key);
 
         // let's set the new key to the identity (replacing the one that was causing the issue
         identity.set_public_keys(BTreeMap::from([
@@ -834,7 +840,7 @@ mod tests {
         ]));
 
         let identity_create_transition: StateTransition =
-            IdentityCreateTransition::try_from_identity_with_signer(
+            IdentityCreateTransition::try_from_identity_with_signer_and_private_key(
                 &identity,
                 asset_lock_proof,
                 pk.as_slice(),
@@ -843,6 +849,7 @@ mod tests {
                 0,
                 platform_version,
             )
+            .await
             .expect("expected an identity create transition");
 
         let identity_create_serialized_transition = identity_create_transition
@@ -888,8 +895,8 @@ mod tests {
         assert_eq!(identity_balance, 99909262100); // The identity balance is smaller than if there hadn't been any issue
     }
 
-    #[test]
-    fn test_identity_create_asset_lock_reuse_after_max_issues() {
+    #[tokio::test]
+    async fn test_identity_create_asset_lock_reuse_after_max_issues() {
         let platform_version = PlatformVersion::latest();
         let platform_config = PlatformConfig {
             testing_configs: PlatformTestConfig {
@@ -918,7 +925,7 @@ mod tests {
             )
             .expect("expected to get key pair");
 
-        signer.add_key(master_key.clone(), master_private_key);
+        signer.add_identity_public_key(master_key.clone(), master_private_key);
 
         let (critical_public_key_that_is_already_in_system, private_key) =
             IdentityPublicKey::random_ecdsa_critical_level_authentication_key(
@@ -962,7 +969,7 @@ mod tests {
             )
             .expect("expected to add a new identity");
 
-        signer.add_key(
+        signer.add_identity_public_key(
             critical_public_key_that_is_already_in_system.clone(),
             private_key,
         );
@@ -972,7 +979,7 @@ mod tests {
             .unwrap();
 
         let asset_lock_proof = instant_asset_lock_proof_fixture(
-            Some(PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap()),
+            Some(PrivateKey::from_byte_array(&pk, Network::Testnet).unwrap()),
             None,
         );
 
@@ -989,7 +996,7 @@ mod tests {
                 )
                 .expect("expected to get key pair");
 
-            signer.add_key(new_master_key.clone(), new_master_private_key);
+            signer.add_identity_public_key(new_master_key.clone(), new_master_private_key);
 
             let identity: Identity = IdentityV0 {
                 id: identifier,
@@ -1003,7 +1010,7 @@ mod tests {
             .into();
 
             let identity_create_transition: StateTransition =
-                IdentityCreateTransition::try_from_identity_with_signer(
+                IdentityCreateTransition::try_from_identity_with_signer_and_private_key(
                     &identity,
                     asset_lock_proof.clone(),
                     pk.as_slice(),
@@ -1012,6 +1019,7 @@ mod tests {
                     0,
                     platform_version,
                 )
+                .await
                 .expect("expected an identity create transition");
 
             let identity_create_serialized_transition = identity_create_transition
@@ -1059,7 +1067,7 @@ mod tests {
             )
             .expect("expected to get key pair");
 
-        signer.add_key(new_public_key.clone(), new_private_key);
+        signer.add_identity_public_key(new_public_key.clone(), new_private_key);
 
         let identity: Identity = IdentityV0 {
             id: identifier,
@@ -1070,7 +1078,7 @@ mod tests {
         .into();
 
         let identity_create_transition: StateTransition =
-            IdentityCreateTransition::try_from_identity_with_signer(
+            IdentityCreateTransition::try_from_identity_with_signer_and_private_key(
                 &identity,
                 asset_lock_proof,
                 pk.as_slice(),
@@ -1079,6 +1087,7 @@ mod tests {
                 0,
                 platform_version,
             )
+            .await
             .expect("expected an identity create transition");
 
         let identity_create_serialized_transition = identity_create_transition
@@ -1116,8 +1125,8 @@ mod tests {
             .expect("expected to commit");
     }
 
-    #[test]
-    fn test_identity_create_asset_lock_use_all_funds() {
+    #[tokio::test]
+    async fn test_identity_create_asset_lock_use_all_funds() {
         let platform_version = PlatformVersion::latest();
         let platform_config = PlatformConfig {
             testing_configs: PlatformTestConfig {
@@ -1146,7 +1155,7 @@ mod tests {
             )
             .expect("expected to get key pair");
 
-        signer.add_key(master_key.clone(), master_private_key);
+        signer.add_identity_public_key(master_key.clone(), master_private_key);
 
         let (critical_public_key_that_is_already_in_system, private_key) =
             IdentityPublicKey::random_ecdsa_critical_level_authentication_key(
@@ -1190,7 +1199,7 @@ mod tests {
             )
             .expect("expected to add a new identity");
 
-        signer.add_key(
+        signer.add_identity_public_key(
             critical_public_key_that_is_already_in_system.clone(),
             private_key,
         );
@@ -1198,10 +1207,15 @@ mod tests {
         let (_, pk) = ECDSA_SECP256K1
             .random_public_and_private_key_data(&mut rng, platform_version)
             .unwrap();
+        let min_fees = &platform_version.fee_version.state_transition_min_fees;
+        let base_cost = min_fees.identity_create_base_cost;
+        let keys_extra_cost = base_cost
+            .saturating_add(min_fees.identity_key_in_creation_cost.saturating_mul(2))
+            .div(1000);
 
         let asset_lock_proof = instant_asset_lock_proof_fixture(
-            Some(PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap()),
-            Some(220000),
+            Some(PrivateKey::from_byte_array(&pk, Network::Testnet).unwrap()),
+            Some(220000 + keys_extra_cost),
         );
 
         let identifier = asset_lock_proof
@@ -1218,7 +1232,7 @@ mod tests {
                 )
                 .expect("expected to get key pair");
 
-            signer.add_key(new_master_key.clone(), new_master_private_key);
+            signer.add_identity_public_key(new_master_key.clone(), new_master_private_key);
 
             let identity: Identity = IdentityV0 {
                 id: identifier,
@@ -1232,7 +1246,7 @@ mod tests {
             .into();
 
             let identity_create_transition: StateTransition =
-                IdentityCreateTransition::try_from_identity_with_signer(
+                IdentityCreateTransition::try_from_identity_with_signer_and_private_key(
                     &identity,
                     asset_lock_proof.clone(),
                     pk.as_slice(),
@@ -1241,6 +1255,7 @@ mod tests {
                     0,
                     platform_version,
                 )
+                .await
                 .expect("expected an identity create transition");
 
             let identity_create_serialized_transition = identity_create_transition
@@ -1288,7 +1303,7 @@ mod tests {
             )
             .expect("expected to get key pair");
 
-        signer.add_key(new_public_key.clone(), new_private_key);
+        signer.add_identity_public_key(new_public_key.clone(), new_private_key);
 
         let identity: Identity = IdentityV0 {
             id: identifier,
@@ -1299,7 +1314,7 @@ mod tests {
         .into();
 
         let identity_create_transition: StateTransition =
-            IdentityCreateTransition::try_from_identity_with_signer(
+            IdentityCreateTransition::try_from_identity_with_signer_and_private_key(
                 &identity,
                 asset_lock_proof,
                 pk.as_slice(),
@@ -1308,6 +1323,7 @@ mod tests {
                 0,
                 platform_version,
             )
+            .await
             .expect("expected an identity create transition");
 
         let identity_create_serialized_transition = identity_create_transition
@@ -1345,8 +1361,8 @@ mod tests {
             .expect("expected to commit");
     }
 
-    #[test]
-    fn test_identity_create_asset_lock_replay_attack_first_protocol_version() {
+    #[tokio::test]
+    async fn test_identity_create_asset_lock_replay_attack_first_protocol_version() {
         let platform_version = PlatformVersion::first();
         let platform_config = PlatformConfig {
             testing_configs: PlatformTestConfig {
@@ -1376,7 +1392,7 @@ mod tests {
             )
             .expect("expected to get key pair");
 
-        signer.add_key(master_key.clone(), master_private_key);
+        signer.add_identity_public_key(master_key.clone(), master_private_key);
 
         let (critical_public_key_that_is_already_in_system, private_key) =
             IdentityPublicKey::random_ecdsa_critical_level_authentication_key(
@@ -1420,7 +1436,7 @@ mod tests {
             )
             .expect("expected to add a new identity");
 
-        signer.add_key(
+        signer.add_identity_public_key(
             critical_public_key_that_is_already_in_system.clone(),
             private_key,
         );
@@ -1430,7 +1446,7 @@ mod tests {
             .unwrap();
 
         let asset_lock_proof = instant_asset_lock_proof_fixture(
-            Some(PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap()),
+            Some(PrivateKey::from_byte_array(&pk, Network::Testnet).unwrap()),
             None,
         );
 
@@ -1450,7 +1466,7 @@ mod tests {
         .into();
 
         let identity_create_transition: StateTransition =
-            IdentityCreateTransition::try_from_identity_with_signer(
+            IdentityCreateTransition::try_from_identity_with_signer_and_private_key(
                 &identity,
                 asset_lock_proof.clone(),
                 pk.as_slice(),
@@ -1459,6 +1475,7 @@ mod tests {
                 0,
                 platform_version,
             )
+            .await
             .expect("expected an identity create transition");
 
         let identity_create_serialized_transition = identity_create_transition
@@ -1530,7 +1547,7 @@ mod tests {
             )
             .expect("expected to get key pair");
 
-        signer.add_key(new_public_key.clone(), new_private_key);
+        signer.add_identity_public_key(new_public_key.clone(), new_private_key);
 
         // let's set the new key to the identity (replacing the one that was causing the issue
         identity.set_public_keys(BTreeMap::from([
@@ -1539,7 +1556,7 @@ mod tests {
         ]));
 
         let identity_create_transition: StateTransition =
-            IdentityCreateTransition::try_from_identity_with_signer(
+            IdentityCreateTransition::try_from_identity_with_signer_and_private_key(
                 &identity,
                 asset_lock_proof,
                 pk.as_slice(),
@@ -1548,6 +1565,7 @@ mod tests {
                 0,
                 platform_version,
             )
+            .await
             .expect("expected an identity create transition");
 
         let identity_create_serialized_transition = identity_create_transition
@@ -1593,8 +1611,8 @@ mod tests {
         assert_eq!(identity_balance, 99909310400); // The identity balance is smaller than if there hadn't been any issue
     }
 
-    #[test]
-    fn test_identity_create_asset_lock_replay_attack_latest_protocol_version() {
+    #[tokio::test]
+    async fn test_identity_create_asset_lock_replay_attack_latest_protocol_version() {
         let platform_version = PlatformVersion::latest();
         let platform_config = PlatformConfig {
             testing_configs: PlatformTestConfig {
@@ -1623,7 +1641,7 @@ mod tests {
             )
             .expect("expected to get key pair");
 
-        signer.add_key(master_key.clone(), master_private_key);
+        signer.add_identity_public_key(master_key.clone(), master_private_key);
 
         let (critical_public_key_that_is_already_in_system, private_key) =
             IdentityPublicKey::random_ecdsa_critical_level_authentication_key(
@@ -1667,7 +1685,7 @@ mod tests {
             )
             .expect("expected to add a new identity");
 
-        signer.add_key(
+        signer.add_identity_public_key(
             critical_public_key_that_is_already_in_system.clone(),
             private_key,
         );
@@ -1677,7 +1695,7 @@ mod tests {
             .unwrap();
 
         let asset_lock_proof = instant_asset_lock_proof_fixture(
-            Some(PrivateKey::from_slice(pk.as_slice(), Network::Testnet).unwrap()),
+            Some(PrivateKey::from_byte_array(&pk, Network::Testnet).unwrap()),
             None,
         );
 
@@ -1697,7 +1715,7 @@ mod tests {
         .into();
 
         let identity_create_transition: StateTransition =
-            IdentityCreateTransition::try_from_identity_with_signer(
+            IdentityCreateTransition::try_from_identity_with_signer_and_private_key(
                 &identity,
                 asset_lock_proof.clone(),
                 pk.as_slice(),
@@ -1706,6 +1724,7 @@ mod tests {
                 0,
                 platform_version,
             )
+            .await
             .expect("expected an identity create transition");
 
         let identity_create_serialized_transition = identity_create_transition
@@ -1777,7 +1796,7 @@ mod tests {
             )
             .expect("expected to get key pair");
 
-        signer.add_key(new_public_key.clone(), new_private_key);
+        signer.add_identity_public_key(new_public_key.clone(), new_private_key);
 
         // let's set the new key to the identity (replacing the one that was causing the issue
         identity.set_public_keys(BTreeMap::from([
@@ -1786,7 +1805,7 @@ mod tests {
         ]));
 
         let identity_create_transition: StateTransition =
-            IdentityCreateTransition::try_from_identity_with_signer(
+            IdentityCreateTransition::try_from_identity_with_signer_and_private_key(
                 &identity,
                 asset_lock_proof,
                 pk.as_slice(),
@@ -1795,6 +1814,7 @@ mod tests {
                 0,
                 platform_version,
             )
+            .await
             .expect("expected an identity create transition");
 
         let identity_create_serialized_transition = identity_create_transition

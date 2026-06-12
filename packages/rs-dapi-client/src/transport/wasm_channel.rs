@@ -43,21 +43,26 @@ impl WasmClient {
     }
 }
 
-impl tonic::client::GrpcService<tonic::body::BoxBody> for WasmClient {
+impl tonic::client::GrpcService<tonic::body::Body> for WasmClient {
     type Future = BoxFuture<'static, Result<http::Response<Self::ResponseBody>, Self::Error>>;
-    type ResponseBody = tonic::body::BoxBody;
+    type ResponseBody = tonic::body::Body;
     type Error = Status;
 
-    fn call(&mut self, request: http::Request<tonic::body::BoxBody>) -> Self::Future {
+    fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
         let mut client = self.client.clone();
-        let fut = client.call(request).map(|res| match res {
-            Ok(resp) => {
-                let body = tonic::body::boxed(resp.into_body());
-                Ok(Response::new(body))
-            }
-            Err(e) => Err(wasm_client_error_to_status(e)),
-        });
 
+        let fut = async move {
+            match client.call(request).await {
+                Ok(resp) => {
+                    let (parts, body) = resp.into_parts();
+                    let tonic_body = tonic::body::Body::new(body);
+                    Ok(Response::from_parts(parts, tonic_body))
+                }
+                Err(e) => Err(wasm_client_error_to_status(e)),
+            }
+        };
+
+        // For WASM, we need to use into_send to make the future Send
         into_send(fut)
     }
 
@@ -95,6 +100,13 @@ impl backon::Sleeper for WasmBackonSleeper {
     fn sleep(&self, dur: Duration) -> Self::Sleep {
         into_send(gloo_timers::future::sleep(dur)).boxed()
     }
+}
+
+/// Sleep for the given duration, wrapped to be Send-compatible.
+///
+/// This uses [into_send] to convert the non-Send gloo_timers future into a Send future.
+pub fn into_send_sleep(dur: Duration) -> BoxFuture<'static, ()> {
+    into_send(gloo_timers::future::sleep(dur)).boxed()
 }
 
 /// Convert a future into a boxed future that can be sent between threads.

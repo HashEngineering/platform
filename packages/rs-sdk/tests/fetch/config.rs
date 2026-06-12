@@ -6,6 +6,7 @@
 use crate::fetch::generated_data::*;
 use dpp::{
     dashcore::{hashes::Hash, ProTxHash},
+    data_contracts::dpns_contract,
     prelude::Identifier,
 };
 use rs_dapi_client::{Address, AddressList};
@@ -16,9 +17,9 @@ use zeroize::Zeroizing;
 #[derive(Debug, Deserialize)]
 /// Configuration for dash-platform-sdk.
 ///
-/// Content of this configuration is loaded from environment variables or `${CARGO_MANIFEST_DIR}/.env` file
+/// Content of this configuration is loaded from environment variables or `${CARGO_MANIFEST_DIR}/tests/.env` file
 /// when the [Config::new()] is called.
-/// Variable names in the enviroment and `.env` file must be prefixed with [DASH_SDK_](Config::CONFIG_PREFIX)
+/// Variable names in the environment and `.env` file must be prefixed with [DASH_SDK_](Config::CONFIG_PREFIX)
 /// and written as SCREAMING_SNAKE_CASE (e.g. `DASH_SDK_PLATFORM_HOST`).
 pub struct Config {
     /// Hostname of the Dash Platform node to connect to
@@ -30,7 +31,7 @@ pub struct Config {
     /// Host of the Dash Core RPC interface running on the Dash Platform node.
     /// Defaults to the same as [platform_host](Config::platform_host).
     #[serde(default)]
-    #[cfg_attr(not(feature = "network-testing"), allow(unused))]
+    #[cfg(all(feature = "network-testing", not(feature = "offline-testing")))]
     pub core_host: Option<String>,
     /// Port of the Dash Core RPC interface running on the Dash Platform node
     #[serde(default)]
@@ -47,6 +48,7 @@ pub struct Config {
 
     /// When platform_ssl is true, use the PEM-encoded CA certificate from provided absolute path to verify the server certificate.
     #[serde(default)]
+    #[cfg(all(feature = "network-testing", not(feature = "offline-testing")))]
     pub platform_ca_cert_path: Option<PathBuf>,
 
     /// Directory where all generated test vectors will be saved.
@@ -231,8 +233,9 @@ impl Config {
         IDENTITY_ID_1
     }
 
+    /// ID of existing data contract. We return DPNS data contract ID here.
     fn default_data_contract_id() -> Identifier {
-        data_contracts::dpns_contract::ID_BYTES.into()
+        dpns_contract::ID
     }
 
     fn default_document_type_name() -> String {

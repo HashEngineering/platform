@@ -14,7 +14,7 @@ use dpp::state_transition::StateTransition;
 /// This trait allows adding new public keys or disabling existing public keys on an identity.
 /// The transition must be signed with the identity's master key.
 #[async_trait::async_trait]
-pub trait PutIdentityUpdate<S: Signer>: Sized {
+pub trait PutIdentityUpdate<S: Signer<IdentityPublicKey>>: Sized {
     /// Builds and broadcasts an [`IdentityUpdateTransition`] to platform.
     ///
     /// Returns the broadcast [`StateTransition`] without waiting for confirmation.
@@ -65,7 +65,7 @@ pub trait PutIdentityUpdate<S: Signer>: Sized {
 }
 
 #[async_trait::async_trait]
-impl<S: Signer + Send + Sync> PutIdentityUpdate<S> for Identity {
+impl<S: Signer<IdentityPublicKey> + Send + Sync> PutIdentityUpdate<S> for Identity {
     async fn put_identity_update_to_platform(
         &self,
         sdk: &Sdk,
@@ -90,7 +90,7 @@ impl<S: Signer + Send + Sync> PutIdentityUpdate<S> for Identity {
             signer,
             sdk.version(),
             None,
-        )?;
+        ).await?;
 
         state_transition.broadcast(sdk, settings).await?;
         Ok(state_transition)

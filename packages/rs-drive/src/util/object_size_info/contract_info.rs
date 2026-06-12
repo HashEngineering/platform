@@ -11,9 +11,11 @@ use crate::fees::op::LowLevelDriveOperation;
 #[cfg(feature = "server")]
 use dpp::block::block_info::BlockInfo;
 use dpp::data_contract::accessors::v0::DataContractV0Getters;
+#[cfg(feature = "server")]
 use dpp::data_contract::document_type::DocumentTypeRef;
 use dpp::data_contract::DataContract;
 use dpp::identifier::Identifier;
+#[cfg(feature = "server")]
 use dpp::ProtocolError;
 #[cfg(feature = "server")]
 use grovedb::TransactionArg;
@@ -24,7 +26,9 @@ use std::sync::Arc;
 /// Represents various forms of accessing or representing a data contract.
 /// This enum is used to handle different scenarios in which data contracts
 /// might be needed, providing a unified interface to access their data.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
+#[cfg(feature = "server")]
 pub enum DataContractInfo<'a> {
     /// A unique identifier for a data contract. This variant is typically used
     /// when only the identity of the data contract is required without needing
@@ -46,6 +50,7 @@ pub enum DataContractInfo<'a> {
     OwnedDataContract(DataContract),
 }
 
+#[cfg(feature = "server")]
 impl<'a> DataContractInfo<'a> {
     #[cfg(feature = "server")]
     /// Resolve the data contract info into an object that contains the data contract
@@ -89,6 +94,7 @@ impl<'a> DataContractInfo<'a> {
 /// Contains resolved data contract information, typically used after initial
 /// fetching or retrieval steps have been completed. This enum simplifies handling
 /// of data contract states post-retrieval.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum DataContractOwnedResolvedInfo {
     #[cfg(feature = "server")]
@@ -143,6 +149,7 @@ impl DataContractOwnedResolvedInfo {
 /// Contains resolved data contract information, typically used after initial
 /// fetching or retrieval steps have been completed. This enum simplifies handling
 /// of data contract states post-retrieval.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum DataContractResolvedInfo<'a> {
     #[cfg(feature = "server")]
@@ -205,7 +212,9 @@ impl AsRef<DataContract> for DataContractResolvedInfo<'_> {
 }
 
 /// Enumerates methods for identifying or referencing document types, accommodating various application needs.
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Debug)]
+#[cfg(feature = "server")]
 pub enum DocumentTypeInfo<'a> {
     /// Contains the document type name as an owned `String`, suitable for dynamic or mutable scenarios.
     DocumentTypeName(String),
@@ -217,6 +226,7 @@ pub enum DocumentTypeInfo<'a> {
     DocumentTypeRef(DocumentTypeRef<'a>),
 }
 
+#[cfg(feature = "server")]
 impl<'a> DocumentTypeInfo<'a> {
     /// Resolve the data contract info into an object that contains the data contract
     pub fn resolve(self, contract: &'a DataContract) -> Result<DocumentTypeRef<'a>, ProtocolError> {
@@ -229,5 +239,89 @@ impl<'a> DocumentTypeInfo<'a> {
                 .map_err(ProtocolError::DataContractError),
             DocumentTypeInfo::DocumentTypeRef(document_type_ref) => Ok(document_type_ref),
         }
+    }
+}
+
+#[cfg(all(feature = "server", test))]
+mod tests {
+    use super::*;
+    use dpp::tests::fixtures::get_data_contract_fixture;
+    use dpp::version::PlatformVersion;
+
+    fn sample_contract() -> DataContract {
+        let platform_version = PlatformVersion::latest();
+        get_data_contract_fixture(None, 0, platform_version.protocol_version).data_contract_owned()
+    }
+
+    #[test]
+    fn owned_resolved_info_id_and_as_ref() {
+        let contract = sample_contract();
+        let expected_id = contract.id();
+        let owned = DataContractOwnedResolvedInfo::OwnedDataContract(contract);
+        assert_eq!(owned.id(), expected_id);
+        let as_ref: &DataContract = owned.as_ref();
+        assert_eq!(as_ref.id(), expected_id);
+    }
+
+    #[test]
+    fn owned_resolved_info_into_owned_returns_inner() {
+        let contract = sample_contract();
+        let expected_id = contract.id();
+        let owned = DataContractOwnedResolvedInfo::OwnedDataContract(contract);
+        let unwrapped = owned.into_owned();
+        assert_eq!(unwrapped.id(), expected_id);
+    }
+
+    #[test]
+    fn resolved_info_borrowed_and_owned() {
+        let contract = sample_contract();
+        let id = contract.id();
+
+        let borrowed: DataContractResolvedInfo =
+            DataContractResolvedInfo::BorrowedDataContract(&contract);
+        assert_eq!(borrowed.id(), id);
+        let as_ref: &DataContract = borrowed.as_ref();
+        assert_eq!(as_ref.id(), id);
+
+        let owned_wrapper = DataContractResolvedInfo::OwnedDataContract(contract);
+        assert_eq!(owned_wrapper.id(), id);
+        let as_ref2: &DataContract = owned_wrapper.as_ref();
+        assert_eq!(as_ref2.id(), id);
+    }
+
+    #[test]
+    fn resolved_info_arc_contract() {
+        use std::sync::Arc;
+        let contract = sample_contract();
+        let id = contract.id();
+        let arc = Arc::new(contract);
+        let info: DataContractResolvedInfo = DataContractResolvedInfo::ArcDataContract(arc);
+        assert_eq!(info.id(), id);
+        let as_ref: &DataContract = info.as_ref();
+        assert_eq!(as_ref.id(), id);
+    }
+
+    #[test]
+    fn from_owned_resolved_info_produces_borrowed_variant() {
+        let contract = sample_contract();
+        let id = contract.id();
+        let owned = DataContractOwnedResolvedInfo::OwnedDataContract(contract);
+        let borrowed: DataContractResolvedInfo = (&owned).into();
+        match borrowed {
+            DataContractResolvedInfo::BorrowedDataContract(b) => {
+                assert_eq!(b.id(), id);
+            }
+            _ => panic!("expected BorrowedDataContract"),
+        }
+    }
+
+    #[test]
+    fn document_type_info_resolve_errors_for_missing_type() {
+        let contract = sample_contract();
+        let info = DocumentTypeInfo::DocumentTypeName("missing".to_string());
+        assert!(info.resolve(&contract).is_err());
+
+        let info = DocumentTypeInfo::DocumentTypeNameAsStr("nope_at_all");
+        assert!(info.resolve(&contract).is_err());
     }
 }

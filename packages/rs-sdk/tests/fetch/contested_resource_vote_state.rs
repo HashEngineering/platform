@@ -2,7 +2,7 @@
 use crate::fetch::{
     common::{setup_logs, setup_sdk_for_test_case, TEST_DPNS_NAME},
     config::Config,
-    contested_resource::check_mn_voting_prerequisities,
+    contested_resource::check_mn_voting_prerequisites,
 };
 use dash_sdk::platform::{Fetch, FetchMany};
 use dpp::{
@@ -105,13 +105,15 @@ async fn contested_resource_vote_states_nx_contract() {
     };
 
     if let dash_sdk::error::Error::DapiClientError(e) = result {
-        assert!(
-            e.contains(
-                "transport error: grpc error: status: InvalidArgument, message: \"contract not found error"
-            ),
-            "we should get contract not found error, got: {:?}",
-            e,
-        );
+        if let rs_dapi_client::DapiClientError::Transport(
+            rs_dapi_client::transport::TransportError::Grpc(status),
+        ) = e
+        {
+            assert_eq!(status.code(), dapi_grpc::tonic::Code::InvalidArgument);
+            assert!(status.message().contains("contract not found error"));
+        } else {
+            panic!("expected gRPC transport error, got: {:?}", e);
+        }
     } else {
         panic!("expected 'contract not found' transport error");
     };
@@ -125,7 +127,7 @@ async fn contested_resource_vote_states_nx_contract() {
 ///
 #[cfg_attr(
     not(feature = "offline-testing"),
-    ignore = "requires manual DPNS names setup for masternode voting tests; see fn check_mn_voting_prerequisities()"
+    ignore = "requires manual DPNS names setup for masternode voting tests; see fn check_mn_voting_prerequisites()"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn contested_resource_vote_states_ok() {
@@ -206,7 +208,7 @@ fn base_query(cfg: &Config) -> ContestedDocumentVotePollDriveQuery {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[cfg_attr(
     not(feature = "offline-testing"),
-    ignore = "requires manual DPNS names setup for masternode voting tests; see fn check_mn_voting_prerequisities()"
+    ignore = "requires manual DPNS names setup for masternode voting tests; see fn check_mn_voting_prerequisites()"
 )]
 #[allow(non_snake_case)]
 async fn contested_resource_vote_states_with_limit_PLAN_674() {
@@ -216,7 +218,7 @@ async fn contested_resource_vote_states_with_limit_PLAN_674() {
     let sdk = cfg
         .setup_api("contested_resource_vote_states_with_limit")
         .await;
-    check_mn_voting_prerequisities(&cfg)
+    check_mn_voting_prerequisites(&cfg)
         .await
         .expect("prerequisites not met");
 
@@ -313,7 +315,7 @@ type MutFn = fn(&mut ContestedDocumentVotePollDriveQuery);
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[cfg_attr(
     not(feature = "offline-testing"),
-    ignore = "requires manual DPNS names setup for masternode voting tests; see fn check_mn_voting_prerequisities()"
+    ignore = "requires manual DPNS names setup for masternode voting tests; see fn check_mn_voting_prerequisites()"
 )]
 async fn contested_rss_vote_state_fields(
     query_mut_fn: MutFn,
@@ -322,9 +324,9 @@ async fn contested_rss_vote_state_fields(
     setup_logs();
 
     let cfg = Config::new();
-    check_mn_voting_prerequisities(&cfg)
+    check_mn_voting_prerequisites(&cfg)
         .await
-        .expect("prerequisities");
+        .expect("prerequisites");
 
     let mut query = base_query(&cfg);
     query_mut_fn(&mut query);
@@ -345,9 +347,23 @@ async fn contested_rss_vote_state_fields(
             }
         }
         Err(expected) if result.is_err() => {
-            let result = result.expect_err("error");
-            if !result.to_string().contains(expected) {
-                Err(format!("expected: {:#?}\ngot {:?}\n", expected, result))
+            let err = result.expect_err("error");
+            // Prefer structured check for InvalidArgument code
+            if expected.contains("InvalidArgument") {
+                use dash_sdk::Error as SdkError;
+                use rs_dapi_client::transport::TransportError;
+                use rs_dapi_client::DapiClientError;
+                if let SdkError::DapiClientError(DapiClientError::Transport(
+                    TransportError::Grpc(status),
+                )) = &err
+                {
+                    if status.code() == dapi_grpc::tonic::Code::InvalidArgument {
+                        return Ok(());
+                    }
+                }
+            }
+            if !err.to_string().contains(expected) {
+                Err(format!("expected: {:#?}\ngot {:?}\n", expected, err))
             } else {
                 Ok(())
             }

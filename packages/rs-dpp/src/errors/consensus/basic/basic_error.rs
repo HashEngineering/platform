@@ -55,25 +55,36 @@ use crate::consensus::basic::identity::{
     IdentityAssetLockStateTransitionReplayError, IdentityAssetLockTransactionIsNotFoundError,
     IdentityAssetLockTransactionOutPointAlreadyConsumedError,
     IdentityAssetLockTransactionOutPointNotEnoughBalanceError,
-    IdentityAssetLockTransactionOutputNotFoundError, IdentityCreditTransferToSelfError,
+    IdentityAssetLockTransactionOutputNotFoundError,
+    IdentityAssetLockTransactionTooManyInputsError, IdentityCreditTransferToSelfError,
     InvalidAssetLockProofCoreChainHeightError, InvalidAssetLockProofTransactionHeightError,
     InvalidAssetLockTransactionOutputReturnSizeError,
+    InvalidCreditWithdrawalTransitionCoreFeeError,
+    InvalidCreditWithdrawalTransitionOutputScriptError,
     InvalidIdentityAssetLockProofChainLockValidationError,
     InvalidIdentityAssetLockTransactionError, InvalidIdentityAssetLockTransactionOutputError,
     InvalidIdentityCreditTransferAmountError, InvalidIdentityCreditWithdrawalTransitionAmountError,
-    InvalidIdentityCreditWithdrawalTransitionCoreFeeError,
-    InvalidIdentityCreditWithdrawalTransitionOutputScriptError, InvalidIdentityKeySignatureError,
-    InvalidIdentityPublicKeyDataError, InvalidIdentityPublicKeySecurityLevelError,
-    InvalidIdentityUpdateTransitionDisableKeysError, InvalidIdentityUpdateTransitionEmptyError,
-    InvalidInstantAssetLockProofError, InvalidInstantAssetLockProofSignatureError,
-    InvalidKeyPurposeForContractBoundsError, MissingMasterPublicKeyError,
-    NotImplementedIdentityCreditWithdrawalTransitionPoolingError, TooManyMasterPublicKeyError,
-    WithdrawalOutputScriptNotAllowedWhenSigningWithOwnerKeyError,
+    InvalidIdentityKeySignatureError, InvalidIdentityPublicKeyDataError,
+    InvalidIdentityPublicKeySecurityLevelError, InvalidIdentityUpdateTransitionDisableKeysError,
+    InvalidIdentityUpdateTransitionEmptyError, InvalidInstantAssetLockProofError,
+    InvalidInstantAssetLockProofSignatureError, InvalidKeyPurposeForContractBoundsError,
+    MissingMasterPublicKeyError, NotImplementedCreditWithdrawalTransitionPoolingError,
+    TooManyMasterPublicKeyError, WithdrawalOutputScriptNotAllowedWhenSigningWithOwnerKeyError,
 };
 use crate::consensus::basic::invalid_identifier_error::InvalidIdentifierError;
 use crate::consensus::basic::state_transition::{
-    InvalidStateTransitionTypeError, MissingStateTransitionTypeError,
-    StateTransitionMaxSizeExceededError,
+    FeeStrategyDuplicateError, FeeStrategyEmptyError, FeeStrategyIndexOutOfBoundsError,
+    FeeStrategyTooManyStepsError, InputBelowMinimumError, InputOutputBalanceMismatchError,
+    InputWitnessCountMismatchError, InputsNotLessThanOutputsError, InsufficientFundingAmountError,
+    InvalidRemainderOutputCountError, InvalidStateTransitionTypeError,
+    MissingStateTransitionTypeError, OutputAddressAlsoInputError, OutputBelowMinimumError,
+    OutputsNotGreaterThanInputsError, ShieldedEmptyProofError,
+    ShieldedEncryptedNoteSizeMismatchError, ShieldedImplicitFeeCapExceededError,
+    ShieldedInvalidDenominationError, ShieldedInvalidValueBalanceError, ShieldedNoActionsError,
+    ShieldedTooManyActionsError, ShieldedZeroAnchorError, StateTransitionMaxSizeExceededError,
+    StateTransitionNotActiveError, TransitionNoInputsError, TransitionNoOutputsError,
+    TransitionOverMaxInputsError, TransitionOverMaxOutputsError, WithdrawalBalanceMismatchError,
+    WithdrawalBelowMinAmountError,
 };
 use crate::consensus::basic::{
     IncompatibleProtocolVersionError, UnsupportedFeatureError, UnsupportedProtocolVersionError,
@@ -93,7 +104,8 @@ use crate::consensus::basic::token::{
     InvalidTokenDistributionTimeIntervalNotMinuteAlignedError,
     InvalidTokenDistributionTimeIntervalTooShortError, InvalidTokenIdError,
     InvalidTokenNoteTooBigError, InvalidTokenPositionError, MissingDefaultLocalizationError,
-    TokenNoteOnlyAllowedWhenProposerError, TokenTransferToOurselfError,
+    TokenNoteOnlyAllowedWhenProposerError, TokenPricingScheduleEmptyError,
+    TokenTransferToOurselfError,
 };
 use crate::consensus::basic::unsupported_version_error::UnsupportedVersionError;
 use crate::consensus::basic::value_error::ValueError;
@@ -103,6 +115,7 @@ use crate::consensus::basic::{
 use crate::consensus::state::identity::master_public_key_update_error::MasterPublicKeyUpdateError;
 use crate::data_contract::errors::DataContractError;
 
+#[allow(clippy::large_enum_variant)]
 #[derive(
     Error, Debug, PlatformSerialize, PlatformDeserialize, Encode, Decode, PartialEq, Clone,
 )]
@@ -357,8 +370,8 @@ pub enum BasicError {
     InvalidIdentityCreditTransferAmountError(InvalidIdentityCreditTransferAmountError),
 
     #[error(transparent)]
-    InvalidIdentityCreditWithdrawalTransitionOutputScriptError(
-        InvalidIdentityCreditWithdrawalTransitionOutputScriptError,
+    InvalidCreditWithdrawalTransitionOutputScriptError(
+        InvalidCreditWithdrawalTransitionOutputScriptError,
     ),
 
     #[error(transparent)]
@@ -367,9 +380,7 @@ pub enum BasicError {
     ),
 
     #[error(transparent)]
-    InvalidIdentityCreditWithdrawalTransitionCoreFeeError(
-        InvalidIdentityCreditWithdrawalTransitionCoreFeeError,
-    ),
+    InvalidCreditWithdrawalTransitionCoreFeeError(InvalidCreditWithdrawalTransitionCoreFeeError),
 
     #[error(transparent)]
     InvalidIdentityCreditWithdrawalTransitionAmountError(
@@ -385,8 +396,8 @@ pub enum BasicError {
     ),
 
     #[error(transparent)]
-    NotImplementedIdentityCreditWithdrawalTransitionPoolingError(
-        NotImplementedIdentityCreditWithdrawalTransitionPoolingError,
+    NotImplementedCreditWithdrawalTransitionPoolingError(
+        NotImplementedCreditWithdrawalTransitionPoolingError,
     ),
 
     // State Transition
@@ -591,6 +602,100 @@ pub enum BasicError {
 
     #[error(transparent)]
     InvalidKeyPurposeForContractBoundsError(InvalidKeyPurposeForContractBoundsError),
+
+    #[error(transparent)]
+    StateTransitionNotActiveError(StateTransitionNotActiveError),
+
+    #[error(transparent)]
+    TransitionOverMaxInputsError(TransitionOverMaxInputsError),
+
+    #[error(transparent)]
+    TransitionOverMaxOutputsError(TransitionOverMaxOutputsError),
+
+    #[error(transparent)]
+    InputWitnessCountMismatchError(InputWitnessCountMismatchError),
+
+    #[error(transparent)]
+    TransitionNoInputsError(TransitionNoInputsError),
+
+    #[error(transparent)]
+    TransitionNoOutputsError(TransitionNoOutputsError),
+
+    #[error(transparent)]
+    InvalidRemainderOutputCountError(InvalidRemainderOutputCountError),
+
+    #[error(transparent)]
+    FeeStrategyEmptyError(FeeStrategyEmptyError),
+
+    #[error(transparent)]
+    FeeStrategyDuplicateError(FeeStrategyDuplicateError),
+
+    #[error(transparent)]
+    FeeStrategyIndexOutOfBoundsError(FeeStrategyIndexOutOfBoundsError),
+
+    #[error(transparent)]
+    FeeStrategyTooManyStepsError(FeeStrategyTooManyStepsError),
+
+    #[error(transparent)]
+    InputBelowMinimumError(InputBelowMinimumError),
+
+    #[error(transparent)]
+    OutputBelowMinimumError(OutputBelowMinimumError),
+
+    #[error(transparent)]
+    InputOutputBalanceMismatchError(InputOutputBalanceMismatchError),
+
+    #[error(transparent)]
+    OutputsNotGreaterThanInputsError(OutputsNotGreaterThanInputsError),
+
+    #[error(transparent)]
+    WithdrawalBalanceMismatchError(WithdrawalBalanceMismatchError),
+
+    #[error(transparent)]
+    WithdrawalBelowMinAmountError(WithdrawalBelowMinAmountError),
+
+    #[error(transparent)]
+    InsufficientFundingAmountError(InsufficientFundingAmountError),
+
+    #[error(transparent)]
+    InputsNotLessThanOutputsError(InputsNotLessThanOutputsError),
+
+    #[error(transparent)]
+    OutputAddressAlsoInputError(OutputAddressAlsoInputError),
+
+    #[error(transparent)]
+    ShieldedNoActionsError(ShieldedNoActionsError),
+
+    #[error(transparent)]
+    ShieldedTooManyActionsError(ShieldedTooManyActionsError),
+
+    #[error(transparent)]
+    ShieldedEmptyProofError(ShieldedEmptyProofError),
+
+    #[error(transparent)]
+    ShieldedZeroAnchorError(ShieldedZeroAnchorError),
+
+    #[error(transparent)]
+    ShieldedInvalidValueBalanceError(ShieldedInvalidValueBalanceError),
+
+    #[error(transparent)]
+    ShieldedEncryptedNoteSizeMismatchError(ShieldedEncryptedNoteSizeMismatchError),
+
+    #[error(transparent)]
+    IdentityAssetLockTransactionTooManyInputsError(IdentityAssetLockTransactionTooManyInputsError),
+
+    // NOTE: `BasicError` is bincode-encoded positionally (no explicit discriminants), so new
+    // variants MUST be appended at the tail — inserting mid-enum would shift the wire discriminants
+    // of every following variant and mis-decode previously-encoded errors. The error-code integer
+    // (codes.rs) is independent of variant order.
+    #[error(transparent)]
+    ShieldedImplicitFeeCapExceededError(ShieldedImplicitFeeCapExceededError),
+
+    #[error(transparent)]
+    ShieldedInvalidDenominationError(ShieldedInvalidDenominationError),
+
+    #[error(transparent)]
+    TokenPricingScheduleEmptyError(TokenPricingScheduleEmptyError),
 }
 
 impl From<BasicError> for ConsensusError {

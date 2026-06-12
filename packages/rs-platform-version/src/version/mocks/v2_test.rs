@@ -14,21 +14,25 @@ use crate::version::dpp_versions::dpp_token_versions::v1::TOKEN_VERSIONS_V1;
 use crate::version::dpp_versions::dpp_validation_versions::v2::DPP_VALIDATION_VERSIONS_V2;
 use crate::version::dpp_versions::dpp_voting_versions::v2::VOTING_VERSION_V2;
 use crate::version::dpp_versions::DPPVersion;
+use crate::version::drive_abci_versions::drive_abci_checkpoint_parameters::v1::DRIVE_ABCI_CHECKPOINT_PARAMETERS_V1;
 use crate::version::drive_abci_versions::drive_abci_method_versions::v1::DRIVE_ABCI_METHOD_VERSIONS_V1;
 use crate::version::drive_abci_versions::drive_abci_query_versions::{
+    DriveAbciDocumentQueryHelperVersions, DriveAbciQueryAddressFundsVersions,
     DriveAbciQueryDataContractVersions, DriveAbciQueryGroupVersions,
     DriveAbciQueryIdentityVersions, DriveAbciQueryPrefundedSpecializedBalancesVersions,
-    DriveAbciQuerySystemVersions, DriveAbciQueryTokenVersions, DriveAbciQueryValidatorVersions,
-    DriveAbciQueryVersions, DriveAbciQueryVotingVersions,
+    DriveAbciQueryShieldedVersions, DriveAbciQuerySystemVersions, DriveAbciQueryTokenVersions,
+    DriveAbciQueryValidatorVersions, DriveAbciQueryVersions, DriveAbciQueryVotingVersions,
 };
 use crate::version::drive_abci_versions::drive_abci_structure_versions::v1::DRIVE_ABCI_STRUCTURE_VERSIONS_V1;
 use crate::version::drive_abci_versions::drive_abci_validation_versions::v1::DRIVE_ABCI_VALIDATION_VERSIONS_V1;
 use crate::version::drive_abci_versions::drive_abci_withdrawal_constants::v1::DRIVE_ABCI_WITHDRAWAL_CONSTANTS_V1;
 use crate::version::drive_abci_versions::DriveAbciVersion;
+use crate::version::drive_versions::drive_address_funds_method_versions::v1::DRIVE_ADDRESS_FUNDS_METHOD_VERSIONS_V1;
 use crate::version::drive_versions::drive_contract_method_versions::v1::DRIVE_CONTRACT_METHOD_VERSIONS_V1;
 use crate::version::drive_versions::drive_credit_pool_method_versions::v1::CREDIT_POOL_METHOD_VERSIONS_V1;
 use crate::version::drive_versions::drive_document_method_versions::v1::DRIVE_DOCUMENT_METHOD_VERSIONS_V1;
 use crate::version::drive_versions::drive_group_method_versions::v1::DRIVE_GROUP_METHOD_VERSIONS_V1;
+use crate::version::drive_versions::drive_group_method_versions::DriveShieldedMethodVersions;
 use crate::version::drive_versions::drive_grove_method_versions::v1::DRIVE_GROVE_METHOD_VERSIONS_V1;
 use crate::version::drive_versions::drive_identity_method_versions::v1::DRIVE_IDENTITY_METHOD_VERSIONS_V1;
 use crate::version::drive_versions::drive_state_transition_method_versions::v1::DRIVE_STATE_TRANSITION_METHOD_VERSIONS_V1;
@@ -42,7 +46,8 @@ use crate::version::drive_versions::{
     DriveInitializationMethodVersions, DriveMethodVersions, DriveOperationsMethodVersion,
     DrivePlatformStateMethodVersions, DrivePlatformSystemMethodVersions,
     DrivePrefundedSpecializedMethodVersions, DriveProtocolUpgradeVersions,
-    DriveProveMethodVersions, DriveSystemEstimationCostsMethodVersions, DriveVersion,
+    DriveProveMethodVersions, DriveSavedBlockTransactionsMethodVersions,
+    DriveSystemEstimationCostsMethodVersions, DriveVersion,
 };
 use crate::version::fee::v1::FEE_VERSION1;
 use crate::version::mocks::TEST_PROTOCOL_VERSION_SHIFT_BYTES;
@@ -136,6 +141,19 @@ pub const TEST_PLATFORM_V2: PlatformVersion = PlatformVersion {
                 empty_prefunded_specialized_balance: 0,
             },
             group: DRIVE_GROUP_METHOD_VERSIONS_V1,
+            address_funds: DRIVE_ADDRESS_FUNDS_METHOD_VERSIONS_V1,
+            shielded: DriveShieldedMethodVersions {
+                insert_note: 0,
+                insert_nullifiers: 0,
+                update_total_balance: 0,
+                record_anchor_if_changed: 0,
+                prune_anchors: 0,
+                has_anchor: 0,
+                has_nullifier: 0,
+                read_total_balance: 0,
+                notes_count: 0,
+            },
+            saved_block_transactions: DriveSavedBlockTransactionsMethodVersions { store_address_balances: 0, fetch_address_balances: 0, compact_address_balances: 0, cleanup_expired_address_balances: 0, max_blocks_before_compaction: 64, max_addresses_before_compaction: 2048 },
         },
         grove_methods: DRIVE_GROVE_METHOD_VERSIONS_V1,
         grove_version: GROVE_V1,
@@ -146,13 +164,21 @@ pub const TEST_PLATFORM_V2: PlatformVersion = PlatformVersion {
         validation_and_processing: DRIVE_ABCI_VALIDATION_VERSIONS_V1,
         withdrawal_constants: DRIVE_ABCI_WITHDRAWAL_CONSTANTS_V1,
         query: DriveAbciQueryVersions {
-            max_returned_elements: 100,
+                        max_returned_elements: 100,
             response_metadata: 0,
             proofs_query: 0,
             document_query: FeatureVersionBounds {
                 min_version: 0,
                 max_version: 0,
                 default_current_version: 0,
+            },
+            document_history: FeatureVersionBounds {
+                min_version: 0,
+                max_version: 0,
+                default_current_version: 0,
+            },
+            document_query_helpers: DriveAbciDocumentQueryHelperVersions {
+                compute_aggregate_mode_and_check_limit: 0,
             },
             prefunded_specialized_balances: DriveAbciQueryPrefundedSpecializedBalancesVersions {
                 balance: FeatureVersionBounds {
@@ -385,7 +411,73 @@ pub const TEST_PLATFORM_V2: PlatformVersion = PlatformVersion {
                     default_current_version: 0,
                 },
             },
+            shielded_queries: DriveAbciQueryShieldedVersions {
+                encrypted_notes: FeatureVersionBounds {
+                    min_version: 0,
+                    max_version: 0,
+                    default_current_version: 0,
+                },
+                anchors: FeatureVersionBounds {
+                    min_version: 0,
+                    max_version: 0,
+                    default_current_version: 0,
+                },
+                most_recent_anchor: FeatureVersionBounds {
+                    min_version: 0,
+                    max_version: 0,
+                    default_current_version: 0,
+                },
+                pool_state: FeatureVersionBounds {
+                    min_version: 0,
+                    max_version: 0,
+                    default_current_version: 0,
+                },
+                notes_count: FeatureVersionBounds {
+                    min_version: 0,
+                    max_version: 0,
+                    default_current_version: 0,
+                },
+                nullifiers: FeatureVersionBounds {
+                    min_version: 0,
+                    max_version: 0,
+                    default_current_version: 0,
+                },
+                max_query_chunks: 1,
+            },
+            address_funds_queries: DriveAbciQueryAddressFundsVersions {
+                addresses_infos: FeatureVersionBounds {
+                    min_version: 0,
+                    max_version: 0,
+                    default_current_version: 0,
+                },
+                address_info: FeatureVersionBounds {
+                    min_version: 0,
+                    max_version: 0,
+                    default_current_version: 0,
+                },
+                addresses_trunk_state: FeatureVersionBounds {
+                    min_version: 0,
+                    max_version: 0,
+                    default_current_version: 0,
+                },
+                addresses_branch_state: FeatureVersionBounds {
+                    min_version: 0,
+                    max_version: 0,
+                    default_current_version: 0,
+                },
+                recent_address_balance_changes: FeatureVersionBounds {
+                    min_version: 0,
+                    max_version: 0,
+                    default_current_version: 0,
+                },
+                recent_compacted_address_balance_changes: FeatureVersionBounds {
+                    min_version: 0,
+                    max_version: 0,
+                    default_current_version: 0,
+                },
+            },
         },
+        checkpoints: DRIVE_ABCI_CHECKPOINT_PARAMETERS_V1,
     },
     dpp: DPPVersion {
         costs: DPP_COSTS_VERSIONS_V1,
@@ -413,8 +505,10 @@ pub const TEST_PLATFORM_V2: PlatformVersion = PlatformVersion {
         withdrawal_transactions_per_block_limit: 4,
         retry_signing_expired_withdrawal_documents_per_block_limit: 1,
         max_withdrawal_amount: 50_000_000_000_000,
+        min_withdrawal_amount: 190_000,
         max_contract_group_size: 256,
         max_token_redemption_cycles: 128,
+        max_shielded_transition_actions: 16,
     },
     consensus: ConsensusVersions {
         tenderdash_consensus_version: 0,

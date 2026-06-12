@@ -27,9 +27,10 @@ pub mod factory;
 #[cfg(feature = "factories")]
 pub use factory::*;
 #[cfg(any(
-    feature = "data-contract-value-conversion",
+    feature = "value-conversion",
     feature = "data-contract-cbor-conversion",
-    feature = "data-contract-json-conversion"
+    feature = "json-conversion",
+    feature = "serde-conversion"
 ))]
 pub mod conversion;
 #[cfg(feature = "client")]
@@ -69,6 +70,7 @@ pub type DocumentName = String;
 pub type TokenName = String;
 pub type GroupContractPosition = u16;
 pub type TokenContractPosition = u16;
+pub type DataContractWithSerialization = (DataContract, Vec<u8>);
 type PropertyPath = String;
 
 pub const INITIAL_DATA_CONTRACT_VERSION: u32 = 1;
@@ -337,7 +339,6 @@ mod tests {
         let platform_version = PlatformVersion::latest();
         let data_contract = load_system_data_contract(Dashpay, platform_version)
             .expect("expected dashpay contract");
-        let platform_version = PlatformVersion::latest();
         let serialized = data_contract
             .serialize_to_bytes_with_platform_version(platform_version)
             .expect("expected to serialize data contract");

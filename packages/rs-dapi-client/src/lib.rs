@@ -35,7 +35,10 @@ pub use request_settings::RequestSettings;
 /// A DAPI request could be executed with an initialized [DapiClient].
 ///
 /// # Examples
+/// Requires the `mocks` feature.
 /// ```
+/// # #[cfg(feature = "mocks")]
+/// # {
 /// use rs_dapi_client::{RequestSettings, AddressList, mock::MockDapiClient, DapiClientError, DapiRequest, ExecutionError};
 /// use dapi_grpc::platform::v0::{self as proto};
 ///
@@ -45,6 +48,7 @@ pub use request_settings::RequestSettings;
 /// let response = request.execute(&mut client, RequestSettings::default()).await?;
 /// # Ok::<(), ExecutionError<DapiClientError>>(())
 /// # };
+/// # }
 /// ```
 pub trait DapiRequest {
     /// Response from DAPI for this specific request.
@@ -81,9 +85,17 @@ pub trait CanRetry {
     /// Returns true if the operation can be retried safely.
     fn can_retry(&self) -> bool;
 
+    /// Returns true if this error represents a "no available addresses" condition.
+    ///
+    /// When all addresses have been banned due to errors, the client returns this error.
+    /// Retry logic uses this to return the last meaningful error instead of this one.
+    fn is_no_available_addresses(&self) -> bool {
+        false
+    }
+
     /// Get boolean flag that indicates if the error is retryable.
     ///
-    /// Depreacted in favor of [CanRetry::can_retry].
+    /// Deprecated in favor of [CanRetry::can_retry].
     #[deprecated = "Use !can_retry() instead"]
     fn is_node_failure(&self) -> bool {
         !self.can_retry()

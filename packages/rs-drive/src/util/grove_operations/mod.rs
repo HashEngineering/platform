@@ -9,9 +9,6 @@ pub mod grove_insert;
 /// Grove insert operation into an empty tree
 pub mod grove_insert_empty_tree;
 
-/// Grove insert operation into an empty sum tree
-pub mod grove_insert_empty_sum_tree;
-
 /// Grove insert operation, but only if it doesn't already exist
 pub mod grove_insert_if_not_exists;
 
@@ -51,6 +48,18 @@ pub mod grove_get_raw_path_query;
 /// Proved path query in grove
 pub mod grove_get_proved_path_query;
 
+/// V1 proved path query in grove (supports BulkAppendTree/CommitmentTree)
+pub mod grove_get_proved_path_query_v1;
+
+/// Get total count from a CommitmentTree
+pub mod grove_commitment_tree_count;
+
+/// Proved branch chunk query in grove
+pub mod grove_get_proved_branch_chunk_query;
+
+/// Proved trunk chunk query in grove
+pub mod grove_get_proved_trunk_chunk_query;
+
 /// Get total value from sum tree in grove
 pub mod grove_get_sum_tree_total_value;
 
@@ -62,6 +71,40 @@ pub mod batch_insert_empty_tree;
 
 /// Batch insert operation into empty sum tree
 pub mod batch_insert_empty_sum_tree;
+
+/// Batch insert operation into empty count tree (O(1) total count)
+pub mod batch_insert_empty_count_tree;
+
+/// Batch insert operation into empty count-sum tree (O(1) totals for both
+/// count and sum, no per-node aggregation). Used when a document type
+/// opts into BOTH `documentsCountable` and `documentsSummable` without
+/// any range-* flags.
+pub mod batch_insert_empty_count_sum_tree;
+
+/// Batch insert operation into empty provable count tree (range-countable)
+pub mod batch_insert_empty_provable_count_tree;
+
+/// Batch insert operation into empty provable sum tree (range-summable).
+/// Mirrors [`batch_insert_empty_provable_count_tree`] for the sum surface
+/// — commits per-node aggregated sums to every internal merk node so
+/// range queries land on an O(log n) `AggregateSumOnRange` proof.
+pub mod batch_insert_empty_provable_sum_tree;
+
+/// Batch insert operation into empty provable count-sum tree (combined
+/// count+sum surface). Used when an index opts into both `rangeCountable`
+/// and `rangeSummable` — a single tree carries both metrics per-node.
+/// Lights up once grovedb PR 670 ships `Element::ProvableCountSumTree`
+/// as a callable element variant.
+pub mod batch_insert_empty_provable_count_sum_tree;
+
+/// Batch insert operation into empty provable-count + provable-sum tree
+/// (PCPS, the fully-provable combined surface). Used when an index opts
+/// into BOTH `rangeCountable: true` AND `rangeSummable: true` —
+/// per-node counts AND per-node sums are committed to every internal
+/// merk node so range queries can answer
+/// `AggregateCountOnRange`/`AggregateSumOnRange` (and the combined
+/// variant once grovedb PR 670 ships) over the same tree.
+pub mod batch_insert_empty_provable_count_provable_sum_tree;
 
 /// Batch insert operation into empty tree, but only if it doesn't already exist
 pub mod batch_insert_empty_tree_if_not_exists;
@@ -137,6 +180,10 @@ pub mod batch_insert_sum_item_if_not_exists;
 /// Moved items that are found in a path query to a new path.
 pub mod batch_move_items_in_path_query;
 
+/// Batch inserts item with sum item if not already existing
+pub mod batch_insert_item_with_sum_item_if_not_exists;
+/// Keeps the item, but inserts or adds to the sum item if it already exists
+pub mod batch_keep_item_insert_sum_item_or_add_to_if_already_exists;
 mod batch_move;
 /// Get the total value from a big sum tree
 pub mod grove_get_big_sum_tree_total_value;
@@ -167,7 +214,7 @@ fn push_drive_operation_result<T>(
     if !cost.is_nothing() {
         drive_operations.push(CalculatedCostOperation(cost));
     }
-    value.map_err(Error::GroveDB)
+    value.map_err(Error::from)
 }
 
 /// Pushes an operation's `OperationCost` to `drive_operations` given its `CostContext`
@@ -180,7 +227,7 @@ fn push_drive_operation_result_optional<T>(
     if let Some(drive_operations) = drive_operations {
         drive_operations.push(CalculatedCostOperation(cost));
     }
-    value.map_err(Error::GroveDB)
+    value.map_err(Error::from)
 }
 /// Is subtree?
 pub type IsSubTree = bool;
@@ -512,4 +559,15 @@ impl From<&BatchDeleteApplyType> for DirectQueryType {
             }
         }
     }
+}
+
+/// Specifies which GroveDB instance to use for a query
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroveDBToUse {
+    /// Use the current (main) GroveDB
+    Current,
+    /// Use the latest checkpoint
+    LatestCheckpoint,
+    /// Use a specific checkpoint at the given block height
+    Checkpoint(u64),
 }

@@ -15,11 +15,32 @@ mod token_selling_tests {
     use drive::verify::RootHash;
     use simple_signer::signer::SimpleSigner;
 
-    #[test]
-    fn test_successful_direct_purchase_single_price() {
-        let platform_version = PlatformVersion::latest();
+    #[tokio::test]
+    async fn test_successful_direct_purchase_single_price() {
+        run_successful_direct_purchase_single_price_at_protocol_version(
+            PlatformVersion::latest().protocol_version,
+            699_868_122_220,
+        )
+        .await;
+    }
+
+    /// PROTOCOL_VERSION_11: pre-B4/B7 buyer balance — query_documents +
+    /// transformer-phase reads were dropped, so the buyer paid 7,900
+    /// credits less in fees. Pinned so v11 chain history stays
+    /// bit-for-bit reproducible.
+    #[tokio::test]
+    async fn test_successful_direct_purchase_single_price_protocol_version_11() {
+        run_successful_direct_purchase_single_price_at_protocol_version(11, 699_868_130_120).await;
+    }
+
+    async fn run_successful_direct_purchase_single_price_at_protocol_version(
+        protocol_version: dpp::version::ProtocolVersion,
+        expected_buyer_credit_balance: dpp::fee::Credits,
+    ) {
+        let platform_version = PlatformVersion::get(protocol_version)
+            .expect("expected platform version for the requested protocol_version");
         let mut platform = TestPlatformBuilder::new()
-            .with_latest_protocol_version()
+            .with_initial_protocol_version(protocol_version)
             .build_with_mock_rpc()
             .set_genesis_state();
 
@@ -40,7 +61,8 @@ mod token_selling_tests {
             &seller_key,
             Some(single_price.clone()),
             &mut identity_contract_nonce,
-        );
+        )
+        .await;
 
         // Seller sets single price
         let set_price_transition =
@@ -59,6 +81,7 @@ mod token_selling_tests {
                 platform_version,
                 None,
             )
+            .await
             .unwrap();
 
         let platform_state = platform.state.load();
@@ -71,7 +94,7 @@ mod token_selling_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::SuccessfulExecution(..)]
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
         );
 
         let token_id_buffer = token_id.to_buffer();
@@ -123,6 +146,7 @@ mod token_selling_tests {
             platform_version,
             None,
         )
+        .await
         .unwrap();
 
         let processing_result = process_test_state_transition(
@@ -134,7 +158,7 @@ mod token_selling_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::SuccessfulExecution(..)]
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
         );
 
         let token_balance = platform
@@ -152,11 +176,16 @@ mod token_selling_tests {
             .drive
             .fetch_identity_balance(buyer.id().to_buffer(), None, platform_version)
             .expect("expected to fetch credit balance");
-        assert_eq!(buyer_credit_balance, Some(699_868_130_120)); // 10.0 - 3.0 spent - fees =~ 7 dash left
+        assert_eq!(
+            buyer_credit_balance,
+            Some(expected_buyer_credit_balance),
+            "PROTOCOL_VERSION_{}: buyer credit balance after direct purchase must match the version-specific baseline (10.0 - 3.0 spent - fees =~ 7 dash left)",
+            protocol_version,
+        );
     }
 
-    #[test]
-    fn test_direct_purchase_change_using_group_without_needing_group() {
+    #[tokio::test]
+    async fn test_direct_purchase_change_using_group_without_needing_group() {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .with_latest_protocol_version()
@@ -219,6 +248,7 @@ mod token_selling_tests {
                 platform_version,
                 None,
             )
+            .await
             .unwrap();
 
         let platform_state = platform.state.load();
@@ -231,18 +261,43 @@ mod token_selling_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [PaidConsensusError(
-                ConsensusError::StateError(StateError::UnauthorizedTokenActionError(_)),
-                _
-            )]
+            [PaidConsensusError {
+                error: ConsensusError::StateError(StateError::UnauthorizedTokenActionError(_)),
+                ..
+            }]
         );
     }
 
-    #[test]
-    fn test_direct_purchase_single_price_not_paying_full_price() {
-        let platform_version = PlatformVersion::latest();
+    #[tokio::test]
+    async fn test_direct_purchase_single_price_not_paying_full_price() {
+        run_direct_purchase_single_price_not_paying_full_price_at_protocol_version(
+            PlatformVersion::latest().protocol_version,
+            999_987_864_860,
+        )
+        .await;
+    }
+
+    /// PROTOCOL_VERSION_11: pre-B4/B7 bump-only buyer balance — under v0
+    /// the failed purchase still bumps the nonce but doesn't bill the
+    /// extra read costs (7,900 credits). Pinned so v11 chain history
+    /// stays bit-for-bit reproducible.
+    #[tokio::test]
+    async fn test_direct_purchase_single_price_not_paying_full_price_protocol_version_11() {
+        run_direct_purchase_single_price_not_paying_full_price_at_protocol_version(
+            11,
+            999_987_872_760,
+        )
+        .await;
+    }
+
+    async fn run_direct_purchase_single_price_not_paying_full_price_at_protocol_version(
+        protocol_version: dpp::version::ProtocolVersion,
+        expected_buyer_credit_balance: dpp::fee::Credits,
+    ) {
+        let platform_version = PlatformVersion::get(protocol_version)
+            .expect("expected platform version for the requested protocol_version");
         let mut platform = TestPlatformBuilder::new()
-            .with_latest_protocol_version()
+            .with_initial_protocol_version(protocol_version)
             .build_with_mock_rpc()
             .set_genesis_state();
 
@@ -293,6 +348,7 @@ mod token_selling_tests {
                 platform_version,
                 None,
             )
+            .await
             .unwrap();
 
         let processing_result = process_test_state_transition(
@@ -304,7 +360,7 @@ mod token_selling_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::SuccessfulExecution(..)]
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
         );
 
         // Buyer purchases tokens
@@ -322,6 +378,7 @@ mod token_selling_tests {
             platform_version,
             None,
         )
+        .await
         .unwrap();
 
         let processing_result = process_test_state_transition(
@@ -333,10 +390,12 @@ mod token_selling_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [PaidConsensusError(
-                ConsensusError::StateError(StateError::TokenDirectPurchaseUserPriceTooLow(_)),
-                _
-            )]
+            [PaidConsensusError {
+                error: ConsensusError::StateError(StateError::TokenDirectPurchaseUserPriceTooLow(
+                    _
+                )),
+                ..
+            }]
         );
 
         let token_balance = platform
@@ -354,11 +413,16 @@ mod token_selling_tests {
             .drive
             .fetch_identity_balance(buyer.id().to_buffer(), None, platform_version)
             .expect("expected to fetch credit balance");
-        assert_eq!(buyer_credit_balance, Some(999_987_872_760)); // 10.0 - bump action fees
+        assert_eq!(
+            buyer_credit_balance,
+            Some(expected_buyer_credit_balance),
+            "PROTOCOL_VERSION_{}: buyer credit balance after failed direct purchase must match the version-specific baseline (10.0 - bump action fees)",
+            protocol_version,
+        );
     }
 
-    #[test]
-    fn test_direct_purchase_insufficient_credits() {
+    #[tokio::test]
+    async fn test_direct_purchase_insufficient_credits() {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .with_latest_protocol_version()
@@ -412,6 +476,7 @@ mod token_selling_tests {
                 platform_version,
                 None,
             )
+            .await
             .unwrap();
 
         let processing_result = process_test_state_transition(
@@ -423,7 +488,7 @@ mod token_selling_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::SuccessfulExecution(..)]
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
         );
 
         let purchase_transition = BatchTransition::new_token_direct_purchase_transition(
@@ -440,6 +505,7 @@ mod token_selling_tests {
             platform_version,
             None,
         )
+        .await
         .unwrap();
 
         let processing_result = process_test_state_transition(
@@ -472,8 +538,8 @@ mod token_selling_tests {
     /// When I create them and set their prices,
     /// Then I should get the correct price for each of them
     /// And the price should be the same as the one set by the seller.
-    #[test]
-    fn test_successful_direct_purchase_multiple_tokens() {
+    #[tokio::test]
+    async fn test_successful_direct_purchase_multiple_tokens() {
         //  Given 3 tokens
         let pricing_schedules = vec![
             TokenPricingSchedule::SinglePrice(dash_to_credits!(1)),
@@ -497,22 +563,21 @@ mod token_selling_tests {
             setup_identity(&mut platform, rng.gen(), dash_to_credits!(1.0));
 
         let mut identity_contract_nonce = 2;
-        let tokens = pricing_schedules
-            .into_iter()
-            .map(|pricing| {
-                let (contract, token_id) = create_token_with_pricing(
-                    platform_version,
-                    &mut platform,
-                    &seller,
-                    &seller_signer,
-                    &seller_key,
-                    Some(pricing.clone()),
-                    &mut identity_contract_nonce,
-                );
+        let mut tokens: BTreeMap<[u8; 32], _> = BTreeMap::new();
+        for pricing in pricing_schedules.into_iter() {
+            let (contract, token_id) = create_token_with_pricing(
+                platform_version,
+                &mut platform,
+                &seller,
+                &seller_signer,
+                &seller_key,
+                Some(pricing.clone()),
+                &mut identity_contract_nonce,
+            )
+            .await;
 
-                (token_id.to_buffer(), (pricing, contract))
-            })
-            .collect::<BTreeMap<_, _>>();
+            tokens.insert(token_id.to_buffer(), (pricing, contract));
+        }
 
         //
         // When I fetch tokens, with or without proofs
@@ -572,8 +637,8 @@ mod token_selling_tests {
         }
     }
 
-    #[test]
-    fn test_direct_purchase_from_yourself() {
+    #[tokio::test]
+    async fn test_direct_purchase_from_yourself() {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .with_latest_protocol_version()
@@ -596,7 +661,8 @@ mod token_selling_tests {
             &self_trader_key,
             Some(single_price.clone()),
             &mut identity_contract_nonce,
-        );
+        )
+        .await;
 
         // Set the price
         let set_price_transition =
@@ -615,6 +681,7 @@ mod token_selling_tests {
                 platform_version,
                 None,
             )
+            .await
             .unwrap();
 
         let platform_state = platform.state.load();
@@ -627,7 +694,7 @@ mod token_selling_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::SuccessfulExecution(..)]
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
         );
 
         // Check initial token balance (should have some tokens as the owner)
@@ -656,6 +723,7 @@ mod token_selling_tests {
             platform_version,
             None,
         )
+        .await
         .unwrap();
 
         let initial_credit_balance = platform
@@ -693,7 +761,7 @@ mod token_selling_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::SuccessfulExecution(..)]
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
         );
 
         // Check token balance after purchase
@@ -755,7 +823,7 @@ mod token_selling_tests {
     }
 
     /// Creates a token contract with the given owner identity and configuration, and sets the price.
-    fn create_token_with_pricing(
+    async fn create_token_with_pricing(
         platform_version: &PlatformVersion,
         platform: &mut TempPlatform<MockCoreRPCLike>,
         seller: &Identity,
@@ -805,6 +873,7 @@ mod token_selling_tests {
                 platform_version,
                 None,
             )
+            .await
             .unwrap();
         *identity_contract_nonce += 1;
 
@@ -817,8 +886,182 @@ mod token_selling_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::SuccessfulExecution(..)]
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
         );
         (contract, token_id)
+    }
+
+    /// Regression test for the chain-halt where an empty `SetPrices` schedule
+    /// caused a `.expect("Map is not empty")` panic in the direct-purchase
+    /// transformer.
+    ///
+    /// An empty `SetPrices` schedule passes structure validation (which
+    /// explicitly skips the price) and state validation (auth-only), and is
+    /// stored verbatim. The transformer runs on every validator during block
+    /// execution, so a panic there would crash all validators and halt the
+    /// chain. With the fix, a purchase against an empty schedule must instead be
+    /// rejected gracefully as `TokenNotForDirectSale` — no panic.
+    #[tokio::test]
+    async fn test_direct_purchase_empty_set_prices_does_not_panic() {
+        let platform_version = PlatformVersion::latest();
+        let mut platform = TestPlatformBuilder::new()
+            .with_latest_protocol_version()
+            .build_with_mock_rpc()
+            .set_genesis_state();
+
+        let mut rng = StdRng::seed_from_u64(12345);
+        let (seller, seller_signer, seller_key) =
+            setup_identity(&mut platform, rng.gen(), dash_to_credits!(1.0));
+        let (buyer, buyer_signer, buyer_key) =
+            setup_identity(&mut platform, rng.gen(), dash_to_credits!(10.0));
+
+        // Plant: set an EMPTY tiered pricing schedule. This is accepted and
+        // stored (structure validation skips the price; state validation is
+        // auth-only), as asserted inside `create_token_with_pricing`.
+        let empty_set_prices = TokenPricingSchedule::SetPrices(BTreeMap::new());
+
+        let mut identity_contract_nonce: u64 = 2;
+        let (contract, token_id) = create_token_with_pricing(
+            platform_version,
+            &mut platform,
+            &seller,
+            &seller_signer,
+            &seller_key,
+            Some(empty_set_prices),
+            &mut identity_contract_nonce,
+        )
+        .await;
+
+        // Detonate: any direct purchase used to panic at
+        // `set_prices.keys().next().expect("Map is not empty")`.
+        let platform_state = platform.state.load();
+        let purchase_transition = BatchTransition::new_token_direct_purchase_transition(
+            token_id,
+            buyer.id(),
+            contract.id(),
+            0,
+            3, // Buying 3 tokens
+            dash_to_credits!(3),
+            &buyer_key,
+            2,
+            0,
+            &buyer_signer,
+            platform_version,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let processing_result = process_test_state_transition(
+            &mut platform,
+            purchase_transition,
+            &platform_state,
+            platform_version,
+        );
+
+        // Must be rejected gracefully (the node did not panic to get here).
+        assert_matches!(
+            processing_result.execution_results().as_slice(),
+            [PaidConsensusError {
+                error: ConsensusError::StateError(StateError::TokenNotForDirectSale(_)),
+                ..
+            }]
+        );
+
+        // The buyer must not have received any tokens.
+        let token_balance = platform
+            .drive
+            .fetch_identity_token_balance(
+                token_id.to_buffer(),
+                buyer.id().to_buffer(),
+                None,
+                platform_version,
+            )
+            .expect("expected to fetch token balance");
+        assert_eq!(token_balance, None);
+    }
+
+    /// Companion to the empty-`SetPrices` regression test: a NON-empty tiered
+    /// schedule whose smallest tier is above the requested amount must be
+    /// rejected as below the minimum sale amount (the `Some` arm of the same
+    /// no-matching-tier branch), not panic.
+    #[tokio::test]
+    async fn test_direct_purchase_below_minimum_sale_amount() {
+        let platform_version = PlatformVersion::latest();
+        let mut platform = TestPlatformBuilder::new()
+            .with_latest_protocol_version()
+            .build_with_mock_rpc()
+            .set_genesis_state();
+
+        let mut rng = StdRng::seed_from_u64(12345);
+        let (seller, seller_signer, seller_key) =
+            setup_identity(&mut platform, rng.gen(), dash_to_credits!(1.0));
+        let (buyer, buyer_signer, buyer_key) =
+            setup_identity(&mut platform, rng.gen(), dash_to_credits!(10.0));
+
+        // Tiered schedule whose smallest tier requires at least 100 tokens.
+        let tiered = TokenPricingSchedule::SetPrices(BTreeMap::from([
+            (100, dash_to_credits!(10)),
+            (500, dash_to_credits!(5)),
+        ]));
+
+        let mut identity_contract_nonce: u64 = 2;
+        let (contract, token_id) = create_token_with_pricing(
+            platform_version,
+            &mut platform,
+            &seller,
+            &seller_signer,
+            &seller_key,
+            Some(tiered),
+            &mut identity_contract_nonce,
+        )
+        .await;
+
+        // Buyer asks for 3 tokens — below the smallest (100-token) tier, so
+        // `range(..=3).next_back()` is `None` and the smallest defined tier (100)
+        // is reported as the minimum sale amount.
+        let platform_state = platform.state.load();
+        let purchase_transition = BatchTransition::new_token_direct_purchase_transition(
+            token_id,
+            buyer.id(),
+            contract.id(),
+            0,
+            3,
+            dash_to_credits!(3),
+            &buyer_key,
+            2,
+            0,
+            &buyer_signer,
+            platform_version,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let processing_result = process_test_state_transition(
+            &mut platform,
+            purchase_transition,
+            &platform_state,
+            platform_version,
+        );
+
+        assert_matches!(
+            processing_result.execution_results().as_slice(),
+            [PaidConsensusError {
+                error: ConsensusError::StateError(StateError::TokenAmountUnderMinimumSaleAmount(_)),
+                ..
+            }]
+        );
+
+        let token_balance = platform
+            .drive
+            .fetch_identity_token_balance(
+                token_id.to_buffer(),
+                buyer.id().to_buffer(),
+                None,
+                platform_version,
+            )
+            .expect("expected to fetch token balance");
+        assert_eq!(token_balance, None);
     }
 }

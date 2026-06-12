@@ -70,7 +70,7 @@ impl Drive {
     /// # Returns
     ///
     /// * `Result<QueryDocumentsOutcome, Error>` - Returns `QueryDocumentsOutcome` on success with the list of documents,
-    ///    number of skipped items, and cost. If the operation fails, it returns an `Error`.
+    ///   number of skipped items, and cost. If the operation fails, it returns an `Error`.
     #[inline(always)]
     pub(super) fn query_documents_with_flags_v0(
         &self,
@@ -121,5 +121,64 @@ impl Drive {
             skipped,
             cost,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DriveConfig;
+    use crate::drive::document::tests::setup_dashpay;
+    use crate::query::DriveDocumentQuery;
+
+    #[test]
+    fn query_documents_with_flags_v0_dry_run_returns_default() {
+        // Covers the `if dry_run` short-circuit.
+        let (drive, contract) = setup_dashpay("qdwf-v0-dry", true);
+        let platform_version = PlatformVersion::latest();
+
+        let sql = "select * from contactRequest";
+        let query =
+            DriveDocumentQuery::from_sql_expr(sql, &contract, Some(&DriveConfig::default()))
+                .expect("valid query");
+
+        let outcome = drive
+            .query_documents_with_flags_v0(query, None, true, None, platform_version)
+            .expect("dry run succeeds");
+
+        assert_eq!(outcome.documents().len(), 0);
+        assert_eq!(outcome.skipped(), 0);
+        assert_eq!(outcome.cost(), 0);
+    }
+
+    #[test]
+    fn query_documents_with_flags_v0_empty_results() {
+        // Queries a document-type with zero stored docs — exercises the
+        // element-iteration loop on an empty vec and the no-epoch cost branch.
+        let (drive, contract) = setup_dashpay("qdwf-v0-empty", true);
+        let platform_version = PlatformVersion::latest();
+
+        let sql = "select * from contactRequest";
+        let query =
+            DriveDocumentQuery::from_sql_expr(sql, &contract, Some(&DriveConfig::default()))
+                .expect("valid query");
+
+        let outcome = drive
+            .query_documents_with_flags_v0(query, None, false, None, platform_version)
+            .expect("query succeeds");
+
+        assert!(outcome.documents().is_empty());
+        assert_eq!(outcome.cost(), 0);
+    }
+
+    #[test]
+    fn query_documents_with_flags_outcome_methods_v0() {
+        // Covers the trait accessors on the concrete struct.
+        let outcome = QueryDocumentsWithFlagsOutcomeV0::default();
+        assert_eq!(outcome.documents().len(), 0);
+        assert_eq!(outcome.skipped(), 0);
+        assert_eq!(outcome.cost(), 0);
+        let taken = outcome.documents_owned();
+        assert!(taken.is_empty());
     }
 }

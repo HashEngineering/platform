@@ -37,7 +37,7 @@ impl Drive {
                 &drive_version.grove_version,
             )
             .unwrap()
-            .map_err(Error::GroveDB)?;
+            .map_err(Error::from)?;
 
         for (epoch_index_key, _) in query_result.to_key_elements() {
             let epoch_index =
@@ -128,7 +128,7 @@ mod tests {
 
             assert_eq!(operation.path.to_path(), pending_epoch_refunds_path_vec());
 
-            let epoch_index_key = operation.key.get_key();
+            let epoch_index_key = operation.key.expect("expected key").get_key();
             let epoch_index = u16::from_be_bytes(
                 epoch_index_key
                     .try_into()

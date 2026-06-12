@@ -1,4 +1,4 @@
-use crate::drive::Drive;
+use crate::drive::{Drive, RootTree};
 use crate::error::proof::ProofError;
 use crate::error::Error;
 use crate::prove::prove_state_transition::ProofCreationResult;
@@ -7,8 +7,12 @@ use crate::query::{
 };
 use crate::verify::state_transition::state_transition_execution_path_queries::TryTransitionIntoPathQuery;
 use dpp::data_contract::accessors::v0::DataContractV0Getters;
+use dpp::data_contract::config::v0::DataContractConfigGettersV0;
 use dpp::data_contract::document_type::accessors::DocumentTypeV0Getters;
 use dpp::identifier::Identifier;
+use dpp::state_transition::address_credit_withdrawal_transition::accessors::AddressCreditWithdrawalTransitionAccessorsV0;
+use dpp::state_transition::address_funding_from_asset_lock_transition::accessors::AddressFundingFromAssetLockTransitionAccessorsV0;
+use dpp::state_transition::address_funds_transfer_transition::accessors::AddressFundsTransferTransitionAccessorsV0;
 use dpp::state_transition::batch_transition::accessors::DocumentsBatchTransitionAccessorsV0;
 use dpp::state_transition::batch_transition::batched_transition::document_transition::{
     DocumentTransition, DocumentTransitionV0Methods,
@@ -17,13 +21,20 @@ use dpp::state_transition::batch_transition::batched_transition::token_transitio
 use dpp::state_transition::batch_transition::batched_transition::BatchedTransitionRef;
 use dpp::state_transition::batch_transition::document_base_transition::v0::v0_methods::DocumentBaseTransitionV0Methods;
 use dpp::state_transition::batch_transition::document_create_transition::v0::v0_methods::DocumentCreateTransitionV0Methods;
+use dpp::state_transition::data_contract_create_transition::accessors::DataContractCreateTransitionAccessorsV0;
+use dpp::state_transition::data_contract_update_transition::accessors::DataContractUpdateTransitionAccessorsV0;
+use dpp::state_transition::identity_create_from_addresses_transition::accessors::IdentityCreateFromAddressesTransitionAccessorsV0;
 use dpp::state_transition::identity_create_transition::accessors::IdentityCreateTransitionAccessorsV0;
+use dpp::state_transition::identity_credit_transfer_to_addresses_transition::accessors::IdentityCreditTransferToAddressesTransitionAccessorsV0;
 use dpp::state_transition::identity_credit_transfer_transition::accessors::IdentityCreditTransferTransitionAccessorsV0;
 use dpp::state_transition::identity_credit_withdrawal_transition::accessors::IdentityCreditWithdrawalTransitionAccessorsV0;
+use dpp::state_transition::identity_topup_from_addresses_transition::accessors::IdentityTopUpFromAddressesTransitionAccessorsV0;
 use dpp::state_transition::identity_topup_transition::accessors::IdentityTopUpTransitionAccessorsV0;
 use dpp::state_transition::identity_update_transition::accessors::IdentityUpdateTransitionAccessorsV0;
 use dpp::state_transition::masternode_vote_transition::accessors::MasternodeVoteTransitionAccessorsV0;
-use dpp::state_transition::{StateTransition, StateTransitionLike};
+use dpp::state_transition::StateTransitionIdentityIdFromInputs;
+use dpp::state_transition::StateTransitionWitnessSigned;
+use dpp::state_transition::{StateTransition, StateTransitionLike, StateTransitionOwned};
 use dpp::voting::votes::resource_vote::accessors::v0::ResourceVoteGettersV0;
 use dpp::voting::votes::Vote;
 use grovedb::{PathQuery, TransactionArg};
@@ -37,6 +48,14 @@ fn contract_ids_to_non_historical_path_query(contract_ids: &[Identifier]) -> Pat
     path_query
 }
 
+fn contract_ids_to_historical_path_query(contract_ids: &[Identifier]) -> PathQuery {
+    let contract_ids: Vec<_> = contract_ids.iter().map(|id| id.to_buffer()).collect();
+
+    let mut path_query = Drive::fetch_historical_contracts_query(&contract_ids);
+    path_query.query.limit = None;
+    path_query
+}
+
 impl Drive {
     pub(super) fn prove_state_transition_v0(
         &self,
@@ -46,10 +65,18 @@ impl Drive {
     ) -> Result<ProofCreationResult<Vec<u8>>, Error> {
         let path_query = match state_transition {
             StateTransition::DataContractCreate(st) => {
-                contract_ids_to_non_historical_path_query(&st.modified_data_ids())
+                if st.data_contract().config().keeps_history() {
+                    contract_ids_to_historical_path_query(&st.modified_data_ids())
+                } else {
+                    contract_ids_to_non_historical_path_query(&st.modified_data_ids())
+                }
             }
             StateTransition::DataContractUpdate(st) => {
-                contract_ids_to_non_historical_path_query(&st.modified_data_ids())
+                if st.data_contract().config().keeps_history() {
+                    contract_ids_to_historical_path_query(&st.modified_data_ids())
+                } else {
+                    contract_ids_to_non_historical_path_query(&st.modified_data_ids())
+                }
             }
             StateTransition::Batch(st) => {
                 if st.transitions_len() > 1 {
@@ -198,6 +225,243 @@ impl Drive {
                         path_query
                     }
                 }
+            }
+            StateTransition::IdentityCreditTransferToAddresses(st) => {
+                let identity_query = Drive::revision_and_balance_path_query(
+                    st.identity_id().to_buffer(),
+                    &platform_version.drive.grove_version,
+                )?;
+                let mut addresses_query =
+                    Drive::balances_for_clear_addresses_query(st.recipient_addresses().keys());
+
+                // TODO: fix this limit setting - "can not merge pathqueries with limits, consider setting the limit after the merge"
+                addresses_query.query.limit = None;
+
+                PathQuery::merge(
+                    vec![&identity_query, &addresses_query],
+                    &platform_version.drive.grove_version,
+                )?
+            }
+            StateTransition::IdentityCreateFromAddresses(st) => {
+                let identity_id = st.identity_id_from_inputs().map_err(|e| {
+                    Error::Proof(ProofError::CorruptedProof(format!(
+                        "Failed to calculate identity_id from inputs: {}",
+                        e
+                    )))
+                })?;
+                let identity_query = Drive::full_identity_query(
+                    &identity_id.into_buffer(),
+                    &platform_version.drive.grove_version,
+                )?;
+                let change_output = st.output().into_iter().map(|(address, _)| address);
+                let addresses_to_check = st.inputs().keys().chain(change_output);
+
+                let mut addresses_query =
+                    Drive::balances_for_clear_addresses_query(addresses_to_check);
+
+                // TODO: fix this limit setting - "can not merge pathqueries with limits, consider setting the limit after the merge"
+                addresses_query.query.limit = None;
+
+                PathQuery::merge(
+                    vec![&identity_query, &addresses_query],
+                    &platform_version.drive.grove_version,
+                )?
+            }
+            StateTransition::IdentityTopUpFromAddresses(st) => {
+                // we expect to get a new balance and revision
+                let identity_query = Drive::revision_and_balance_path_query(
+                    st.identity_id().to_buffer(),
+                    &platform_version.drive.grove_version,
+                )?;
+                let change_output = st.output().into_iter().map(|(address, _)| address);
+                let addresses_to_check = st.inputs().keys().chain(change_output);
+                let addresses_query = Drive::balances_for_clear_addresses_query(addresses_to_check);
+
+                // TODO: not sure if just setting this to unlimited is correct
+                let mut addresses_query = addresses_query;
+                addresses_query.query.limit = None;
+
+                PathQuery::merge(
+                    vec![&identity_query, &addresses_query],
+                    &platform_version.drive.grove_version,
+                )?
+            }
+            StateTransition::AddressFundsTransfer(st) => Drive::balances_for_clear_addresses_query(
+                st.inputs().keys().chain(st.outputs().keys()),
+            ),
+            StateTransition::AddressFundingFromAssetLock(st) => {
+                Drive::balances_for_clear_addresses_query(
+                    st.inputs().keys().chain(st.outputs().keys()),
+                )
+            }
+            StateTransition::AddressCreditWithdrawal(st) => {
+                let addresses_to_check = st
+                    .inputs()
+                    .keys()
+                    .chain(st.output().into_iter().map(|(address, _)| address));
+                Drive::balances_for_clear_addresses_query(addresses_to_check)
+            }
+            StateTransition::ShieldedTransfer(st) => {
+                use crate::drive::shielded::paths::shielded_credit_pool_nullifiers_path_vec;
+                use dpp::state_transition::shielded_transfer_transition::accessors::ShieldedTransferTransitionAccessorsV0;
+
+                let nullifier_keys: Vec<Vec<u8>> = st.nullifiers();
+                let count = nullifier_keys.len() as u16;
+
+                let mut query = grovedb::Query::new();
+                query.insert_keys(nullifier_keys);
+
+                PathQuery::new(
+                    shielded_credit_pool_nullifiers_path_vec(),
+                    grovedb::SizedQuery::new(query, Some(count), None),
+                )
+            }
+            StateTransition::Shield(st) => {
+                Drive::balances_for_clear_addresses_query(st.inputs().keys())
+            }
+            StateTransition::Unshield(st) => {
+                use crate::drive::shielded::paths::shielded_credit_pool_nullifiers_path_vec;
+                use dpp::state_transition::unshield_transition::accessors::UnshieldTransitionAccessorsV0;
+
+                let nullifier_keys: Vec<Vec<u8>> = st.nullifiers();
+                let mut nf_query = grovedb::Query::new();
+                nf_query.insert_keys(nullifier_keys);
+                let nullifier_pq = PathQuery::new(
+                    shielded_credit_pool_nullifiers_path_vec(),
+                    grovedb::SizedQuery::new(nf_query, None, None),
+                );
+
+                let mut address_pq =
+                    Drive::balances_for_clear_addresses_query(std::iter::once(st.output_address()));
+                address_pq.query.limit = None;
+
+                PathQuery::merge(
+                    vec![&nullifier_pq, &address_pq],
+                    &platform_version.drive.grove_version,
+                )?
+            }
+            StateTransition::ShieldedWithdrawal(st) => {
+                use crate::drive::shielded::paths::shielded_credit_pool_nullifiers_path_vec;
+                use dpp::data_contracts::withdrawals_contract;
+                use dpp::data_contracts::withdrawals_contract::v1::document_types::withdrawal;
+                use dpp::document::Document;
+                use dpp::state_transition::shielded_withdrawal_transition::accessors::ShieldedWithdrawalTransitionAccessorsV0;
+
+                let nullifier_keys: Vec<Vec<u8>> = st.nullifiers();
+                let mut nf_query = grovedb::Query::new();
+                nf_query.insert_keys(nullifier_keys.clone());
+                let nullifier_pq = PathQuery::new(
+                    shielded_credit_pool_nullifiers_path_vec(),
+                    grovedb::SizedQuery::new(nf_query, None, None),
+                );
+
+                // Compute withdrawal document ID deterministically
+                let first_nullifier = nullifier_keys.first().ok_or_else(|| {
+                    Error::Proof(ProofError::InvalidTransition(
+                        "shielded withdrawal has no nullifiers".to_string(),
+                    ))
+                })?;
+                let mut entropy = Vec::new();
+                entropy.extend_from_slice(first_nullifier);
+                entropy.extend_from_slice(st.output_script().as_bytes());
+                let document_id = Document::generate_document_id_v0(
+                    &withdrawals_contract::ID,
+                    &withdrawals_contract::OWNER_ID,
+                    withdrawal::NAME,
+                    &entropy,
+                );
+
+                let doc_query = SingleDocumentDriveQuery {
+                    contract_id: withdrawals_contract::ID.to_buffer(),
+                    document_type_name: withdrawal::NAME.to_string(),
+                    document_type_keeps_history: false,
+                    document_id: document_id.to_buffer(),
+                    block_time_ms: None,
+                    contested_status: SingleDocumentDriveQueryContestedStatus::NotContested,
+                };
+                let mut doc_pq = doc_query.construct_path_query(platform_version)?;
+                doc_pq.query.limit = None;
+
+                PathQuery::merge(
+                    vec![&nullifier_pq, &doc_pq],
+                    &platform_version.drive.grove_version,
+                )?
+            }
+            StateTransition::ShieldFromAssetLock(st) => {
+                use dpp::identity::state_transition::AssetLockProved;
+                use dpp::state_transition::shield_from_asset_lock_transition::ShieldFromAssetLockTransition;
+
+                let outpoint = st.asset_lock_proof().out_point().ok_or_else(|| {
+                    Error::Proof(ProofError::InvalidTransition(
+                        "shield from asset lock has no outpoint".to_string(),
+                    ))
+                })?;
+                let outpoint_bytes: [u8; 36] = outpoint.into();
+
+                let mut query = grovedb::Query::new();
+                query.insert_key(outpoint_bytes.to_vec());
+
+                let outpoint_pq = PathQuery::new(
+                    vec![vec![RootTree::SpentAssetLockTransactions as u8]],
+                    grovedb::SizedQuery::new(query, Some(1), None),
+                );
+
+                // No accessor trait exposes `surplus_output`, so read it directly off the V0 body.
+                let ShieldFromAssetLockTransition::V0(v0) = st;
+                match &v0.surplus_output {
+                    Some(surplus_address) => {
+                        // Mirror the Unshield arm: also prove the balance of the signed
+                        // surplus-output address so a light client can confirm the surplus
+                        // credit landed there. `PathQuery::merge` rejects sub-queries that carry
+                        // limits, so clear both before merging. The verifier rebuilds this exact
+                        // merged query (same sub-queries, same cleared limits, same merge) and
+                        // verifies it STRICTLY, so the proof cannot carry any extra data beyond
+                        // {outpoint, surplus-address}.
+                        let mut outpoint_pq = outpoint_pq;
+                        outpoint_pq.query.limit = None;
+
+                        let mut address_pq = Drive::balances_for_clear_addresses_query(
+                            std::iter::once(surplus_address),
+                        );
+                        address_pq.query.limit = None;
+
+                        PathQuery::merge(
+                            vec![&outpoint_pq, &address_pq],
+                            &platform_version.drive.grove_version,
+                        )?
+                    }
+                    None => outpoint_pq,
+                }
+            }
+            StateTransition::IdentityCreateFromShieldedPool(st) => {
+                use crate::drive::shielded::paths::shielded_credit_pool_nullifiers_path_vec;
+                use dpp::state_transition::identity_create_from_shielded_pool_transition::accessors::IdentityCreateFromShieldedPoolTransitionAccessorsV0;
+
+                // Prove BOTH the spent nullifiers AND the newly-created identity in a single merged
+                // multi-root proof. Built STRICT from day one (per #3812): the verifier rebuilds this
+                // exact merged query and verifies it with `verify_query` (succinctness on), so the
+                // proof cannot carry any branch beyond {nullifiers, identity}. The absence-proof
+                // variant is unusable here: it enumerates the query's terminal keys, which is
+                // impossible for `full_identity_query`'s unbounded all-keys range.
+                let nullifier_keys: Vec<Vec<u8>> = st.nullifiers();
+                let mut nf_query = grovedb::Query::new();
+                nf_query.insert_keys(nullifier_keys);
+                // `PathQuery::merge` rejects sub-queries that carry a limit, so leave it None.
+                let nullifier_pq = PathQuery::new(
+                    shielded_credit_pool_nullifiers_path_vec(),
+                    grovedb::SizedQuery::new(nf_query, None, None),
+                );
+
+                let mut identity_pq = Drive::full_identity_query(
+                    &st.identity_id().to_buffer(),
+                    &platform_version.drive.grove_version,
+                )?;
+                identity_pq.query.limit = None;
+
+                PathQuery::merge(
+                    vec![&nullifier_pq, &identity_pq],
+                    &platform_version.drive.grove_version,
+                )?
             }
         };
 

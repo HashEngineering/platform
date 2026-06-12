@@ -18,7 +18,7 @@ runs:
   using: composite
   steps:
     - name: Cache librocksdb
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       id: librocksdb-cache
       with:
         key: librocksdb/${{ inputs.version }}/${{ runner.os }}/${{ runner.arch }}
@@ -27,6 +27,8 @@ runs:
     - if: ${{ steps.librocksdb-cache.outputs.cache-hit != 'true' || inputs.force == 'true' }}
       shell: bash
       name: Build librocksdb
+      env:
+          PORTABLE: 1
       run: |
         set -ex
         WORKDIR=/tmp/rocksdb-build

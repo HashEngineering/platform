@@ -1,0 +1,72 @@
+use crate::impl_try_from_js_value;
+use crate::impl_wasm_type_info;
+use dpp::prelude::{DerivationEncryptionKeyIndex, RootEncryptionKeyIndex};
+use dpp::tokens::PrivateEncryptedNote;
+use wasm_bindgen::prelude::wasm_bindgen;
+
+#[derive(Debug, Clone, PartialEq)]
+#[wasm_bindgen(js_name = "PrivateEncryptedNote")]
+pub struct PrivateEncryptedNoteWasm(PrivateEncryptedNote);
+
+impl From<PrivateEncryptedNote> for PrivateEncryptedNoteWasm {
+    fn from(value: PrivateEncryptedNote) -> Self {
+        PrivateEncryptedNoteWasm(value)
+    }
+}
+
+impl From<PrivateEncryptedNoteWasm> for PrivateEncryptedNote {
+    fn from(value: PrivateEncryptedNoteWasm) -> Self {
+        value.0
+    }
+}
+
+#[wasm_bindgen(js_class = PrivateEncryptedNote)]
+impl PrivateEncryptedNoteWasm {
+    #[wasm_bindgen(constructor)]
+    pub fn constructor(
+        #[wasm_bindgen(js_name = "rootEncryptionKeyIndex")]
+        root_encryption_key_index: RootEncryptionKeyIndex,
+        #[wasm_bindgen(js_name = "derivationEncryptionKeyIndex")]
+        derivation_encryption_key_index: DerivationEncryptionKeyIndex,
+        value: Vec<u8>,
+    ) -> PrivateEncryptedNoteWasm {
+        PrivateEncryptedNoteWasm((
+            root_encryption_key_index,
+            derivation_encryption_key_index,
+            value,
+        ))
+    }
+
+    #[wasm_bindgen(getter = "rootEncryptionKeyIndex")]
+    pub fn root_encryption_key_index(&self) -> RootEncryptionKeyIndex {
+        self.0.0
+    }
+
+    #[wasm_bindgen(getter = "derivationEncryptionKeyIndex")]
+    pub fn derivation_encryption_key_index(&self) -> DerivationEncryptionKeyIndex {
+        self.0.1
+    }
+
+    #[wasm_bindgen(getter = "value")]
+    pub fn value(&self) -> Vec<u8> {
+        self.0.2.clone()
+    }
+
+    #[wasm_bindgen(setter = "rootEncryptionKeyIndex")]
+    pub fn set_root_encryption_key_index(&mut self, index: RootEncryptionKeyIndex) {
+        self.0.0 = index;
+    }
+
+    #[wasm_bindgen(setter = "derivationEncryptionKeyIndex")]
+    pub fn set_derivation_encryption_key_index(&mut self, index: DerivationEncryptionKeyIndex) {
+        self.0.1 = index;
+    }
+
+    #[wasm_bindgen(setter = "value")]
+    pub fn set_value(&mut self, value: Vec<u8>) {
+        self.0.2 = value;
+    }
+}
+
+impl_try_from_js_value!(PrivateEncryptedNoteWasm, "PrivateEncryptedNote");
+impl_wasm_type_info!(PrivateEncryptedNoteWasm, PrivateEncryptedNote);

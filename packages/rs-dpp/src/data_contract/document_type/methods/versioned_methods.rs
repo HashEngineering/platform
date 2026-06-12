@@ -2,12 +2,13 @@ use crate::data_contract::document_type::accessors::DocumentTypeV0Getters;
 use crate::data_contract::document_type::methods::DocumentTypeBasicMethods;
 use crate::data_contract::document_type::v0::DocumentTypeV0;
 use crate::data_contract::document_type::v1::DocumentTypeV1;
+use crate::data_contract::document_type::v2::DocumentTypeV2;
 use crate::data_contract::document_type::{
     DocumentPropertyType, DocumentType, DocumentTypeRef, Index, DEFAULT_HASH_SIZE, MAX_INDEX_SIZE,
 };
 use crate::data_contract::errors::DataContractError;
 use crate::document::property_names::{
-    CREATED_AT, CREATED_AT_BLOCK_HEIGHT, CREATED_AT_CORE_BLOCK_HEIGHT, TRANSFERRED_AT,
+    CREATED_AT, CREATED_AT_BLOCK_HEIGHT, CREATED_AT_CORE_BLOCK_HEIGHT, CREATOR_ID, TRANSFERRED_AT,
     TRANSFERRED_AT_BLOCK_HEIGHT, TRANSFERRED_AT_CORE_BLOCK_HEIGHT, UPDATED_AT,
     UPDATED_AT_BLOCK_HEIGHT, UPDATED_AT_CORE_BLOCK_HEIGHT,
 };
@@ -86,6 +87,10 @@ pub trait DocumentTypeV0MethodsVersioned: DocumentTypeV0Getters + DocumentTypeBa
 
         let mut transferred_at_core_block_height: Option<CoreBlockHeight> = data
             .get_optional_integer(TRANSFERRED_AT_CORE_BLOCK_HEIGHT)
+            .map_err(ProtocolError::ValueError)?;
+
+        let creator_id: Option<Identifier> = data
+            .get_optional_identifier(CREATOR_ID)
             .map_err(ProtocolError::ValueError)?;
 
         let is_created_at_required = self.required_fields().contains(CREATED_AT);
@@ -176,6 +181,7 @@ pub trait DocumentTypeV0MethodsVersioned: DocumentTypeV0Getters + DocumentTypeBa
                     created_at_core_block_height,
                     updated_at_core_block_height,
                     transferred_at_core_block_height,
+                    creator_id,
                 };
 
                 document
@@ -238,6 +244,10 @@ pub trait DocumentTypeV0MethodsVersioned: DocumentTypeV0Getters + DocumentTypeBa
 
         let mut transferred_at_core_block_height: Option<CoreBlockHeight> = properties
             .get_optional_integer(TRANSFERRED_AT_CORE_BLOCK_HEIGHT)
+            .map_err(ProtocolError::ValueError)?;
+
+        let creator_id: Option<Identifier> = properties
+            .get_optional_identifier(CREATOR_ID)
             .map_err(ProtocolError::ValueError)?;
 
         let is_created_at_required = self.required_fields().contains(CREATED_AT);
@@ -331,6 +341,7 @@ pub trait DocumentTypeV0MethodsVersioned: DocumentTypeV0Getters + DocumentTypeBa
                 created_at_core_block_height,
                 updated_at_core_block_height,
                 transferred_at_core_block_height,
+                creator_id,
             }
             .into()),
             version => Err(ProtocolError::UnknownVersionMismatch {
@@ -491,7 +502,7 @@ pub trait DocumentTypeV0MethodsVersioned: DocumentTypeV0Getters + DocumentTypeBa
         value: &Value,
     ) -> Result<Vec<u8>, ProtocolError> {
         match key {
-            "$ownerId" | "$id" => {
+            "$ownerId" | "$id" | "$creatorId" => {
                 let bytes = value
                     .to_identifier_bytes()
                     .map_err(ProtocolError::ValueError)?;
@@ -544,7 +555,7 @@ pub trait DocumentTypeV0MethodsVersioned: DocumentTypeV0Getters + DocumentTypeBa
         value: &[u8],
     ) -> Result<Value, ProtocolError> {
         match key {
-            "$ownerId" | "$id" => {
+            "$ownerId" | "$id" | "$creatorId" => {
                 let bytes = Identifier::from_bytes(value)?;
                 Ok(Value::Identifier(bytes.to_buffer()))
             }
@@ -584,6 +595,7 @@ pub trait DocumentTypeV0MethodsVersioned: DocumentTypeV0Getters + DocumentTypeBa
 impl DocumentTypeV0MethodsVersioned for DocumentTypeV0 {}
 
 impl DocumentTypeV0MethodsVersioned for DocumentTypeV1 {}
+impl DocumentTypeV0MethodsVersioned for DocumentTypeV2 {}
 impl DocumentTypeV0MethodsVersioned for DocumentType {}
 
 impl DocumentTypeV0MethodsVersioned for DocumentTypeRef<'_> {}

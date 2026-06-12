@@ -16,7 +16,10 @@ use dpp::block::epoch::Epoch;
 use dpp::identity::{Purpose, SecurityLevel};
 use dpp::prelude::Identifier;
 use grovedb::batch::key_info::KeyInfo;
-use grovedb::batch::{GroveDbOpConsistencyResults, GroveOp, KeyInfoPath, QualifiedGroveDbOp};
+use grovedb::batch::{
+    GroveDbOpConsistencyResults, GroveOp, KeyInfoPath, QualifiedGroveDbOp,
+    SubelementsDeletionBehavior,
+};
 use grovedb::operations::proof::util::hex_to_ascii;
 use grovedb::{Element, TreeType};
 use std::borrow::Cow;
@@ -50,6 +53,7 @@ enum KnownPath {
     PoolsRoot,                                                        //Level 1
     PoolsInsideEpoch(Epoch),                                          //Level 2
     PreFundedSpecializedBalancesRoot,                                 //Level 1
+    SavedBlockTransactionsRoot,                                       //Level 1
     SpentAssetLockTransactionsRoot,                                   //Level 1
     MiscRoot,                                                         //Level 1
     WithdrawalTransactionsRoot,                                       //Level 1
@@ -67,6 +71,8 @@ enum KnownPath {
     VersionsRoot,                                                     //Level 1
     VotesRoot,                                                        //Level 1
     GroupActionsRoot,                                                 //Level 1
+    SingleUseKeyBalancesRoot,                                         //Level 1
+    ShieldedBalancesRoot,                                             //Level 1
 }
 
 impl From<RootTree> for KnownPath {
@@ -82,6 +88,7 @@ impl From<RootTree> for KnownPath {
             }
             RootTree::Pools => KnownPath::PoolsRoot,
             RootTree::PreFundedSpecializedBalances => KnownPath::PreFundedSpecializedBalancesRoot,
+            RootTree::SavedBlockTransactions => KnownPath::SavedBlockTransactionsRoot,
             RootTree::SpentAssetLockTransactions => KnownPath::SpentAssetLockTransactionsRoot,
             RootTree::Misc => KnownPath::MiscRoot,
             RootTree::WithdrawalTransactions => KnownPath::WithdrawalTransactionsRoot,
@@ -90,6 +97,8 @@ impl From<RootTree> for KnownPath {
             RootTree::Versions => KnownPath::VersionsRoot,
             RootTree::Votes => KnownPath::VotesRoot,
             RootTree::GroupActions => KnownPath::GroupActionsRoot,
+            RootTree::AddressBalances => KnownPath::SingleUseKeyBalancesRoot,
+            RootTree::ShieldedBalances => KnownPath::ShieldedBalancesRoot,
         }
     }
 }
@@ -328,12 +337,18 @@ impl fmt::Display for GroveDbOpBatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for op in &self.operations {
             let (path_string, known_path) = readable_path(&op.path);
-            let (key_string, _) = readable_key_info(known_path, &op.key);
+            let (key_string, _) = if let Some(ref key) = op.key {
+                readable_key_info(known_path, key)
+            } else {
+                ("(none)".to_string(), None)
+            };
             writeln!(f, "{{")?;
             writeln!(f, "   Path: {}", path_string)?;
             writeln!(f, "   Key: {}", key_string)?;
             match &op.op {
-                GroveOp::InsertOrReplace { element } | GroveOp::InsertOnly { element } => {
+                GroveOp::InsertOrReplace { element }
+                | GroveOp::InsertWithKnownToNotAlreadyExist { element }
+                | GroveOp::InsertIfNotExists { element, .. } => {
                     let flags = element.get_flags();
                     let flag_info = match flags {
                         None => "No Flags".to_string(),
@@ -477,7 +492,7 @@ pub trait GroveDbOpBatchV0Methods {
     /// # Returns
     ///
     /// * `Option<Op>` - Returns the found `Op` if it exists. If the `Op` is an `GroveOp::InsertOrReplace`, `GroveOp::Replace`,
-    ///                  or `GroveOp::Patch`, it will be removed from the batch.
+    ///   or `GroveOp::Patch`, it will be removed from the batch.
     fn remove_if_insert(&mut self, path: Vec<Vec<u8>>, key: &[u8]) -> Option<GroveOp>;
 }
 
@@ -580,9 +595,15 @@ impl GroveDbOpBatchV0Methods for GroveDbOpBatch {
     }
 
     /// Adds a `Delete` tree operation to a list of GroveDB ops.
+    /// Uses `DontCheckWithNoCleanup` because callers (e.g. `batch_delete_up_tree_while_empty`)
+    /// have already verified the tree is empty.
     fn add_delete_tree(&mut self, path: Vec<Vec<u8>>, key: Vec<u8>, tree_type: TreeType) {
-        self.operations
-            .push(QualifiedGroveDbOp::delete_tree_op(path, key, tree_type))
+        self.operations.push(QualifiedGroveDbOp::delete_tree_op(
+            path,
+            key,
+            tree_type,
+            SubelementsDeletionBehavior::DontCheckWithNoCleanup,
+        ))
     }
 
     /// Adds an `Insert` operation with an element to a list of GroveDB ops.
@@ -618,7 +639,7 @@ impl GroveDbOpBatchV0Methods for GroveDbOpBatch {
         );
 
         self.operations.iter().find_map(|op| {
-            if op.path == path && op.key == KeyInfo::KnownKey(key.to_vec()) {
+            if op.path == path && op.key == Some(KeyInfo::KnownKey(key.to_vec())) {
                 Some(&op.op)
             } else {
                 None
@@ -650,7 +671,7 @@ impl GroveDbOpBatchV0Methods for GroveDbOpBatch {
         if let Some(index) = self
             .operations
             .iter()
-            .position(|op| op.path == path && op.key == KeyInfo::KnownKey(key.to_vec()))
+            .position(|op| op.path == path && op.key == Some(KeyInfo::KnownKey(key.to_vec())))
         {
             Some(self.operations.remove(index).op)
         } else {
@@ -669,7 +690,7 @@ impl GroveDbOpBatchV0Methods for GroveDbOpBatch {
     /// # Returns
     ///
     /// * `Option<Op>` - Returns the found `Op` if it exists. If the `Op` is an `GroveOp::InsertOrReplace`, `GroveOp::Replace`,
-    ///                  or `GroveOp::Patch`, it will be removed from the batch.
+    ///   or `GroveOp::Patch`, it will be removed from the batch.
     fn remove_if_insert(&mut self, path: Vec<Vec<u8>>, key: &[u8]) -> Option<GroveOp> {
         let path = KeyInfoPath(
             path.into_iter()
@@ -680,13 +701,14 @@ impl GroveDbOpBatchV0Methods for GroveDbOpBatch {
         if let Some(index) = self
             .operations
             .iter()
-            .position(|op| op.path == path && op.key == KeyInfo::KnownKey(key.to_vec()))
+            .position(|op| op.path == path && op.key == Some(KeyInfo::KnownKey(key.to_vec())))
         {
             let op = &self.operations[index].op;
             let op = if matches!(
                 op,
                 &GroveOp::InsertOrReplace { .. }
-                    | &GroveOp::InsertOnly { .. }
+                    | &GroveOp::InsertWithKnownToNotAlreadyExist { .. }
+                    | &GroveOp::InsertIfNotExists { .. }
                     | &GroveOp::Replace { .. }
                     | &GroveOp::Patch { .. }
             ) {

@@ -1,6 +1,6 @@
 use bincode::{Decode, Encode};
 use derive_more::From;
-#[cfg(feature = "state-transition-serde-conversion")]
+#[cfg(feature = "serde-conversion")]
 use serde::{Deserialize, Serialize};
 
 pub mod document_base_transition;
@@ -46,10 +46,7 @@ use token_transition::TokenTransition;
 pub const PROPERTY_ACTION: &str = "$action";
 
 #[derive(Debug, Clone, Encode, Decode, From, PartialEq, Display)]
-#[cfg_attr(
-    feature = "state-transition-serde-conversion",
-    derive(Serialize, Deserialize)
-)]
+#[cfg_attr(feature = "serde-conversion", derive(Serialize, Deserialize))]
 pub enum BatchedTransition {
     #[display("DocumentTransition({})", "_0")]
     Document(DocumentTransition),
@@ -105,7 +102,7 @@ impl BatchedTransitionRef<'_> {
 }
 
 impl BatchedTransition {
-    pub fn borrow_as_ref(&self) -> BatchedTransitionRef {
+    pub fn borrow_as_ref(&self) -> BatchedTransitionRef<'_> {
         match self {
             BatchedTransition::Document(doc) => {
                 // Create a reference to a DocumentTransition
@@ -118,7 +115,7 @@ impl BatchedTransition {
         }
     }
 
-    pub fn borrow_as_mut(&mut self) -> BatchedTransitionMutRef {
+    pub fn borrow_as_mut(&mut self) -> BatchedTransitionMutRef<'_> {
         match self {
             BatchedTransition::Document(doc) => {
                 // Create a reference to a DocumentTransition

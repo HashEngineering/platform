@@ -39,11 +39,11 @@ lazy_static! {
     static ref DOCUMENT_META_JSON_V0: Value = serde_json::from_str::<Value>(include_str!(
         "../../../schema/meta_schemas/document/v0/document-meta.json"
     ))
-    .unwrap();
-    static ref TOKEN_META_JSON_V0: Value = serde_json::from_str::<Value>(include_str!(
-        "../../../schema/meta_schemas/token/v0/token-meta.json"
+    .expect("v0 document meta-schema JSON must be valid");
+    static ref DOCUMENT_META_JSON_V1: Value = serde_json::from_str::<Value>(include_str!(
+        "../../../schema/meta_schemas/document/v1/document-meta.json"
     ))
-    .unwrap();
+    .expect("v1 document meta-schema JSON must be valid");
 
     pub static ref DRAFT_202012_META_SCHEMA: JSONSchema = JSONSchema::options()
         .with_draft(Draft::Draft202012)
@@ -60,10 +60,6 @@ lazy_static! {
         .with_document(
             "https://json-schema.org/draft/2020-12/meta/core".to_string(),
             DRAFT202012_CORE.clone(),
-        )
-        .with_document(
-            "https://json-schema.org/draft/2020-12/meta/applicator".to_string(),
-            DRAFT202012_APPLICATOR.clone(),
         )
         .with_document(
             "https://json-schema.org/draft/2020-12/meta/unevaluated".to_string(),
@@ -112,10 +108,6 @@ lazy_static! {
             DRAFT202012_CORE.clone(),
         )
         .with_document(
-            "https://json-schema.org/draft/2020-12/meta/applicator".to_string(),
-            DRAFT202012_APPLICATOR.clone(),
-        )
-        .with_document(
             "https://json-schema.org/draft/2020-12/meta/unevaluated".to_string(),
             DRAFT202012_UNEVALUATED.clone(),
         )
@@ -143,8 +135,9 @@ lazy_static! {
         .compile(&DOCUMENT_META_JSON_V0)
         .expect("Invalid data contract schema");
 
-    // Compiled version of token meta schema
-    pub static ref TOKEN_META_SCHEMA_V0: JSONSchema = JSONSchema::options()
+    // Compiled version of document meta schema v1
+    // This version adds additionalProperties: false at the top level
+    pub static ref DOCUMENT_META_SCHEMA_V1: JSONSchema = JSONSchema::options()
         .with_keyword(
             "byteArray",
             |_, _, _| Ok(Box::new(ByteArrayKeyword)),
@@ -155,7 +148,6 @@ lazy_static! {
         }))
         .should_ignore_unknown_formats(false)
         .should_validate_formats(true)
-        .with_patterns_regex_engine(RegexEngine::Regex(Default::default()))
         .with_draft(Draft::Draft202012)
         .with_document(
             "https://json-schema.org/draft/2020-12/meta/applicator".to_string(),
@@ -164,10 +156,6 @@ lazy_static! {
         .with_document(
             "https://json-schema.org/draft/2020-12/meta/core".to_string(),
             DRAFT202012_CORE.clone(),
-        )
-        .with_document(
-            "https://json-schema.org/draft/2020-12/meta/applicator".to_string(),
-            DRAFT202012_APPLICATOR.clone(),
         )
         .with_document(
             "https://json-schema.org/draft/2020-12/meta/unevaluated".to_string(),
@@ -194,6 +182,7 @@ lazy_static! {
             DRAFT202012.clone(),
         )
         .to_owned()
-        .compile(&TOKEN_META_JSON_V0)
+        .compile(&DOCUMENT_META_JSON_V1)
         .expect("Invalid data contract schema");
+
 }

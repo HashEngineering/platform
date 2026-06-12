@@ -1,8 +1,9 @@
 #[cfg(feature = "state-transition-signing")]
 use crate::{
     identity::{
-        accessors::IdentityGettersV0, signer::Signer, Identity, IdentityPublicKey, KeyType,
-        Purpose, SecurityLevel,
+        accessors::IdentityGettersV0,
+        identity_public_key::accessors::v0::IdentityPublicKeyGettersV0, signer::Signer, Identity,
+        IdentityPublicKey, KeyType, Purpose, SecurityLevel,
     },
     prelude::{IdentityNonce, UserFeeIncrease},
     state_transition::StateTransition,
@@ -20,7 +21,7 @@ use platform_version::version::{FeatureVersion, PlatformVersion};
 
 impl IdentityCreditTransferTransitionMethodsV0 for IdentityCreditTransferTransitionV0 {
     #[cfg(feature = "state-transition-signing")]
-    fn try_from_identity<S: Signer>(
+    async fn try_from_identity<S: Signer<IdentityPublicKey>>(
         identity: &Identity,
         to_identity_with_identifier: Identifier,
         amount: u64,
@@ -47,6 +48,10 @@ impl IdentityCreditTransferTransitionMethodsV0 for IdentityCreditTransferTransit
                 if signer.can_sign_with(key) {
                     key
                 } else {
+                    tracing::error!(
+                        key_id = key.id(),
+                        "specified transfer key cannot be used for signing"
+                    );
                     return Err(
                         ProtocolError::DesiredKeyWithTypePurposeSecurityLevelMissing(
                             "specified transfer public key cannot be used for signing".to_string(),
@@ -54,25 +59,37 @@ impl IdentityCreditTransferTransitionMethodsV0 for IdentityCreditTransferTransit
                     );
                 }
             }
-            None => identity
-                .get_first_public_key_matching(
+            None => {
+                let key_result = identity.get_first_public_key_matching(
                     Purpose::TRANSFER,
                     SecurityLevel::full_range().into(),
                     KeyType::all_key_types().into(),
                     true,
-                )
-                .ok_or_else(|| {
+                );
+
+                key_result.ok_or_else(|| {
+                    tracing::error!(
+                        identity_id = %identity.id(),
+                        total_keys = identity.public_keys().len(),
+                        "no transfer public key found in identity"
+                    );
+                    for (key_id, key) in identity.public_keys() {
+                        tracing::debug!(key_id, purpose = ?key.purpose(), "available key");
+                    }
                     ProtocolError::DesiredKeyWithTypePurposeSecurityLevelMissing(
                         "no transfer public key".to_string(),
                     )
-                })?,
+                })?
+            }
         };
 
-        transition.sign_external(
-            identity_public_key,
-            &signer,
-            None::<GetDataContractSecurityLevelRequirementFn>,
-        )?;
+        transition
+            .sign_external(
+                identity_public_key,
+                &signer,
+                None::<GetDataContractSecurityLevelRequirementFn>,
+            )
+            .await?;
 
         Ok(transition)
     }

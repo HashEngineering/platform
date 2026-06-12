@@ -2,25 +2,19 @@ use crate::consensus::basic::data_contract::UnknownGasFeesPaidByError;
 use crate::consensus::basic::BasicError;
 use crate::consensus::ConsensusError;
 use crate::ProtocolError;
-use bincode_derive::{Decode, Encode};
+use bincode::{Decode, Encode};
 use derive_more::Display;
 #[cfg(any(
-    feature = "state-transition-serde-conversion",
-    all(
-        feature = "document-serde-conversion",
-        feature = "data-contract-serde-conversion"
-    ),
+    feature = "serde-conversion",
+    all(feature = "serde-conversion", feature = "serde-conversion"),
 ))]
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Encode, Decode, Default, PartialEq, Display)]
 #[cfg_attr(
     any(
-        feature = "state-transition-serde-conversion",
-        all(
-            feature = "document-serde-conversion",
-            feature = "data-contract-serde-conversion"
-        ),
+        feature = "serde-conversion",
+        all(feature = "serde-conversion", feature = "serde-conversion"),
     ),
     derive(Serialize, Deserialize)
 )]

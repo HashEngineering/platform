@@ -148,9 +148,16 @@ impl ContestedResourceVotesGivenByIdentityQuery {
             &platform_version.drive,
         );
         match query_result {
-            Err(Error::GroveDB(GroveError::PathKeyNotFound(_)))
-            | Err(Error::GroveDB(GroveError::PathNotFound(_)))
-            | Err(Error::GroveDB(GroveError::PathParentLayerNotFound(_))) => Ok(BTreeMap::new()),
+            Err(Error::GroveDB(e))
+                if matches!(
+                    e.as_ref(),
+                    GroveError::PathKeyNotFound(_)
+                        | GroveError::PathNotFound(_)
+                        | GroveError::PathParentLayerNotFound(_)
+                ) =>
+            {
+                Ok(BTreeMap::new())
+            }
             Err(e) => Err(e),
             Ok((query_result_elements, _)) => {
                 let voters =
@@ -213,9 +220,14 @@ impl ContestedResourceVotesGivenByIdentityQuery {
             &platform_version.drive,
         );
         match query_result {
-            Err(Error::GroveDB(GroveError::PathKeyNotFound(_)))
-            | Err(Error::GroveDB(GroveError::PathNotFound(_)))
-            | Err(Error::GroveDB(GroveError::PathParentLayerNotFound(_))) => {
+            Err(Error::GroveDB(e))
+                if matches!(
+                    e.as_ref(),
+                    GroveError::PathKeyNotFound(_)
+                        | GroveError::PathNotFound(_)
+                        | GroveError::PathParentLayerNotFound(_)
+                ) =>
+            {
                 Ok((QueryResultElements::new(), 0))
             }
             _ => {
@@ -262,5 +274,198 @@ impl ContestedResourceVotesGivenByIdentityQuery {
                 offset: self.offset,
             },
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drive::votes::paths::{CONTESTED_RESOURCE_TREE_KEY, IDENTITY_VOTES_TREE_KEY};
+    use crate::drive::RootTree;
+    use grovedb::QueryItem;
+
+    fn expected_base_path(identity_id: &[u8; 32]) -> Vec<Vec<u8>> {
+        vec![
+            vec![RootTree::Votes as u8],
+            vec![CONTESTED_RESOURCE_TREE_KEY as u8],
+            vec![IDENTITY_VOTES_TREE_KEY as u8],
+            identity_id.to_vec(),
+        ]
+    }
+
+    // -----------------------------------------------------------------------
+    // construct_path_query
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn construct_path_query_no_start_ascending() {
+        let identity_id = Identifier::from([0xAA; 32]);
+        let query = ContestedResourceVotesGivenByIdentityQuery {
+            identity_id,
+            offset: None,
+            limit: Some(10),
+            start_at: None,
+            order_ascending: true,
+        };
+
+        let pq = query
+            .construct_path_query()
+            .expect("should build path query");
+        assert_eq!(pq.path, expected_base_path(identity_id.as_bytes()));
+        assert_eq!(pq.query.limit, Some(10));
+        assert_eq!(pq.query.offset, None);
+        assert!(pq.query.query.left_to_right);
+
+        // No start_at means insert_all -> RangeFull
+        let items = &pq.query.query.items;
+        assert_eq!(items.len(), 1);
+        assert!(matches!(&items[0], QueryItem::RangeFull(..)));
+    }
+
+    #[test]
+    fn construct_path_query_no_start_descending() {
+        let identity_id = Identifier::from([0xBB; 32]);
+        let query = ContestedResourceVotesGivenByIdentityQuery {
+            identity_id,
+            offset: None,
+            limit: None,
+            start_at: None,
+            order_ascending: false,
+        };
+
+        let pq = query
+            .construct_path_query()
+            .expect("should build path query");
+        assert!(!pq.query.query.left_to_right);
+        assert_eq!(pq.query.limit, None);
+    }
+
+    #[test]
+    fn construct_path_query_start_at_included_ascending() {
+        let identity_id = Identifier::from([0xCC; 32]);
+        let start_key = [0x42u8; 32];
+        let query = ContestedResourceVotesGivenByIdentityQuery {
+            identity_id,
+            offset: None,
+            limit: Some(5),
+            start_at: Some((start_key, true)),
+            order_ascending: true,
+        };
+
+        let pq = query
+            .construct_path_query()
+            .expect("should build path query");
+        let items = &pq.query.query.items;
+        assert_eq!(items.len(), 1);
+        assert!(
+            matches!(&items[0], QueryItem::RangeFrom(r) if r.start == start_key.to_vec()),
+            "ascending + included = RangeFrom"
+        );
+    }
+
+    #[test]
+    fn construct_path_query_start_at_excluded_ascending() {
+        let identity_id = Identifier::from([0xDD; 32]);
+        let start_key = [0x42u8; 32];
+        let query = ContestedResourceVotesGivenByIdentityQuery {
+            identity_id,
+            offset: None,
+            limit: Some(5),
+            start_at: Some((start_key, false)),
+            order_ascending: true,
+        };
+
+        let pq = query
+            .construct_path_query()
+            .expect("should build path query");
+        let items = &pq.query.query.items;
+        assert_eq!(items.len(), 1);
+        assert!(
+            matches!(&items[0], QueryItem::RangeAfter(r) if r.start == start_key.to_vec()),
+            "ascending + excluded = RangeAfter"
+        );
+    }
+
+    #[test]
+    fn construct_path_query_start_at_included_descending() {
+        let identity_id = Identifier::from([0xEE; 32]);
+        let start_key = [0x42u8; 32];
+        let query = ContestedResourceVotesGivenByIdentityQuery {
+            identity_id,
+            offset: None,
+            limit: Some(5),
+            start_at: Some((start_key, true)),
+            order_ascending: false,
+        };
+
+        let pq = query
+            .construct_path_query()
+            .expect("should build path query");
+        let items = &pq.query.query.items;
+        assert_eq!(items.len(), 1);
+        assert!(
+            matches!(&items[0], QueryItem::RangeToInclusive(r) if r.end == start_key.to_vec()),
+            "descending + included = RangeToInclusive"
+        );
+    }
+
+    #[test]
+    fn construct_path_query_start_at_excluded_descending() {
+        let identity_id = Identifier::from([0xFF; 32]);
+        let start_key = [0x42u8; 32];
+        let query = ContestedResourceVotesGivenByIdentityQuery {
+            identity_id,
+            offset: None,
+            limit: Some(5),
+            start_at: Some((start_key, false)),
+            order_ascending: false,
+        };
+
+        let pq = query
+            .construct_path_query()
+            .expect("should build path query");
+        let items = &pq.query.query.items;
+        assert_eq!(items.len(), 1);
+        assert!(
+            matches!(&items[0], QueryItem::RangeTo(r) if r.end == start_key.to_vec()),
+            "descending + excluded = RangeTo"
+        );
+    }
+
+    #[test]
+    fn construct_path_query_with_offset_and_limit() {
+        let identity_id = Identifier::from([0x11; 32]);
+        let query = ContestedResourceVotesGivenByIdentityQuery {
+            identity_id,
+            offset: Some(7),
+            limit: Some(25),
+            start_at: None,
+            order_ascending: true,
+        };
+
+        let pq = query
+            .construct_path_query()
+            .expect("should build path query");
+        assert_eq!(pq.query.limit, Some(25));
+        assert_eq!(pq.query.offset, Some(7));
+    }
+
+    #[test]
+    fn construct_path_query_identity_id_appears_in_path() {
+        let identity_id = Identifier::from([0x99; 32]);
+        let query = ContestedResourceVotesGivenByIdentityQuery {
+            identity_id,
+            offset: None,
+            limit: None,
+            start_at: None,
+            order_ascending: true,
+        };
+
+        let pq = query
+            .construct_path_query()
+            .expect("should build path query");
+        // The 4th path element should be the identity_id
+        assert_eq!(pq.path.len(), 4);
+        assert_eq!(pq.path[3], identity_id.as_bytes().to_vec());
     }
 }

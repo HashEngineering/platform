@@ -1,4 +1,4 @@
-use crate::data_contract::config::v0::DataContractConfigV0;
+use crate::data_contract::config::v1::DataContractConfigV1;
 use crate::data_contract::config::DataContractConfig;
 use crate::data_contract::document_type::accessors::DocumentTypeV0Getters;
 
@@ -12,6 +12,8 @@ use crate::data_contract::{
 };
 use crate::identity::TimestampMillis;
 use crate::prelude::BlockHeight;
+#[cfg(feature = "json-conversion")]
+use crate::serialization::json_safe_fields;
 use bincode::{Decode, Encode};
 use platform_value::{Identifier, Value};
 use platform_version::version::PlatformVersion;
@@ -19,6 +21,7 @@ use platform_version::FromPlatformVersioned;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+#[cfg_attr(feature = "json-conversion", json_safe_fields)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Encode, Decode)]
 #[serde(rename_all = "camelCase")]
 pub struct DataContractInSerializationFormatV1 {
@@ -26,7 +29,7 @@ pub struct DataContractInSerializationFormatV1 {
     pub id: Identifier,
 
     /// Internal configuration for the contract.
-    #[serde(default = "DataContractConfigV0::default_with_version")]
+    #[serde(default = "DataContractConfigV1::default_with_version")]
     pub config: DataContractConfig,
 
     /// The version of this data contract.

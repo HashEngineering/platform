@@ -1,4 +1,5 @@
 use super::broadcast::BroadcastStateTransition;
+use super::validation::ensure_valid_state_transition_structure;
 use super::waitable::Waitable;
 use crate::platform::transition::put_settings::PutSettings;
 use crate::{Error, Sdk};
@@ -18,7 +19,7 @@ use dpp::tokens::token_payment_info::TokenPaymentInfo;
 
 #[async_trait::async_trait]
 /// A trait for putting a document to platform
-pub trait PutDocument<S: Signer>: Waitable {
+pub trait PutDocument<S: Signer<IdentityPublicKey>>: Waitable {
     /// Puts a document on platform
     /// setting settings to `None` sets default connection behavior
     #[allow(clippy::too_many_arguments)]
@@ -33,7 +34,7 @@ pub trait PutDocument<S: Signer>: Waitable {
         settings: Option<PutSettings>,
     ) -> Result<StateTransition, Error>;
 
-    /// Puts an identity on platform and waits for the confirmation proof
+    /// Puts a document on platform and waits for the confirmation proof
     #[allow(clippy::too_many_arguments)]
     async fn put_to_platform_and_wait_for_response(
         &self,
@@ -66,7 +67,7 @@ pub(crate) fn get_error(response: &WaitForStateTransitionResultResponse) -> Opti
 }
 
 #[async_trait::async_trait]
-impl<S: Signer> PutDocument<S> for Document {
+impl<S: Signer<IdentityPublicKey>> PutDocument<S> for Document {
     async fn put_to_platform(
         &self,
         sdk: &Sdk,
@@ -102,6 +103,7 @@ impl<S: Signer> PutDocument<S> for Document {
                 sdk.version(),
                 settings.state_transition_creation_options,
             )
+            .await?
         } else {
             let (document, document_state_transition_entropy) = document_state_transition_entropy
                 .map(|entropy| (self.clone(), entropy))
@@ -129,7 +131,9 @@ impl<S: Signer> PutDocument<S> for Document {
                 sdk.version(),
                 settings.state_transition_creation_options,
             )
-        }?;
+            .await?
+        };
+        ensure_valid_state_transition_structure(&transition, sdk.version())?;
 
         // response is empty for a broadcast, result comes from the stream wait for state transition result
         transition.broadcast(sdk, Some(settings)).await?;

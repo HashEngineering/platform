@@ -13,7 +13,10 @@ use dpp::platform_value::{string_encoding, BinaryData};
 use dpp::serialization::PlatformSerializable;
 use dpp::state_transition::masternode_vote_transition::accessors::MasternodeVoteTransitionAccessorsV0;
 use dpp::state_transition::masternode_vote_transition::MasternodeVoteTransition;
-use dpp::state_transition::{StateTransition, StateTransitionIdentitySigned, StateTransitionLike};
+use dpp::state_transition::{
+    StateTransition, StateTransitionIdentitySigned, StateTransitionLike, StateTransitionOwned,
+    StateTransitionSingleSigned,
+};
 use dpp::version::PlatformVersion;
 use dpp::voting::vote_polls::VotePoll;
 use dpp::voting::votes::resource_vote::accessors::v0::ResourceVoteGettersV0;
@@ -220,15 +223,17 @@ impl MasternodeVoteTransitionWasm {
         self.0.is_voting_state_transition()
     }
 
+    /// Masternode vote transitions do not support user fee increase; always returns 0.
+    /// This method is kept for API compatibility.
     #[wasm_bindgen(js_name=getUserFeeIncrease)]
     pub fn get_user_fee_increase(&self) -> u16 {
-        self.0.user_fee_increase()
+        0
     }
 
+    /// Masternode vote transitions do not support user fee increase.
+    /// This method is kept for API compatibility and intentionally does nothing.
     #[wasm_bindgen(js_name=setUserFeeIncrease)]
-    pub fn set_user_fee_increase(&mut self, user_fee_increase: u16) {
-        self.0.set_user_fee_increase(user_fee_increase);
-    }
+    pub fn set_user_fee_increase(&mut self, _user_fee_increase: u16) {}
 
     #[wasm_bindgen(js_name=getIdentityContractNonce)]
     pub fn get_identity_nonce(&self) -> u64 {
@@ -333,7 +338,8 @@ impl MasternodeVoteTransitionWasm {
             .sign_by_private_key(private_key.as_slice(), key_type, &bls_adapter)
             .with_js_error()?;
 
-        self.0.set_signature(wrapper.signature().to_owned());
+        self.0
+            .set_signature(wrapper.signature().unwrap().to_owned());
 
         Ok(())
     }
@@ -368,7 +374,7 @@ impl MasternodeVoteTransitionWasm {
             )
             .with_js_error()?;
 
-        let signature = state_transition.signature().to_owned();
+        let signature = state_transition.signature().unwrap().to_owned();
         let signature_public_key_id = state_transition.signature_public_key_id().unwrap_or(0);
 
         self.0.set_signature(signature);

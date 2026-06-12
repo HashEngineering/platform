@@ -64,7 +64,7 @@ use crate::execution::types::block_execution_context::v0::BlockExecutionContextV
 use crate::execution::types::block_execution_context::BlockExecutionContext;
 use crate::platform_types::epoch_info::v0::EpochInfoV0Getters;
 use crate::platform_types::platform::Platform;
-use crate::platform_types::platform_state::v0::PlatformStateV0Methods;
+use crate::platform_types::platform_state::PlatformStateV0Methods;
 use drive::drive::credit_pools::epochs::operations_factory::EpochOperations;
 
 impl<CoreRPCLike> Platform<CoreRPCLike> {
@@ -273,6 +273,7 @@ mod tests {
                 unsigned_withdrawal_transactions: Default::default(),
                 block_platform_state,
                 proposer_results: None,
+                block_address_balance_changes: Default::default(),
             };
 
             let mut batch = vec![];

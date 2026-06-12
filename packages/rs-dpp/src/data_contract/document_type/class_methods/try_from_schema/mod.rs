@@ -17,21 +17,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod v0;
 mod v1;
+mod v2;
 
 const NOT_ALLOWED_SYSTEM_PROPERTIES: [&str; 1] = ["$id"];
-const SYSTEM_PROPERTIES: [&str; 11] = [
-    "$id",
-    "$ownerId",
-    "$createdAt",
-    "$updatedAt",
-    "$transferredAt",
-    "$createdAtBlockHeight",
-    "$updatedAtBlockHeight",
-    "$transferredAtBlockHeight",
-    "$createdAtCoreBlockHeight",
-    "$updatedAtCoreBlockHeight",
-    "$transferredAtCoreBlockHeight",
-];
+
 const MAX_INDEXED_STRING_PROPERTY_LENGTH: u16 = 63;
 const MAX_INDEXED_BYTE_ARRAY_PROPERTY_LENGTH: u16 = 255;
 const MAX_INDEXED_ARRAY_ITEMS: usize = 1024;
@@ -40,13 +29,15 @@ impl DocumentType {
     #[allow(clippy::too_many_arguments)]
     pub fn try_from_schema(
         data_contract_id: Identifier,
+        data_contract_system_version: u16,
+        contract_config_version: u16,
         name: &str,
         schema: Value,
         schema_defs: Option<&BTreeMap<String, Value>>,
         token_configurations: &BTreeMap<TokenContractPosition, TokenConfiguration>,
         data_contact_config: &DataContractConfig,
         full_validation: bool,
-        validation_operations: &mut Vec<ProtocolValidationOperation>,
+        validation_operations: &mut impl Extend<ProtocolValidationOperation>,
         platform_version: &PlatformVersion,
     ) -> Result<Self, ProtocolError> {
         match platform_version
@@ -58,6 +49,8 @@ impl DocumentType {
         {
             0 => DocumentTypeV0::try_from_schema(
                 data_contract_id,
+                data_contract_system_version,
+                contract_config_version,
                 name,
                 schema,
                 schema_defs,
@@ -69,6 +62,8 @@ impl DocumentType {
             .map(|document_type| document_type.into()),
             1 => DocumentTypeV1::try_from_schema(
                 data_contract_id,
+                data_contract_system_version,
+                contract_config_version,
                 name,
                 schema,
                 schema_defs,
@@ -79,9 +74,22 @@ impl DocumentType {
                 platform_version,
             )
             .map(|document_type| document_type.into()),
+            2 => DocumentType::try_from_schema_v2(
+                data_contract_id,
+                data_contract_system_version,
+                contract_config_version,
+                name,
+                schema,
+                schema_defs,
+                token_configurations,
+                data_contact_config,
+                full_validation,
+                validation_operations,
+                platform_version,
+            ),
             version => Err(ProtocolError::UnknownVersionMismatch {
                 method: "try_from_schema".to_string(),
-                known_versions: vec![0, 1],
+                known_versions: vec![0, 1, 2],
                 received: version,
             }),
         }
@@ -196,17 +204,16 @@ fn insert_values_nested(
                                 "properties must be a map".to_string(),
                             ))?;
 
-                    let mut sorted_properties: Vec<_> = properties.iter().collect();
-
-                    sorted_properties.sort_by(|(_, value_1), (_, value_2)| {
-                        let pos_1: u64 = value_1
-                            .get_integer(property_names::POSITION)
-                            .expect("expected a position");
-                        let pos_2: u64 = value_2
-                            .get_integer(property_names::POSITION)
-                            .expect("expected a position");
-                        pos_1.cmp(&pos_2)
-                    });
+                    // Nested properties are emitted below in source-map order (the
+                    // `properties.iter()` loop), and that `IndexMap` insertion order is
+                    // consensus-observable: historical contracts were committed in source-map
+                    // order, so re-sorting nested properties by `position` would soft-fork any
+                    // contract whose source order differs from its position order. A previous
+                    // `position`-based `sort_by` here was dead code (its sorted result was never
+                    // read) and read `position` with `.expect()`, which could panic on adversarial
+                    // schema input during block execution. Removed (ordering unchanged). Do NOT
+                    // reintroduce a nested-property sort — even a correct one — nor a panicking
+                    // `position` read here.
 
                     // Create a new set with the prefix removed from the keys
                     let stripped_required: BTreeSet<String> = known_required

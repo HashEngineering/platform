@@ -1,8 +1,9 @@
 use crate::version::drive_abci_versions::drive_abci_query_versions::{
+    DriveAbciDocumentQueryHelperVersions, DriveAbciQueryAddressFundsVersions,
     DriveAbciQueryDataContractVersions, DriveAbciQueryGroupVersions,
     DriveAbciQueryIdentityVersions, DriveAbciQueryPrefundedSpecializedBalancesVersions,
-    DriveAbciQuerySystemVersions, DriveAbciQueryTokenVersions, DriveAbciQueryValidatorVersions,
-    DriveAbciQueryVersions, DriveAbciQueryVotingVersions,
+    DriveAbciQueryShieldedVersions, DriveAbciQuerySystemVersions, DriveAbciQueryTokenVersions,
+    DriveAbciQueryValidatorVersions, DriveAbciQueryVersions, DriveAbciQueryVotingVersions,
 };
 use versioned_feature_core::FeatureVersionBounds;
 
@@ -12,8 +13,24 @@ pub const DRIVE_ABCI_QUERY_VERSIONS_V1: DriveAbciQueryVersions = DriveAbciQueryV
     proofs_query: 0,
     document_query: FeatureVersionBounds {
         min_version: 0,
+        // Accept v0 (legacy `getDocuments`) and v1 (unified
+        // SQL-shaped surface with select / group_by / having).
+        // New clients default to v1 — it's the canonical surface,
+        // covers everything v0 does plus count queries (replacing
+        // the removed `getDocumentsCount` endpoint), and exposes
+        // explicit `select` / `group_by` / `having` knobs. v0
+        // still accepted on the wire so old clients keep working
+        // until they re-pin their versions.
+        max_version: 1,
+        default_current_version: 1,
+    },
+    document_history: FeatureVersionBounds {
+        min_version: 0,
         max_version: 0,
         default_current_version: 0,
+    },
+    document_query_helpers: DriveAbciDocumentQueryHelperVersions {
+        compute_aggregate_mode_and_check_limit: 0,
     },
     prefunded_specialized_balances: DriveAbciQueryPrefundedSpecializedBalancesVersions {
         balance: FeatureVersionBounds {
@@ -241,6 +258,71 @@ pub const DRIVE_ABCI_QUERY_VERSIONS_V1: DriveAbciQueryVersions = DriveAbciQueryV
             default_current_version: 0,
         },
         group_action_signers: FeatureVersionBounds {
+            min_version: 0,
+            max_version: 0,
+            default_current_version: 0,
+        },
+    },
+    shielded_queries: DriveAbciQueryShieldedVersions {
+        encrypted_notes: FeatureVersionBounds {
+            min_version: 0,
+            max_version: 0,
+            default_current_version: 0,
+        },
+        anchors: FeatureVersionBounds {
+            min_version: 0,
+            max_version: 0,
+            default_current_version: 0,
+        },
+        most_recent_anchor: FeatureVersionBounds {
+            min_version: 0,
+            max_version: 0,
+            default_current_version: 0,
+        },
+        pool_state: FeatureVersionBounds {
+            min_version: 0,
+            max_version: 0,
+            default_current_version: 0,
+        },
+        notes_count: FeatureVersionBounds {
+            min_version: 0,
+            max_version: 0,
+            default_current_version: 0,
+        },
+        nullifiers: FeatureVersionBounds {
+            min_version: 0,
+            max_version: 0,
+            default_current_version: 0,
+        },
+        max_query_chunks: 4,
+    },
+    address_funds_queries: DriveAbciQueryAddressFundsVersions {
+        addresses_infos: FeatureVersionBounds {
+            min_version: 0,
+            max_version: 0,
+            default_current_version: 0,
+        },
+        address_info: FeatureVersionBounds {
+            min_version: 0,
+            max_version: 0,
+            default_current_version: 0,
+        },
+        addresses_trunk_state: FeatureVersionBounds {
+            min_version: 0,
+            max_version: 0,
+            default_current_version: 0,
+        },
+        addresses_branch_state: FeatureVersionBounds {
+            min_version: 0,
+            max_version: 0,
+            default_current_version: 0,
+        },
+        recent_address_balance_changes: FeatureVersionBounds {
+            min_version: 0,
+            max_version: 0,
+            default_current_version: 0,
+        },
+        recent_compacted_address_balance_changes: FeatureVersionBounds {
             min_version: 0,
             max_version: 0,
             default_current_version: 0,

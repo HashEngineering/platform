@@ -6,31 +6,31 @@ use crate::strategy::{
     StrategyRandomness, ValidatorVersionMigration,
 };
 use crate::verify_state_transitions::verify_state_transitions_were_or_were_not_executed;
-use dashcore_rpc::dashcore_rpc_json::{
-    Bip9SoftforkInfo, Bip9SoftforkStatus, DMNStateDiff, ExtendedQuorumDetails, MasternodeListDiff,
-    MasternodeListItem, QuorumInfoResult, QuorumType, SoftforkType,
-};
 use dpp::block::block_info::BlockInfo;
 use dpp::block::epoch::Epoch;
 use dpp::block::extended_block_info::v0::ExtendedBlockInfoV0Getters;
 use dpp::dashcore::hashes::Hash;
 use dpp::dashcore::{BlockHash, ProTxHash, QuorumHash};
+use dpp::dashcore_rpc::dashcore_rpc_json::{
+    Bip9SoftforkInfo, Bip9SoftforkStatus, DMNStateDiff, ExtendedQuorumDetails, MasternodeListDiff,
+    MasternodeListItem, QuorumInfoResult, QuorumType, SoftforkType,
+};
 use dpp::identity::accessors::IdentityGettersV0;
 use dpp::identity::identity_public_key::accessors::v0::IdentityPublicKeyGettersV0;
 use strategy_tests::operations::FinalizeBlockOperation::IdentityAddKeys;
 
-use dashcore_rpc::json::{ExtendedQuorumListResult, SoftforkInfo};
 use dpp::bls_signatures::{Bls12381G2Impl, SecretKey as BlsPrivateKey, SignatureSchemes};
 use dpp::dashcore::consensus::Encodable;
 use dpp::dashcore::hashes::{sha256d, HashEngine};
 use dpp::dashcore::{ChainLock, QuorumSigningRequestId, VarInt};
+use dpp::dashcore_rpc::json::{ExtendedQuorumListResult, SoftforkInfo};
 use drive_abci::abci::app::FullAbciApplication;
 use drive_abci::config::PlatformConfig;
 use drive_abci::mimic::test_quorum::TestQuorumInfo;
 use drive_abci::mimic::{MimicExecuteBlockOptions, MimicExecuteBlockOutcome};
 use drive_abci::platform_types::epoch_info::v0::EpochInfoV0;
 use drive_abci::platform_types::platform::Platform;
-use drive_abci::platform_types::platform_state::v0::PlatformStateV0Methods;
+use drive_abci::platform_types::platform_state::PlatformStateV0Methods;
 use drive_abci::platform_types::signature_verification_quorum_set::{Quorums, SigningQuorum};
 use drive_abci::platform_types::withdrawal::unsigned_withdrawal_txs::v0::UnsignedWithdrawalTxs;
 use drive_abci::rpc::core::MockCoreRPCLike;
@@ -48,7 +48,7 @@ use tenderdash_abci::Application;
 
 pub const GENESIS_TIME_MS: u64 = 1681094380000;
 
-pub(crate) fn run_chain_for_strategy<'a>(
+pub(crate) async fn run_chain_for_strategy<'a>(
     platform: &'a mut Platform<MockCoreRPCLike>,
     block_count: u64,
     strategy: NetworkStrategy,
@@ -781,10 +781,11 @@ pub(crate) fn run_chain_for_strategy<'a>(
         config,
         rng,
     )
+    .await
 }
 
-pub(crate) fn create_chain_for_strategy(
-    platform: &Platform<MockCoreRPCLike>,
+pub(crate) async fn create_chain_for_strategy<'a>(
+    platform: &'a Platform<MockCoreRPCLike>,
     block_count: u64,
     proposers_with_updates: Vec<MasternodeListItemWithUpdates>,
     validator_quorums: BTreeMap<QuorumHash, TestQuorumInfo>,
@@ -792,7 +793,7 @@ pub(crate) fn create_chain_for_strategy(
     strategy: NetworkStrategy,
     config: PlatformConfig,
     rng: StdRng,
-) -> ChainExecutionOutcome {
+) -> ChainExecutionOutcome<'a> {
     let abci_application = FullAbciApplication::new(platform);
 
     let seed = strategy
@@ -811,10 +812,11 @@ pub(crate) fn create_chain_for_strategy(
         config,
         seed,
     )
+    .await
 }
 
-pub(crate) fn start_chain_for_strategy(
-    abci_application: FullAbciApplication<MockCoreRPCLike>,
+pub(crate) async fn start_chain_for_strategy<'a>(
+    abci_application: FullAbciApplication<'a, MockCoreRPCLike>,
     block_count: u64,
     proposers_with_updates: Vec<MasternodeListItemWithUpdates>,
     validator_quorums: BTreeMap<QuorumHash, TestQuorumInfo>,
@@ -822,7 +824,7 @@ pub(crate) fn start_chain_for_strategy(
     strategy: NetworkStrategy,
     config: PlatformConfig,
     seed: StrategyRandomness,
-) -> ChainExecutionOutcome {
+) -> ChainExecutionOutcome<'a> {
     let mut rng = match seed {
         StrategyRandomness::SeedEntropy(seed) => StdRng::seed_from_u64(seed),
         StrategyRandomness::RNGEntropy(rng) => rng,
@@ -909,20 +911,22 @@ pub(crate) fn start_chain_for_strategy(
             start_time_ms: GENESIS_TIME_MS,
             current_time_ms: GENESIS_TIME_MS,
             current_identities: Vec::new(),
+            current_addresses_with_balance: Default::default(),
         },
         strategy,
         config,
         StrategyRandomness::RNGEntropy(rng),
     )
+    .await
 }
 
-pub(crate) fn continue_chain_for_strategy(
-    abci_app: FullAbciApplication<MockCoreRPCLike>,
+pub(crate) async fn continue_chain_for_strategy<'a>(
+    abci_app: FullAbciApplication<'a, MockCoreRPCLike>,
     chain_execution_parameters: ChainExecutionParameters,
     mut strategy: NetworkStrategy,
     config: PlatformConfig,
     seed: StrategyRandomness,
-) -> ChainExecutionOutcome {
+) -> ChainExecutionOutcome<'a> {
     let platform = abci_app.platform;
     let ChainExecutionParameters {
         block_start,
@@ -939,6 +943,7 @@ pub(crate) fn continue_chain_for_strategy(
         mut current_time_ms,
         instant_lock_quorums,
         mut current_identities,
+        mut current_addresses_with_balance,
     } = chain_execution_parameters;
     let mut rng = match seed {
         StrategyRandomness::SeedEntropy(seed) => StdRng::seed_from_u64(seed),
@@ -973,6 +978,7 @@ pub(crate) fn continue_chain_for_strategy(
 
     let mut state_transitions_per_block = BTreeMap::new();
     let mut state_transition_results_per_block = BTreeMap::new();
+    let mut shielded_state: Option<crate::strategy::ShieldedState> = None;
 
     for block_height in block_start..(block_start + block_count) {
         let state = platform.state.load();
@@ -1009,18 +1015,22 @@ pub(crate) fn continue_chain_for_strategy(
             .values()
             .nth(i as usize)
             .unwrap();
-        let (state_transitions, finalize_block_operations) = strategy.state_transitions_for_block(
-            platform,
-            block_start,
-            &block_info,
-            &mut current_identities,
-            &mut current_identity_nonce_counter,
-            &mut current_identity_contract_nonce_counter,
-            &mut current_votes,
-            &mut signer,
-            &mut rng,
-            &instant_lock_quorums,
-        );
+        let (state_transitions, finalize_block_operations) = strategy
+            .state_transitions_for_block(
+                platform,
+                block_start,
+                &block_info,
+                &mut current_identities,
+                &mut current_addresses_with_balance,
+                &mut current_identity_nonce_counter,
+                &mut current_identity_contract_nonce_counter,
+                &mut current_votes,
+                &mut signer,
+                &mut rng,
+                &instant_lock_quorums,
+                &mut shielded_state,
+            )
+            .await;
 
         state_transitions_per_block.insert(block_height, state_transitions.clone());
 
@@ -1136,6 +1146,7 @@ pub(crate) fn continue_chain_for_strategy(
             }
         }
         signer.commit_block_keys();
+        current_addresses_with_balance.commit();
 
         current_time_ms += config.block_spacing_ms;
 
@@ -1221,6 +1232,7 @@ pub(crate) fn continue_chain_for_strategy(
         abci_app,
         masternode_identity_balances,
         identities: current_identities,
+        addresses_with_balance: current_addresses_with_balance,
         proposers: proposers_with_updates,
         validator_quorums: quorums,
         current_validator_quorum_hash: current_quorum_hash,

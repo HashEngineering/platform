@@ -31,7 +31,7 @@ pub struct TokenMintTransitionBuilder {
 }
 
 impl TokenMintTransitionBuilder {
-    /// Start building a mint tokens request for the provided DataContract.
+    /// Start building a mint tokens transition for the provided DataContract.
     ///
     /// # Arguments
     ///
@@ -172,7 +172,7 @@ impl TokenMintTransitionBuilder {
         self,
         sdk: &Sdk,
         identity_public_key: &IdentityPublicKey,
-        signer: &impl Signer,
+        signer: &impl Signer<IdentityPublicKey>,
         platform_version: &PlatformVersion,
     ) -> Result<StateTransition, Error> {
         let token_id = Identifier::from(calculate_token_id(
@@ -204,7 +204,8 @@ impl TokenMintTransitionBuilder {
             signer,
             platform_version,
             self.state_transition_creation_options,
-        )?;
+        )
+        .await?;
 
         Ok(state_transition)
     }

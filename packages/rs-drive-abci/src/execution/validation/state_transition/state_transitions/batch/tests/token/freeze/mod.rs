@@ -5,8 +5,8 @@ mod token_freeze_tests {
 
     mod token_freeze_basic_tests {
         use super::*;
-        #[test]
-        fn test_token_freeze() {
+        #[tokio::test]
+        async fn test_token_freeze() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -58,6 +58,7 @@ mod token_freeze_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let freeze_serialized_transition = freeze_transition
@@ -81,7 +82,7 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -104,8 +105,8 @@ mod token_freeze_tests {
             assert_eq!(token_frozen, Some(true));
         }
 
-        #[test]
-        fn test_token_freeze_identity_does_not_exist() {
+        #[tokio::test]
+        async fn test_token_freeze_identity_does_not_exist() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -156,6 +157,7 @@ mod token_freeze_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let freeze_serialized_transition = freeze_transition
@@ -179,10 +181,12 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [PaidConsensusError(
-                    ConsensusError::StateError(StateError::IdentityToFreezeDoesNotExistError(_)),
-                    _
-                )]
+                [PaidConsensusError {
+                    error: ConsensusError::StateError(
+                        StateError::IdentityToFreezeDoesNotExistError(_)
+                    ),
+                    ..
+                }]
             );
 
             platform
@@ -205,8 +209,8 @@ mod token_freeze_tests {
             assert_eq!(token_frozen, None);
         }
 
-        #[test]
-        fn test_token_freeze_and_unfreeze() {
+        #[tokio::test]
+        async fn test_token_freeze_and_unfreeze() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -267,6 +271,7 @@ mod token_freeze_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let freeze_serialized_transition = freeze_transition
@@ -290,7 +295,7 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -327,6 +332,7 @@ mod token_freeze_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let unfreeze_serialized_transition = unfreeze_transition
@@ -350,7 +356,7 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -373,8 +379,366 @@ mod token_freeze_tests {
             assert_eq!(token_frozen, Some(false));
         }
 
-        #[test]
-        fn test_token_frozen_receive_balance_allowed_sending_not_allowed_till_unfrozen() {
+        #[tokio::test]
+        async fn test_token_unfreeze_success() {
+            let platform_version = PlatformVersion::latest();
+            let mut platform = TestPlatformBuilder::new()
+                .with_latest_protocol_version()
+                .build_with_mock_rpc()
+                .set_genesis_state();
+
+            let mut rng = StdRng::seed_from_u64(49853);
+
+            let platform_state = platform.state.load();
+
+            let (identity, signer, key) =
+                setup_identity(&mut platform, rng.gen(), dash_to_credits!(0.5));
+
+            let (identity_2, signer2, key2) =
+                setup_identity(&mut platform, rng.gen(), dash_to_credits!(0.5));
+
+            let (contract, token_id) = create_token_contract_with_owner_identity(
+                &mut platform,
+                identity.id(),
+                Some(|token_configuration: &mut TokenConfiguration| {
+                    token_configuration.set_freeze_rules(ChangeControlRules::V0(
+                        ChangeControlRulesV0 {
+                            authorized_to_make_change: AuthorizedActionTakers::ContractOwner,
+                            admin_action_takers: AuthorizedActionTakers::NoOne,
+                            changing_authorized_action_takers_to_no_one_allowed: false,
+                            changing_admin_action_takers_to_no_one_allowed: false,
+                            self_changing_admin_action_takers_allowed: false,
+                        },
+                    ));
+                    token_configuration.set_unfreeze_rules(ChangeControlRules::V0(
+                        ChangeControlRulesV0 {
+                            authorized_to_make_change: AuthorizedActionTakers::ContractOwner,
+                            admin_action_takers: AuthorizedActionTakers::NoOne,
+                            changing_authorized_action_takers_to_no_one_allowed: false,
+                            changing_admin_action_takers_to_no_one_allowed: false,
+                            self_changing_admin_action_takers_allowed: false,
+                        },
+                    ));
+                }),
+                None,
+                None,
+                None,
+                platform_version,
+            );
+
+            // Transfer some tokens to identity_2 first so they have a balance
+            let token_transfer_transition = BatchTransition::new_token_transfer_transition(
+                token_id,
+                identity.id(),
+                contract.id(),
+                0,
+                5000,
+                identity_2.id(),
+                None,
+                None,
+                None,
+                &key,
+                2,
+                0,
+                &signer,
+                platform_version,
+                None,
+            )
+            .await
+            .expect("expect to create token transfer transition");
+
+            let transfer_serialized = token_transfer_transition
+                .serialize_to_bytes()
+                .expect("expected serialized state transition");
+
+            let transaction = platform.drive.grove.start_transaction();
+
+            let processing_result = platform
+                .platform
+                .process_raw_state_transitions(
+                    &[transfer_serialized],
+                    &platform_state,
+                    &BlockInfo::default(),
+                    &transaction,
+                    platform_version,
+                    false,
+                    None,
+                )
+                .expect("expected to process state transition");
+
+            assert_matches!(
+                processing_result.execution_results().as_slice(),
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
+            );
+
+            platform
+                .drive
+                .grove
+                .commit_transaction(transaction)
+                .unwrap()
+                .expect("expected to commit transaction");
+
+            // Freeze identity_2
+            let freeze_transition = BatchTransition::new_token_freeze_transition(
+                token_id,
+                identity.id(),
+                contract.id(),
+                0,
+                identity_2.id(),
+                None,
+                None,
+                &key,
+                3,
+                0,
+                &signer,
+                platform_version,
+                None,
+            )
+            .await
+            .expect("expect to create freeze transition");
+
+            let freeze_serialized = freeze_transition
+                .serialize_to_bytes()
+                .expect("expected serialized state transition");
+
+            let transaction = platform.drive.grove.start_transaction();
+
+            let processing_result = platform
+                .platform
+                .process_raw_state_transitions(
+                    &[freeze_serialized],
+                    &platform_state,
+                    &BlockInfo::default(),
+                    &transaction,
+                    platform_version,
+                    false,
+                    None,
+                )
+                .expect("expected to process state transition");
+
+            assert_matches!(
+                processing_result.execution_results().as_slice(),
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
+            );
+
+            platform
+                .drive
+                .grove
+                .commit_transaction(transaction)
+                .unwrap()
+                .expect("expected to commit transaction");
+
+            // Verify identity_2 is frozen
+            let token_frozen = platform
+                .drive
+                .fetch_identity_token_info(
+                    token_id.to_buffer(),
+                    identity_2.id().to_buffer(),
+                    None,
+                    platform_version,
+                )
+                .expect("expected to fetch token info")
+                .map(|info| info.frozen());
+            assert_eq!(token_frozen, Some(true));
+
+            // Verify identity_2 cannot send tokens while frozen
+            let send_while_frozen = BatchTransition::new_token_transfer_transition(
+                token_id,
+                identity_2.id(),
+                contract.id(),
+                0,
+                100,
+                identity.id(),
+                None,
+                None,
+                None,
+                &key2,
+                2,
+                0,
+                &signer2,
+                platform_version,
+                None,
+            )
+            .await
+            .expect("expect to create transfer transition");
+
+            let send_serialized = send_while_frozen
+                .serialize_to_bytes()
+                .expect("expected serialized state transition");
+
+            let transaction = platform.drive.grove.start_transaction();
+
+            let processing_result = platform
+                .platform
+                .process_raw_state_transitions(
+                    &[send_serialized],
+                    &platform_state,
+                    &BlockInfo::default(),
+                    &transaction,
+                    platform_version,
+                    false,
+                    None,
+                )
+                .expect("expected to process state transition");
+
+            assert_matches!(
+                processing_result.execution_results().as_slice(),
+                [PaidConsensusError {
+                    error: ConsensusError::StateError(StateError::IdentityTokenAccountFrozenError(
+                        _
+                    )),
+                    ..
+                }]
+            );
+
+            platform
+                .drive
+                .grove
+                .commit_transaction(transaction)
+                .unwrap()
+                .expect("expected to commit transaction");
+
+            // Now unfreeze identity_2
+            let unfreeze_transition = BatchTransition::new_token_unfreeze_transition(
+                token_id,
+                identity.id(),
+                contract.id(),
+                0,
+                identity_2.id(),
+                None,
+                None,
+                &key,
+                4,
+                0,
+                &signer,
+                platform_version,
+                None,
+            )
+            .await
+            .expect("expect to create unfreeze transition");
+
+            let unfreeze_serialized = unfreeze_transition
+                .serialize_to_bytes()
+                .expect("expected serialized state transition");
+
+            let transaction = platform.drive.grove.start_transaction();
+
+            let processing_result = platform
+                .platform
+                .process_raw_state_transitions(
+                    &[unfreeze_serialized],
+                    &platform_state,
+                    &BlockInfo::default(),
+                    &transaction,
+                    platform_version,
+                    false,
+                    None,
+                )
+                .expect("expected to process state transition");
+
+            assert_matches!(
+                processing_result.execution_results().as_slice(),
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
+            );
+
+            platform
+                .drive
+                .grove
+                .commit_transaction(transaction)
+                .unwrap()
+                .expect("expected to commit transaction");
+
+            // Verify identity_2 is no longer frozen
+            let token_frozen = platform
+                .drive
+                .fetch_identity_token_info(
+                    token_id.to_buffer(),
+                    identity_2.id().to_buffer(),
+                    None,
+                    platform_version,
+                )
+                .expect("expected to fetch token info")
+                .map(|info| info.frozen());
+            assert_eq!(token_frozen, Some(false));
+
+            // Verify identity_2 can now transact again after unfreezing
+            let send_after_unfreeze = BatchTransition::new_token_transfer_transition(
+                token_id,
+                identity_2.id(),
+                contract.id(),
+                0,
+                100,
+                identity.id(),
+                None,
+                None,
+                None,
+                &key2,
+                3,
+                0,
+                &signer2,
+                platform_version,
+                None,
+            )
+            .await
+            .expect("expect to create transfer transition");
+
+            let send_serialized = send_after_unfreeze
+                .serialize_to_bytes()
+                .expect("expected serialized state transition");
+
+            let transaction = platform.drive.grove.start_transaction();
+
+            let processing_result = platform
+                .platform
+                .process_raw_state_transitions(
+                    &[send_serialized],
+                    &platform_state,
+                    &BlockInfo::default(),
+                    &transaction,
+                    platform_version,
+                    false,
+                    None,
+                )
+                .expect("expected to process state transition");
+
+            assert_matches!(
+                processing_result.execution_results().as_slice(),
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
+            );
+
+            platform
+                .drive
+                .grove
+                .commit_transaction(transaction)
+                .unwrap()
+                .expect("expected to commit transaction");
+
+            // Verify balances after successful transfer
+            let balance_identity = platform
+                .drive
+                .fetch_identity_token_balance(
+                    token_id.to_buffer(),
+                    identity.id().to_buffer(),
+                    None,
+                    platform_version,
+                )
+                .expect("expected to fetch token balance");
+            assert_eq!(balance_identity, Some(100000 - 5000 + 100));
+
+            let balance_identity_2 = platform
+                .drive
+                .fetch_identity_token_balance(
+                    token_id.to_buffer(),
+                    identity_2.id().to_buffer(),
+                    None,
+                    platform_version,
+                )
+                .expect("expected to fetch token balance");
+            assert_eq!(balance_identity_2, Some(5000 - 100));
+        }
+
+        #[tokio::test]
+        async fn test_token_frozen_receive_balance_allowed_sending_not_allowed_till_unfrozen() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -435,6 +799,7 @@ mod token_freeze_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let freeze_serialized_transition = freeze_transition
@@ -458,7 +823,7 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -497,6 +862,7 @@ mod token_freeze_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let token_transfer_serialized_transition = token_transfer_transition
@@ -520,7 +886,7 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -573,6 +939,7 @@ mod token_freeze_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let token_transfer_back_serialized_transition = token_transfer_back_transition
@@ -596,10 +963,12 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [PaidConsensusError(
-                    ConsensusError::StateError(StateError::IdentityTokenAccountFrozenError(_)),
-                    _
-                )]
+                [PaidConsensusError {
+                    error: ConsensusError::StateError(StateError::IdentityTokenAccountFrozenError(
+                        _
+                    )),
+                    ..
+                }]
             );
 
             platform
@@ -650,6 +1019,7 @@ mod token_freeze_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let unfreeze_serialized_transition = unfreeze_transition
@@ -673,7 +1043,7 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -712,6 +1082,7 @@ mod token_freeze_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let token_transfer_serialized_transition = token_transfer_transition
@@ -735,7 +1106,7 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -770,8 +1141,8 @@ mod token_freeze_tests {
             assert_eq!(token_balance, Some(expected_amount));
         }
 
-        #[test]
-        fn test_token_frozen_receive_balance_may_not_be_allowed() {
+        #[tokio::test]
+        async fn test_token_frozen_receive_balance_may_not_be_allowed() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -833,6 +1204,7 @@ mod token_freeze_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let freeze_serialized_transition = freeze_transition
@@ -856,7 +1228,7 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -895,6 +1267,7 @@ mod token_freeze_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let token_transfer_serialized_transition = token_transfer_transition
@@ -918,10 +1291,12 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [PaidConsensusError(
-                    ConsensusError::StateError(StateError::IdentityTokenAccountFrozenError(_)),
-                    _
-                )]
+                [PaidConsensusError {
+                    error: ConsensusError::StateError(StateError::IdentityTokenAccountFrozenError(
+                        _
+                    )),
+                    ..
+                }]
             );
 
             platform
@@ -971,8 +1346,8 @@ mod token_freeze_tests {
         //  Owner tries to freeze, but authorization is *group‑only*
         //  and owner does NOT hold enough power alone  →  Error.
         // ──────────────────────────────────────────────────────────
-        #[test]
-        fn test_token_freeze_owner_not_authorized_group_required() {
+        #[tokio::test]
+        async fn test_token_freeze_owner_not_authorized_group_required() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -1033,6 +1408,7 @@ mod token_freeze_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("create freeze");
 
             let serialized = freeze.serialize_to_bytes().expect("serialize freeze");
@@ -1053,10 +1429,10 @@ mod token_freeze_tests {
 
             assert_matches!(
                 result.execution_results().as_slice(),
-                [PaidConsensusError(
-                    ConsensusError::StateError(StateError::UnauthorizedTokenActionError(_)),
-                    _
-                )]
+                [PaidConsensusError {
+                    error: ConsensusError::StateError(StateError::UnauthorizedTokenActionError(_)),
+                    ..
+                }]
             );
         }
 
@@ -1064,8 +1440,8 @@ mod token_freeze_tests {
         //  Owner alone HAS enough power in the group (5 ≥ required 5)
         //  → freeze succeeds immediately.
         // ──────────────────────────────────────────────────────────
-        #[test]
-        fn test_token_freeze_owner_enough_group_power_without_group_action() {
+        #[tokio::test]
+        async fn test_token_freeze_owner_enough_group_power_without_group_action() {
             let version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -1128,6 +1504,7 @@ mod token_freeze_tests {
                 version,
                 None,
             )
+            .await
             .unwrap();
 
             let freeze_ser = freeze.serialize_to_bytes().unwrap();
@@ -1147,7 +1524,7 @@ mod token_freeze_tests {
 
             assert_matches!(
                 res.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -1174,8 +1551,8 @@ mod token_freeze_tests {
         //  Owner alone HAS enough power in the group (5 ≥ required 5)
         //  → freeze succeeds immediately.
         // ──────────────────────────────────────────────────────────
-        #[test]
-        fn test_token_freeze_owner_enough_group_power_using_group_action() {
+        #[tokio::test]
+        async fn test_token_freeze_owner_enough_group_power_using_group_action() {
             let version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -1238,6 +1615,7 @@ mod token_freeze_tests {
                 version,
                 None,
             )
+            .await
             .unwrap();
 
             let freeze_ser = freeze.serialize_to_bytes().unwrap();
@@ -1257,7 +1635,7 @@ mod token_freeze_tests {
 
             assert_matches!(
                 res.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -1280,20 +1658,22 @@ mod token_freeze_tests {
             assert_eq!(frozen, Some(true));
         }
 
-        #[test]
-        fn test_token_freeze_two_member_group_no_keeping_history() {
-            test_token_freeze_two_member_group_with_keeps_history(false);
+        #[tokio::test]
+        async fn test_token_freeze_two_member_group_no_keeping_history() {
+            test_token_freeze_two_member_group_with_keeps_history(false).await;
         }
 
-        #[test]
-        fn test_token_freeze_two_member_group_keeping_history() {
-            test_token_freeze_two_member_group_with_keeps_history(true);
+        #[tokio::test]
+        async fn test_token_freeze_two_member_group_keeping_history() {
+            test_token_freeze_two_member_group_with_keeps_history(true).await;
         }
 
         // ──────────────────────────────────────────────────────────
         //  Two‑signer scenario: proposer + second member complete freeze
         // ──────────────────────────────────────────────────────────
-        fn test_token_freeze_two_member_group_with_keeps_history(keeps_freezing_history: bool) {
+        async fn test_token_freeze_two_member_group_with_keeps_history(
+            keeps_freezing_history: bool,
+        ) {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -1352,6 +1732,7 @@ mod token_freeze_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create batch transition");
 
             let token_freeze_serialized_transition = token_freeze_transition
@@ -1375,7 +1756,7 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -1455,6 +1836,7 @@ mod token_freeze_tests {
                 platform_version,
                 None,
             )
+            .await
             .unwrap();
 
             let token_freeze_serialized_transition = token_freeze_confirm_transition
@@ -1477,7 +1859,7 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -1540,8 +1922,8 @@ mod token_freeze_tests {
             assert_eq!(frozen, Some(true));
         }
 
-        #[test]
-        fn test_token_freeze_two_member_group_and_destroy_frozen_funds() {
+        #[tokio::test]
+        async fn test_token_freeze_two_member_group_and_destroy_frozen_funds() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -1613,6 +1995,7 @@ mod token_freeze_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let token_mint_serialized_transition = token_mint_transition
@@ -1636,7 +2019,7 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -1673,6 +2056,7 @@ mod token_freeze_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create batch transition");
 
             let token_freeze_serialized_transition = token_freeze_transition
@@ -1696,7 +2080,7 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -1735,6 +2119,7 @@ mod token_freeze_tests {
                     platform_version,
                     None,
                 )
+                .await
                 .unwrap();
 
             let token_destroy_frozen_funds_serialized_transition =
@@ -1758,7 +2143,7 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -1800,6 +2185,7 @@ mod token_freeze_tests {
                     platform_version,
                     None,
                 )
+                .await
                 .unwrap();
 
             let token_destroy_frozen_funds_serialized_confirm_transition =
@@ -1823,7 +2209,7 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -1890,8 +2276,8 @@ mod token_freeze_tests {
             assert_eq!(frozen_identity_balance, Some(0));
         }
 
-        #[test]
-        fn test_token_freeze_two_member_group_and_destroy_frozen_funds_change_target_id_mid_group_action(
+        #[tokio::test]
+        async fn test_token_freeze_two_member_group_and_destroy_frozen_funds_change_target_id_mid_group_action(
         ) {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
@@ -1965,6 +2351,7 @@ mod token_freeze_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let token_mint_serialized_transition = token_mint_transition
@@ -1988,7 +2375,7 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -2014,6 +2401,7 @@ mod token_freeze_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let token_mint_serialized_transition = token_mint_transition
@@ -2037,7 +2425,7 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -2073,6 +2461,7 @@ mod token_freeze_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create batch transition");
 
             let token_freeze_serialized_transition = token_freeze_transition
@@ -2096,7 +2485,7 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -2121,6 +2510,7 @@ mod token_freeze_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create batch transition");
 
             let token_freeze_serialized_transition = token_freeze_transition
@@ -2144,7 +2534,7 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -2183,6 +2573,7 @@ mod token_freeze_tests {
                     platform_version,
                     None,
                 )
+                .await
                 .unwrap();
 
             let token_destroy_frozen_funds_serialized_transition =
@@ -2206,7 +2597,7 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -2249,6 +2640,7 @@ mod token_freeze_tests {
                     platform_version,
                     None,
                 )
+                .await
                 .unwrap();
 
             let token_destroy_frozen_funds_serialized_confirm_transition =
@@ -2272,12 +2664,12 @@ mod token_freeze_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [PaidConsensusError(
-                    ConsensusError::StateError(
+                [PaidConsensusError {
+                    error: ConsensusError::StateError(
                         StateError::ModificationOfGroupActionMainParametersNotPermittedError(_)
                     ),
-                    _
-                )]
+                    ..
+                }]
             );
 
             platform

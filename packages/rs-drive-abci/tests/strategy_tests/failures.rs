@@ -1,11 +1,12 @@
 #[cfg(test)]
 mod tests {
     use crate::execution::run_chain_for_strategy;
+    use dash_platform_macros::stack_size;
     use std::collections::{BTreeMap, HashMap};
     use strategy_tests::frequency::Frequency;
 
     use crate::strategy::{FailureStrategy, NetworkStrategy};
-    use strategy_tests::{IdentityInsertInfo, StartIdentities, Strategy};
+    use strategy_tests::{IdentityInsertInfo, StartAddresses, StartIdentities, Strategy};
 
     use drive_abci::config::{
         ChainLockConfig, ExecutionConfig, InstantLockConfig, PlatformConfig, PlatformTestConfig,
@@ -20,8 +21,9 @@ mod tests {
     use dpp::version::PlatformVersion;
     use drive_abci::test::helpers::setup::TestPlatformBuilder;
 
+    #[stack_size(4*1024*1024)]
     #[test]
-    fn run_chain_insert_one_new_identity_and_a_contract_with_bad_update() {
+    async fn run_chain_insert_one_new_identity_and_a_contract_with_bad_update() {
         let platform_version = PlatformVersion::latest();
         let contract = json_document_to_created_contract(
             "tests/supporting_files/contract/dashpay/dashpay-contract-all-mutable.json",
@@ -47,6 +49,7 @@ mod tests {
                 start_contracts: vec![(contract, Some(BTreeMap::from([(3, contract_update_1)])))],
                 operations: vec![],
                 start_identities: StartIdentities::default(),
+                start_addresses: StartAddresses::default(),
                 identity_inserts: IdentityInsertInfo {
                     frequency: Frequency {
                         times_per_block_range: 1..2,
@@ -54,7 +57,6 @@ mod tests {
                     },
                     ..Default::default()
                 },
-
                 identity_contract_nonce_gaps: None,
                 signer: None,
             },
@@ -83,7 +85,6 @@ mod tests {
             instant_lock: InstantLockConfig::default_100_67(),
             execution: ExecutionConfig {
                 verify_sum_trees: true,
-
                 ..Default::default()
             },
             block_spacing_ms: 3000,
@@ -102,7 +103,8 @@ mod tests {
             15,
             &mut None,
             &mut None,
-        );
+        )
+        .await;
 
         outcome
             .abci_app
@@ -129,15 +131,15 @@ mod tests {
             .expect("expected to get a contract");
     }
 
-    #[test]
-    fn run_chain_block_failure_on_genesis_block_correctly_fixes_itself() {
+    #[tokio::test]
+    async fn run_chain_block_failure_on_genesis_block_correctly_fixes_itself() {
         let mut strategy = NetworkStrategy {
             strategy: Strategy {
                 start_contracts: vec![],
                 operations: vec![],
                 start_identities: StartIdentities::default(),
+                start_addresses: StartAddresses::default(),
                 identity_inserts: IdentityInsertInfo::default(),
-
                 identity_contract_nonce_gaps: None,
                 signer: None,
             },
@@ -166,7 +168,6 @@ mod tests {
             instant_lock: InstantLockConfig::default_100_67(),
             execution: ExecutionConfig {
                 verify_sum_trees: true,
-
                 ..Default::default()
             },
             block_spacing_ms: 3000,
@@ -202,7 +203,8 @@ mod tests {
             15,
             &mut None,
             &mut None,
-        );
+        )
+        .await;
 
         //platform block didn't complete, so it should get another init chain
 
@@ -216,7 +218,8 @@ mod tests {
             15,
             &mut None,
             &mut None,
-        );
+        )
+        .await;
     }
 
     // #[test]
@@ -272,7 +275,7 @@ mod tests {
     //         &mut simple_signer,
     //         &mut rng,
     //         platform_version,
-    //     );
+    //     ).await;
 
     //     let dpns_contract = platform
     //         .drive
@@ -382,7 +385,7 @@ mod tests {
 
     //     // On the first block we only have identities and contracts
     //     let outcome =
-    //         run_chain_for_strategy(&mut platform, 2, strategy.clone(), config.clone(), 15);
+    //         run_chain_for_strategy(&mut platform, 2, strategy.clone(), config.clone(), 15).await;
 
     //     let state_transitions_block_2 = &outcome
     //         .state_transition_results_per_block

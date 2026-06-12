@@ -136,6 +136,15 @@ Platform.getDataContracts = {
   responseType: platform_pb.GetDataContractsResponse
 };
 
+Platform.getDocumentHistory = {
+  methodName: "getDocumentHistory",
+  service: Platform,
+  requestStream: false,
+  responseStream: false,
+  requestType: platform_pb.GetDocumentHistoryRequest,
+  responseType: platform_pb.GetDocumentHistoryResponse
+};
+
 Platform.getDocuments = {
   methodName: "getDocuments",
   service: Platform,
@@ -152,6 +161,15 @@ Platform.getIdentityByPublicKeyHash = {
   responseStream: false,
   requestType: platform_pb.GetIdentityByPublicKeyHashRequest,
   responseType: platform_pb.GetIdentityByPublicKeyHashResponse
+};
+
+Platform.getIdentityByNonUniquePublicKeyHash = {
+  methodName: "getIdentityByNonUniquePublicKeyHash",
+  service: Platform,
+  requestStream: false,
+  responseStream: false,
+  requestType: platform_pb.GetIdentityByNonUniquePublicKeyHashRequest,
+  responseType: platform_pb.GetIdentityByNonUniquePublicKeyHashResponse
 };
 
 Platform.waitForStateTransitionResult = {
@@ -197,6 +215,15 @@ Platform.getEpochsInfo = {
   responseStream: false,
   requestType: platform_pb.GetEpochsInfoRequest,
   responseType: platform_pb.GetEpochsInfoResponse
+};
+
+Platform.getFinalizedEpochInfos = {
+  methodName: "getFinalizedEpochInfos",
+  service: Platform,
+  requestStream: false,
+  responseStream: false,
+  requestType: platform_pb.GetFinalizedEpochInfosRequest,
+  responseType: platform_pb.GetFinalizedEpochInfosResponse
 };
 
 Platform.getContestedResources = {
@@ -343,6 +370,15 @@ Platform.getTokenDirectPurchasePrices = {
   responseType: platform_pb.GetTokenDirectPurchasePricesResponse
 };
 
+Platform.getTokenContractInfo = {
+  methodName: "getTokenContractInfo",
+  service: Platform,
+  requestStream: false,
+  responseStream: false,
+  requestType: platform_pb.GetTokenContractInfoRequest,
+  responseType: platform_pb.GetTokenContractInfoResponse
+};
+
 Platform.getTokenPreProgrammedDistributions = {
   methodName: "getTokenPreProgrammedDistributions",
   service: Platform,
@@ -350,6 +386,15 @@ Platform.getTokenPreProgrammedDistributions = {
   responseStream: false,
   requestType: platform_pb.GetTokenPreProgrammedDistributionsRequest,
   responseType: platform_pb.GetTokenPreProgrammedDistributionsResponse
+};
+
+Platform.getTokenPerpetualDistributionLastClaim = {
+  methodName: "getTokenPerpetualDistributionLastClaim",
+  service: Platform,
+  requestStream: false,
+  responseStream: false,
+  requestType: platform_pb.GetTokenPerpetualDistributionLastClaimRequest,
+  responseType: platform_pb.GetTokenPerpetualDistributionLastClaimResponse
 };
 
 Platform.getTokenTotalSupply = {
@@ -395,6 +440,114 @@ Platform.getGroupActionSigners = {
   responseStream: false,
   requestType: platform_pb.GetGroupActionSignersRequest,
   responseType: platform_pb.GetGroupActionSignersResponse
+};
+
+Platform.getAddressInfo = {
+  methodName: "getAddressInfo",
+  service: Platform,
+  requestStream: false,
+  responseStream: false,
+  requestType: platform_pb.GetAddressInfoRequest,
+  responseType: platform_pb.GetAddressInfoResponse
+};
+
+Platform.getAddressesInfos = {
+  methodName: "getAddressesInfos",
+  service: Platform,
+  requestStream: false,
+  responseStream: false,
+  requestType: platform_pb.GetAddressesInfosRequest,
+  responseType: platform_pb.GetAddressesInfosResponse
+};
+
+Platform.getAddressesTrunkState = {
+  methodName: "getAddressesTrunkState",
+  service: Platform,
+  requestStream: false,
+  responseStream: false,
+  requestType: platform_pb.GetAddressesTrunkStateRequest,
+  responseType: platform_pb.GetAddressesTrunkStateResponse
+};
+
+Platform.getAddressesBranchState = {
+  methodName: "getAddressesBranchState",
+  service: Platform,
+  requestStream: false,
+  responseStream: false,
+  requestType: platform_pb.GetAddressesBranchStateRequest,
+  responseType: platform_pb.GetAddressesBranchStateResponse
+};
+
+Platform.getRecentAddressBalanceChanges = {
+  methodName: "getRecentAddressBalanceChanges",
+  service: Platform,
+  requestStream: false,
+  responseStream: false,
+  requestType: platform_pb.GetRecentAddressBalanceChangesRequest,
+  responseType: platform_pb.GetRecentAddressBalanceChangesResponse
+};
+
+Platform.getRecentCompactedAddressBalanceChanges = {
+  methodName: "getRecentCompactedAddressBalanceChanges",
+  service: Platform,
+  requestStream: false,
+  responseStream: false,
+  requestType: platform_pb.GetRecentCompactedAddressBalanceChangesRequest,
+  responseType: platform_pb.GetRecentCompactedAddressBalanceChangesResponse
+};
+
+Platform.getShieldedEncryptedNotes = {
+  methodName: "getShieldedEncryptedNotes",
+  service: Platform,
+  requestStream: false,
+  responseStream: false,
+  requestType: platform_pb.GetShieldedEncryptedNotesRequest,
+  responseType: platform_pb.GetShieldedEncryptedNotesResponse
+};
+
+Platform.getShieldedAnchors = {
+  methodName: "getShieldedAnchors",
+  service: Platform,
+  requestStream: false,
+  responseStream: false,
+  requestType: platform_pb.GetShieldedAnchorsRequest,
+  responseType: platform_pb.GetShieldedAnchorsResponse
+};
+
+Platform.getMostRecentShieldedAnchor = {
+  methodName: "getMostRecentShieldedAnchor",
+  service: Platform,
+  requestStream: false,
+  responseStream: false,
+  requestType: platform_pb.GetMostRecentShieldedAnchorRequest,
+  responseType: platform_pb.GetMostRecentShieldedAnchorResponse
+};
+
+Platform.getShieldedPoolState = {
+  methodName: "getShieldedPoolState",
+  service: Platform,
+  requestStream: false,
+  responseStream: false,
+  requestType: platform_pb.GetShieldedPoolStateRequest,
+  responseType: platform_pb.GetShieldedPoolStateResponse
+};
+
+Platform.getShieldedNotesCount = {
+  methodName: "getShieldedNotesCount",
+  service: Platform,
+  requestStream: false,
+  responseStream: false,
+  requestType: platform_pb.GetShieldedNotesCountRequest,
+  responseType: platform_pb.GetShieldedNotesCountResponse
+};
+
+Platform.getShieldedNullifiers = {
+  methodName: "getShieldedNullifiers",
+  service: Platform,
+  requestStream: false,
+  responseStream: false,
+  requestType: platform_pb.GetShieldedNullifiersRequest,
+  responseType: platform_pb.GetShieldedNullifiersResponse
 };
 
 exports.Platform = Platform;
@@ -838,6 +991,37 @@ PlatformClient.prototype.getDataContracts = function getDataContracts(requestMes
   };
 };
 
+PlatformClient.prototype.getDocumentHistory = function getDocumentHistory(requestMessage, metadata, callback) {
+  if (arguments.length === 2) {
+    callback = arguments[1];
+  }
+  var client = grpc.unary(Platform.getDocumentHistory, {
+    request: requestMessage,
+    host: this.serviceHost,
+    metadata: metadata,
+    transport: this.options.transport,
+    debug: this.options.debug,
+    onEnd: function (response) {
+      if (callback) {
+        if (response.status !== grpc.Code.OK) {
+          var err = new Error(response.statusMessage);
+          err.code = response.status;
+          err.metadata = response.trailers;
+          callback(err, null);
+        } else {
+          callback(null, response.message);
+        }
+      }
+    }
+  });
+  return {
+    cancel: function () {
+      callback = null;
+      client.close();
+    }
+  };
+};
+
 PlatformClient.prototype.getDocuments = function getDocuments(requestMessage, metadata, callback) {
   if (arguments.length === 2) {
     callback = arguments[1];
@@ -874,6 +1058,37 @@ PlatformClient.prototype.getIdentityByPublicKeyHash = function getIdentityByPubl
     callback = arguments[1];
   }
   var client = grpc.unary(Platform.getIdentityByPublicKeyHash, {
+    request: requestMessage,
+    host: this.serviceHost,
+    metadata: metadata,
+    transport: this.options.transport,
+    debug: this.options.debug,
+    onEnd: function (response) {
+      if (callback) {
+        if (response.status !== grpc.Code.OK) {
+          var err = new Error(response.statusMessage);
+          err.code = response.status;
+          err.metadata = response.trailers;
+          callback(err, null);
+        } else {
+          callback(null, response.message);
+        }
+      }
+    }
+  });
+  return {
+    cancel: function () {
+      callback = null;
+      client.close();
+    }
+  };
+};
+
+PlatformClient.prototype.getIdentityByNonUniquePublicKeyHash = function getIdentityByNonUniquePublicKeyHash(requestMessage, metadata, callback) {
+  if (arguments.length === 2) {
+    callback = arguments[1];
+  }
+  var client = grpc.unary(Platform.getIdentityByNonUniquePublicKeyHash, {
     request: requestMessage,
     host: this.serviceHost,
     metadata: metadata,
@@ -1029,6 +1244,37 @@ PlatformClient.prototype.getEpochsInfo = function getEpochsInfo(requestMessage, 
     callback = arguments[1];
   }
   var client = grpc.unary(Platform.getEpochsInfo, {
+    request: requestMessage,
+    host: this.serviceHost,
+    metadata: metadata,
+    transport: this.options.transport,
+    debug: this.options.debug,
+    onEnd: function (response) {
+      if (callback) {
+        if (response.status !== grpc.Code.OK) {
+          var err = new Error(response.statusMessage);
+          err.code = response.status;
+          err.metadata = response.trailers;
+          callback(err, null);
+        } else {
+          callback(null, response.message);
+        }
+      }
+    }
+  });
+  return {
+    cancel: function () {
+      callback = null;
+      client.close();
+    }
+  };
+};
+
+PlatformClient.prototype.getFinalizedEpochInfos = function getFinalizedEpochInfos(requestMessage, metadata, callback) {
+  if (arguments.length === 2) {
+    callback = arguments[1];
+  }
+  var client = grpc.unary(Platform.getFinalizedEpochInfos, {
     request: requestMessage,
     host: this.serviceHost,
     metadata: metadata,
@@ -1551,11 +1797,73 @@ PlatformClient.prototype.getTokenDirectPurchasePrices = function getTokenDirectP
   };
 };
 
+PlatformClient.prototype.getTokenContractInfo = function getTokenContractInfo(requestMessage, metadata, callback) {
+  if (arguments.length === 2) {
+    callback = arguments[1];
+  }
+  var client = grpc.unary(Platform.getTokenContractInfo, {
+    request: requestMessage,
+    host: this.serviceHost,
+    metadata: metadata,
+    transport: this.options.transport,
+    debug: this.options.debug,
+    onEnd: function (response) {
+      if (callback) {
+        if (response.status !== grpc.Code.OK) {
+          var err = new Error(response.statusMessage);
+          err.code = response.status;
+          err.metadata = response.trailers;
+          callback(err, null);
+        } else {
+          callback(null, response.message);
+        }
+      }
+    }
+  });
+  return {
+    cancel: function () {
+      callback = null;
+      client.close();
+    }
+  };
+};
+
 PlatformClient.prototype.getTokenPreProgrammedDistributions = function getTokenPreProgrammedDistributions(requestMessage, metadata, callback) {
   if (arguments.length === 2) {
     callback = arguments[1];
   }
   var client = grpc.unary(Platform.getTokenPreProgrammedDistributions, {
+    request: requestMessage,
+    host: this.serviceHost,
+    metadata: metadata,
+    transport: this.options.transport,
+    debug: this.options.debug,
+    onEnd: function (response) {
+      if (callback) {
+        if (response.status !== grpc.Code.OK) {
+          var err = new Error(response.statusMessage);
+          err.code = response.status;
+          err.metadata = response.trailers;
+          callback(err, null);
+        } else {
+          callback(null, response.message);
+        }
+      }
+    }
+  });
+  return {
+    cancel: function () {
+      callback = null;
+      client.close();
+    }
+  };
+};
+
+PlatformClient.prototype.getTokenPerpetualDistributionLastClaim = function getTokenPerpetualDistributionLastClaim(requestMessage, metadata, callback) {
+  if (arguments.length === 2) {
+    callback = arguments[1];
+  }
+  var client = grpc.unary(Platform.getTokenPerpetualDistributionLastClaim, {
     request: requestMessage,
     host: this.serviceHost,
     metadata: metadata,
@@ -1711,6 +2019,378 @@ PlatformClient.prototype.getGroupActionSigners = function getGroupActionSigners(
     callback = arguments[1];
   }
   var client = grpc.unary(Platform.getGroupActionSigners, {
+    request: requestMessage,
+    host: this.serviceHost,
+    metadata: metadata,
+    transport: this.options.transport,
+    debug: this.options.debug,
+    onEnd: function (response) {
+      if (callback) {
+        if (response.status !== grpc.Code.OK) {
+          var err = new Error(response.statusMessage);
+          err.code = response.status;
+          err.metadata = response.trailers;
+          callback(err, null);
+        } else {
+          callback(null, response.message);
+        }
+      }
+    }
+  });
+  return {
+    cancel: function () {
+      callback = null;
+      client.close();
+    }
+  };
+};
+
+PlatformClient.prototype.getAddressInfo = function getAddressInfo(requestMessage, metadata, callback) {
+  if (arguments.length === 2) {
+    callback = arguments[1];
+  }
+  var client = grpc.unary(Platform.getAddressInfo, {
+    request: requestMessage,
+    host: this.serviceHost,
+    metadata: metadata,
+    transport: this.options.transport,
+    debug: this.options.debug,
+    onEnd: function (response) {
+      if (callback) {
+        if (response.status !== grpc.Code.OK) {
+          var err = new Error(response.statusMessage);
+          err.code = response.status;
+          err.metadata = response.trailers;
+          callback(err, null);
+        } else {
+          callback(null, response.message);
+        }
+      }
+    }
+  });
+  return {
+    cancel: function () {
+      callback = null;
+      client.close();
+    }
+  };
+};
+
+PlatformClient.prototype.getAddressesInfos = function getAddressesInfos(requestMessage, metadata, callback) {
+  if (arguments.length === 2) {
+    callback = arguments[1];
+  }
+  var client = grpc.unary(Platform.getAddressesInfos, {
+    request: requestMessage,
+    host: this.serviceHost,
+    metadata: metadata,
+    transport: this.options.transport,
+    debug: this.options.debug,
+    onEnd: function (response) {
+      if (callback) {
+        if (response.status !== grpc.Code.OK) {
+          var err = new Error(response.statusMessage);
+          err.code = response.status;
+          err.metadata = response.trailers;
+          callback(err, null);
+        } else {
+          callback(null, response.message);
+        }
+      }
+    }
+  });
+  return {
+    cancel: function () {
+      callback = null;
+      client.close();
+    }
+  };
+};
+
+PlatformClient.prototype.getAddressesTrunkState = function getAddressesTrunkState(requestMessage, metadata, callback) {
+  if (arguments.length === 2) {
+    callback = arguments[1];
+  }
+  var client = grpc.unary(Platform.getAddressesTrunkState, {
+    request: requestMessage,
+    host: this.serviceHost,
+    metadata: metadata,
+    transport: this.options.transport,
+    debug: this.options.debug,
+    onEnd: function (response) {
+      if (callback) {
+        if (response.status !== grpc.Code.OK) {
+          var err = new Error(response.statusMessage);
+          err.code = response.status;
+          err.metadata = response.trailers;
+          callback(err, null);
+        } else {
+          callback(null, response.message);
+        }
+      }
+    }
+  });
+  return {
+    cancel: function () {
+      callback = null;
+      client.close();
+    }
+  };
+};
+
+PlatformClient.prototype.getAddressesBranchState = function getAddressesBranchState(requestMessage, metadata, callback) {
+  if (arguments.length === 2) {
+    callback = arguments[1];
+  }
+  var client = grpc.unary(Platform.getAddressesBranchState, {
+    request: requestMessage,
+    host: this.serviceHost,
+    metadata: metadata,
+    transport: this.options.transport,
+    debug: this.options.debug,
+    onEnd: function (response) {
+      if (callback) {
+        if (response.status !== grpc.Code.OK) {
+          var err = new Error(response.statusMessage);
+          err.code = response.status;
+          err.metadata = response.trailers;
+          callback(err, null);
+        } else {
+          callback(null, response.message);
+        }
+      }
+    }
+  });
+  return {
+    cancel: function () {
+      callback = null;
+      client.close();
+    }
+  };
+};
+
+PlatformClient.prototype.getRecentAddressBalanceChanges = function getRecentAddressBalanceChanges(requestMessage, metadata, callback) {
+  if (arguments.length === 2) {
+    callback = arguments[1];
+  }
+  var client = grpc.unary(Platform.getRecentAddressBalanceChanges, {
+    request: requestMessage,
+    host: this.serviceHost,
+    metadata: metadata,
+    transport: this.options.transport,
+    debug: this.options.debug,
+    onEnd: function (response) {
+      if (callback) {
+        if (response.status !== grpc.Code.OK) {
+          var err = new Error(response.statusMessage);
+          err.code = response.status;
+          err.metadata = response.trailers;
+          callback(err, null);
+        } else {
+          callback(null, response.message);
+        }
+      }
+    }
+  });
+  return {
+    cancel: function () {
+      callback = null;
+      client.close();
+    }
+  };
+};
+
+PlatformClient.prototype.getRecentCompactedAddressBalanceChanges = function getRecentCompactedAddressBalanceChanges(requestMessage, metadata, callback) {
+  if (arguments.length === 2) {
+    callback = arguments[1];
+  }
+  var client = grpc.unary(Platform.getRecentCompactedAddressBalanceChanges, {
+    request: requestMessage,
+    host: this.serviceHost,
+    metadata: metadata,
+    transport: this.options.transport,
+    debug: this.options.debug,
+    onEnd: function (response) {
+      if (callback) {
+        if (response.status !== grpc.Code.OK) {
+          var err = new Error(response.statusMessage);
+          err.code = response.status;
+          err.metadata = response.trailers;
+          callback(err, null);
+        } else {
+          callback(null, response.message);
+        }
+      }
+    }
+  });
+  return {
+    cancel: function () {
+      callback = null;
+      client.close();
+    }
+  };
+};
+
+PlatformClient.prototype.getShieldedEncryptedNotes = function getShieldedEncryptedNotes(requestMessage, metadata, callback) {
+  if (arguments.length === 2) {
+    callback = arguments[1];
+  }
+  var client = grpc.unary(Platform.getShieldedEncryptedNotes, {
+    request: requestMessage,
+    host: this.serviceHost,
+    metadata: metadata,
+    transport: this.options.transport,
+    debug: this.options.debug,
+    onEnd: function (response) {
+      if (callback) {
+        if (response.status !== grpc.Code.OK) {
+          var err = new Error(response.statusMessage);
+          err.code = response.status;
+          err.metadata = response.trailers;
+          callback(err, null);
+        } else {
+          callback(null, response.message);
+        }
+      }
+    }
+  });
+  return {
+    cancel: function () {
+      callback = null;
+      client.close();
+    }
+  };
+};
+
+PlatformClient.prototype.getShieldedAnchors = function getShieldedAnchors(requestMessage, metadata, callback) {
+  if (arguments.length === 2) {
+    callback = arguments[1];
+  }
+  var client = grpc.unary(Platform.getShieldedAnchors, {
+    request: requestMessage,
+    host: this.serviceHost,
+    metadata: metadata,
+    transport: this.options.transport,
+    debug: this.options.debug,
+    onEnd: function (response) {
+      if (callback) {
+        if (response.status !== grpc.Code.OK) {
+          var err = new Error(response.statusMessage);
+          err.code = response.status;
+          err.metadata = response.trailers;
+          callback(err, null);
+        } else {
+          callback(null, response.message);
+        }
+      }
+    }
+  });
+  return {
+    cancel: function () {
+      callback = null;
+      client.close();
+    }
+  };
+};
+
+PlatformClient.prototype.getMostRecentShieldedAnchor = function getMostRecentShieldedAnchor(requestMessage, metadata, callback) {
+  if (arguments.length === 2) {
+    callback = arguments[1];
+  }
+  var client = grpc.unary(Platform.getMostRecentShieldedAnchor, {
+    request: requestMessage,
+    host: this.serviceHost,
+    metadata: metadata,
+    transport: this.options.transport,
+    debug: this.options.debug,
+    onEnd: function (response) {
+      if (callback) {
+        if (response.status !== grpc.Code.OK) {
+          var err = new Error(response.statusMessage);
+          err.code = response.status;
+          err.metadata = response.trailers;
+          callback(err, null);
+        } else {
+          callback(null, response.message);
+        }
+      }
+    }
+  });
+  return {
+    cancel: function () {
+      callback = null;
+      client.close();
+    }
+  };
+};
+
+PlatformClient.prototype.getShieldedPoolState = function getShieldedPoolState(requestMessage, metadata, callback) {
+  if (arguments.length === 2) {
+    callback = arguments[1];
+  }
+  var client = grpc.unary(Platform.getShieldedPoolState, {
+    request: requestMessage,
+    host: this.serviceHost,
+    metadata: metadata,
+    transport: this.options.transport,
+    debug: this.options.debug,
+    onEnd: function (response) {
+      if (callback) {
+        if (response.status !== grpc.Code.OK) {
+          var err = new Error(response.statusMessage);
+          err.code = response.status;
+          err.metadata = response.trailers;
+          callback(err, null);
+        } else {
+          callback(null, response.message);
+        }
+      }
+    }
+  });
+  return {
+    cancel: function () {
+      callback = null;
+      client.close();
+    }
+  };
+};
+
+PlatformClient.prototype.getShieldedNotesCount = function getShieldedNotesCount(requestMessage, metadata, callback) {
+  if (arguments.length === 2) {
+    callback = arguments[1];
+  }
+  var client = grpc.unary(Platform.getShieldedNotesCount, {
+    request: requestMessage,
+    host: this.serviceHost,
+    metadata: metadata,
+    transport: this.options.transport,
+    debug: this.options.debug,
+    onEnd: function (response) {
+      if (callback) {
+        if (response.status !== grpc.Code.OK) {
+          var err = new Error(response.statusMessage);
+          err.code = response.status;
+          err.metadata = response.trailers;
+          callback(err, null);
+        } else {
+          callback(null, response.message);
+        }
+      }
+    }
+  });
+  return {
+    cancel: function () {
+      callback = null;
+      client.close();
+    }
+  };
+};
+
+PlatformClient.prototype.getShieldedNullifiers = function getShieldedNullifiers(requestMessage, metadata, callback) {
+  if (arguments.length === 2) {
+    callback = arguments[1];
+  }
+  var client = grpc.unary(Platform.getShieldedNullifiers, {
     request: requestMessage,
     host: this.serviceHost,
     metadata: metadata,

@@ -7,7 +7,7 @@ use crate::execution::types::block_execution_context::v0::{
 };
 use crate::platform_types::block_execution_outcome;
 use crate::platform_types::block_proposal::v0::BlockProposal;
-use crate::platform_types::platform_state::v0::PlatformStateV0Methods;
+use crate::platform_types::platform_state::PlatformStateV0Methods;
 use crate::platform_types::state_transitions_processing_result::StateTransitionExecutionResult;
 use crate::rpc::core::CoreRPCLike;
 use dpp::dashcore::hashes::Hash;
@@ -36,7 +36,7 @@ where
 
     let platform_state = app.platform().state.load();
 
-    // Verify that Platform State corresponds to Drive commited state
+    // Verify that Platform State corresponds to Drive committed state
     let platform_state_app_hash = platform_state
         .last_committed_block_app_hash()
         .unwrap_or_default();
@@ -62,7 +62,7 @@ where
     let config = &app.platform().config;
 
     #[allow(clippy::collapsible_if)]
-    if !(config.network == Network::Dash
+    if !(config.network == Network::Mainnet
         && config.abci.chain_id == "evo1"
         && request.height < 33000)
     {
@@ -192,15 +192,22 @@ where
     let mut tx_results = Vec::new();
     let mut tx_records = Vec::new();
 
-    for (state_transition_execution_result, raw_state_transition) in state_transitions_result
-        .into_execution_results()
-        .into_iter()
-        .zip(request.txs)
+    let execution_results = state_transitions_result.into_execution_results();
+    // sanity check
+    if execution_results.len() != request.txs.len() {
+        return Err(Error::Execution(
+            crate::error::execution::ExecutionError::CorruptedCodeExecution(
+                "Size of execution results must match number of transactions in request",
+            ),
+        ));
+    }
+    for (state_transition_execution_result, raw_state_transition) in
+        execution_results.into_iter().zip(request.txs)
     {
         let tx_action = match &state_transition_execution_result {
-            StateTransitionExecutionResult::SuccessfulExecution(..) => TxAction::Unmodified,
+            StateTransitionExecutionResult::SuccessfulExecution { .. } => TxAction::Unmodified,
             // We have identity to pay for the state transition, so we keep it in the block
-            StateTransitionExecutionResult::PaidConsensusError(..) => TxAction::Unmodified,
+            StateTransitionExecutionResult::PaidConsensusError { .. } => TxAction::Unmodified,
             // We don't have any associated identity to pay for the state transition,
             // so we remove it from the block to prevent spam attacks.
             // Such state transitions must be invalidated by check tx, but they might

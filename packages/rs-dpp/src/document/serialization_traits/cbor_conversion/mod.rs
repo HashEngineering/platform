@@ -1,6 +1,6 @@
 mod v0;
 
-use crate::document::{Document, DocumentV0};
+use crate::document::{Document, v0::DocumentV0};
 use crate::util::deserializer;
 use crate::util::deserializer::SplitFeatureVersionOutcome;
 use crate::version::PlatformVersion;

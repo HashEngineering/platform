@@ -15,10 +15,10 @@ use dpp::state_transition::StateTransitionLike;
 use dpp::voting::votes::Vote;
 use dpp::ProtocolError;
 
-/// Waitable trait provides a wait to wait for a response of a state transition after it has been broadcast and
+/// Waitable trait provides a way to wait for a response of a state transition after it has been broadcast and
 /// receive altered objects.
 ///
-/// This is simple conveniance trait wrapping the [`BroadcastStateTransition::wait_for_response`] method.
+/// This is a simple convenience trait wrapping the [`BroadcastStateTransition::wait_for_response`] method.
 #[async_trait::async_trait]
 pub trait Waitable: Sized {
     async fn wait_for_response(
@@ -101,7 +101,7 @@ impl Waitable for Identity {
             return Identity::fetch(sdk, identity_id)
                 .await?
                 .ok_or_else(|| {
-                    Error::DapiClientError(
+                    Error::Generic(
                         "identity not found after update was confirmed on platform".to_string(),
                     )
                 });
@@ -127,7 +127,7 @@ impl Waitable for Identity {
                     "attempt to create identity that already exists"
                 );
                 let identity = Identity::fetch(sdk, identity_id).await?;
-                identity.ok_or(Error::DapiClientError(
+                identity.ok_or(Error::Generic(
                     "identity was proved to not exist but was said to exist".to_string(),
                 ))
             }

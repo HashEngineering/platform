@@ -54,7 +54,7 @@ impl Sdk {
     /// - The transition signing fails
     /// - Broadcasting the transition fails
     /// - The proof verification returns an unexpected result type
-    pub async fn token_unfreeze_identity<S: Signer>(
+    pub async fn token_unfreeze_identity<S: Signer<IdentityPublicKey>>(
         &self,
         unfreeze_tokens_transition_builder: TokenUnfreezeTransitionBuilder,
         signing_key: &IdentityPublicKey,
@@ -62,12 +62,14 @@ impl Sdk {
     ) -> Result<UnfreezeResult, Error> {
         let platform_version = self.version();
 
+        let put_settings = unfreeze_tokens_transition_builder.settings;
+
         let state_transition = unfreeze_tokens_transition_builder
             .sign(self, signing_key, signer, platform_version)
             .await?;
 
         let proof_result = state_transition
-            .broadcast_and_wait::<StateTransitionProofResult>(self, None)
+            .broadcast_and_wait::<StateTransitionProofResult>(self, put_settings)
             .await?;
 
         match proof_result {
@@ -75,7 +77,7 @@ impl Sdk {
                 Ok(UnfreezeResult::IdentityInfo(owner_id_result, info))
             }
             StateTransitionProofResult::VerifiedTokenActionWithDocument(doc) => {
-                // This means the token keeps freezing history
+                // This means the token keeps unfreezing history
                 Ok(UnfreezeResult::HistoricalDocument(doc))
             }
             StateTransitionProofResult::VerifiedTokenGroupActionWithDocument(power, doc) => {

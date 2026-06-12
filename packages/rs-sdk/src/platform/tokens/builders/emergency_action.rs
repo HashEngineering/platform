@@ -16,7 +16,7 @@ use dpp::tokens::emergency_action::TokenEmergencyAction;
 use dpp::version::PlatformVersion;
 use std::sync::Arc;
 
-/// A builder to configure and broadcast emergency action transitions
+/// A builder to configure and broadcast token emergency action transitions
 pub struct TokenEmergencyActionTransitionBuilder {
     pub data_contract: Arc<DataContract>,
     pub token_position: TokenContractPosition,
@@ -30,7 +30,7 @@ pub struct TokenEmergencyActionTransitionBuilder {
 }
 
 impl TokenEmergencyActionTransitionBuilder {
-    /// Start building a pause tokens request for the provided DataContract.
+    /// Start building a pause token transition for the provided DataContract.
     ///
     /// # Arguments
     ///
@@ -59,7 +59,7 @@ impl TokenEmergencyActionTransitionBuilder {
         }
     }
 
-    /// Start building a resume tokens request for the provided DataContract.
+    /// Start building a resume token transition for the provided DataContract.
     ///
     /// # Arguments
     ///
@@ -180,7 +180,7 @@ impl TokenEmergencyActionTransitionBuilder {
         self,
         sdk: &Sdk,
         identity_public_key: &IdentityPublicKey,
-        signer: &impl Signer,
+        signer: &impl Signer<IdentityPublicKey>,
         platform_version: &PlatformVersion,
     ) -> Result<StateTransition, Error> {
         let token_id = Identifier::from(calculate_token_id(
@@ -211,7 +211,8 @@ impl TokenEmergencyActionTransitionBuilder {
             signer,
             platform_version,
             self.state_transition_creation_options,
-        )?;
+        )
+        .await?;
 
         Ok(state_transition)
     }

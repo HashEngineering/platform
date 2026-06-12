@@ -10,6 +10,8 @@ pub use crate::identity::identity_public_key::security_level::SecurityLevel;
 
 use bincode::{Decode, Encode};
 
+#[cfg(feature = "json-conversion")]
+use crate::serialization::json_safe_fields;
 use platform_value::types::binary_data::BinaryData;
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +23,7 @@ use crate::identity::{identity_public_key::KeyID, identity_public_key::Timestamp
 #[cfg(feature = "state-transitions")]
 use crate::state_transition::public_key_in_creation::v0::IdentityPublicKeyInCreationV0;
 
+#[cfg_attr(feature = "json-conversion", json_safe_fields)]
 #[derive(
     Default,
     Debug,

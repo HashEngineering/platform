@@ -166,6 +166,7 @@ impl ErrorWithCode for BasicError {
             Self::InvalidTokenAmountError(_) => 10458,
             Self::InvalidTokenNoteTooBigError(_) => 10459,
             Self::TokenNoteOnlyAllowedWhenProposerError(_) => 10460,
+            Self::TokenPricingScheduleEmptyError(_) => 10461,
 
             // Identity Errors: 10500-10599
             Self::DuplicatedIdentityPublicKeyBasicError(_) => 10500,
@@ -189,9 +190,9 @@ impl ErrorWithCode for BasicError {
             Self::TooManyMasterPublicKeyError(_) => 10518,
             Self::InvalidIdentityPublicKeySecurityLevelError(_) => 10519,
             Self::InvalidIdentityKeySignatureError { .. } => 10520,
-            Self::InvalidIdentityCreditWithdrawalTransitionOutputScriptError(_) => 10521,
-            Self::InvalidIdentityCreditWithdrawalTransitionCoreFeeError(_) => 10522,
-            Self::NotImplementedIdentityCreditWithdrawalTransitionPoolingError(_) => 10523,
+            Self::InvalidCreditWithdrawalTransitionOutputScriptError(_) => 10521,
+            Self::InvalidCreditWithdrawalTransitionCoreFeeError(_) => 10522,
+            Self::NotImplementedCreditWithdrawalTransitionPoolingError(_) => 10523,
             Self::InvalidIdentityCreditTransferAmountError(_) => 10524,
             Self::InvalidIdentityCreditWithdrawalTransitionAmountError(_) => 10525,
             Self::InvalidIdentityUpdateTransitionEmptyError(_) => 10526,
@@ -202,14 +203,46 @@ impl ErrorWithCode for BasicError {
             Self::IdentityAssetLockStateTransitionReplayError(_) => 10531,
             Self::WithdrawalOutputScriptNotAllowedWhenSigningWithOwnerKeyError(_) => 10532,
             Self::InvalidKeyPurposeForContractBoundsError(_) => 10533,
+            Self::IdentityAssetLockTransactionTooManyInputsError(_) => 10534,
 
             // State Transition Errors: 10600-10699
             Self::InvalidStateTransitionTypeError { .. } => 10600,
             Self::MissingStateTransitionTypeError { .. } => 10601,
             Self::StateTransitionMaxSizeExceededError { .. } => 10602,
+            Self::StateTransitionNotActiveError(_) => 10603,
 
             // General Errors 10700-10799
             Self::OverflowError(_) => 10700,
+
+            // Address Errors: 10800-10899
+            Self::TransitionOverMaxInputsError(_) => 10800,
+            Self::TransitionOverMaxOutputsError(_) => 10801,
+            Self::InputWitnessCountMismatchError(_) => 10802,
+            Self::TransitionNoInputsError(_) => 10803,
+            Self::TransitionNoOutputsError(_) => 10804,
+            Self::FeeStrategyEmptyError(_) => 10805,
+            Self::FeeStrategyDuplicateError(_) => 10806,
+            Self::FeeStrategyIndexOutOfBoundsError(_) => 10807,
+            Self::FeeStrategyTooManyStepsError(_) => 10808,
+            Self::InputBelowMinimumError(_) => 10809,
+            Self::OutputBelowMinimumError(_) => 10810,
+            Self::InputOutputBalanceMismatchError(_) => 10811,
+            Self::OutputsNotGreaterThanInputsError(_) => 10812,
+            Self::WithdrawalBalanceMismatchError(_) => 10813,
+            Self::InsufficientFundingAmountError(_) => 10814,
+            Self::InputsNotLessThanOutputsError(_) => 10815,
+            Self::OutputAddressAlsoInputError(_) => 10816,
+            Self::InvalidRemainderOutputCountError(_) => 10817,
+            Self::WithdrawalBelowMinAmountError(_) => 10818,
+            // Shielded transition errors (10819-10827)
+            Self::ShieldedNoActionsError(_) => 10819,
+            Self::ShieldedEmptyProofError(_) => 10820,
+            Self::ShieldedZeroAnchorError(_) => 10821,
+            Self::ShieldedInvalidValueBalanceError(_) => 10822,
+            Self::ShieldedEncryptedNoteSizeMismatchError(_) => 10823,
+            Self::ShieldedTooManyActionsError(_) => 10825,
+            Self::ShieldedImplicitFeeCapExceededError(_) => 10826,
+            Self::ShieldedInvalidDenominationError(_) => 10827,
         }
     }
 }
@@ -229,6 +262,7 @@ impl ErrorWithCode for SignatureError {
             Self::BasicECDSAError(_) => 20009,
             Self::BasicBLSError(_) => 20010,
             Self::InvalidSignaturePublicKeyPurposeError(_) => 20011,
+            Self::UncompressedPublicKeyNotAllowedError(_) => 20012,
         }
     }
 }
@@ -311,6 +345,12 @@ impl ErrorWithCode for StateError {
             // Data trigger errors: 40500-40699
             Self::DataTriggerError(ref e) => e.code(),
 
+            // Address errors
+            Self::AddressDoesNotExistError(_) => 40600,
+            Self::AddressNotEnoughFundsError(_) => 40601,
+            Self::AddressesNotEnoughFundsError(_) => 40602,
+            Self::AddressInvalidNonceError(_) => 40603,
+
             // Token errors: 40700-40799
             Self::IdentityDoesNotHaveEnoughTokenBalanceError(_) => 40700,
             Self::UnauthorizedTokenActionError(_) => 40701,
@@ -341,6 +381,13 @@ impl ErrorWithCode for StateError {
             Self::GroupActionAlreadyCompletedError(_) => 40802,
             Self::GroupActionAlreadySignedByIdentityError(_) => 40803,
             Self::ModificationOfGroupActionMainParametersNotPermittedError(_) => 40804,
+
+            // Shielded errors: 40900-40999
+            Self::InvalidAnchorError(_) => 40900,
+            Self::NullifierAlreadySpentError(_) => 40901,
+            Self::InvalidShieldedProofError(_) => 40902,
+            Self::InsufficientPoolNotesError(_) => 40903,
+            Self::InsufficientShieldedFeeError(_) => 40904,
         }
     }
 }

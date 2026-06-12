@@ -11,17 +11,20 @@ pub mod evonode_status;
 pub mod groups;
 /// Identity token balance
 pub mod identity_token_balance;
+/// Token contract info
+pub mod token_contract_info;
 /// Token info
 pub mod token_info;
 /// Token status
 pub mod token_status;
 
+use dpp::address_funds::PlatformAddress;
 use dpp::block::block_info::BlockInfo;
 use dpp::core_types::validator_set::ValidatorSet;
 use dpp::data_contract::document_type::DocumentType;
 use dpp::fee::Credits;
 use platform_value::Value;
-use dpp::prelude::{IdentityNonce, TimestampMillis};
+use dpp::prelude::{AddressNonce, IdentityNonce, TimestampMillis};
 use dpp::tokens::token_pricing_schedule::TokenPricingSchedule;
 use dpp::version::PlatformVersion;
 pub use dpp::version::ProtocolVersionVoteCount;
@@ -41,7 +44,6 @@ use dpp::{
     identity::KeyID,
     prelude::{DataContract, IdentityPublicKey, Revision},
     util::deserializer::ProtocolVersion,
-    ProtocolError,
 };
 use drive::grovedb::query_result_type::Path;
 use dpp::platform_value;
@@ -55,7 +57,7 @@ use dpp::dashcore::hashes::Hash;
 #[cfg(feature = "mocks")]
 use {
     bincode::{Decode, Encode},
-    dpp::version as platform_version,
+    dpp::{version as platform_version, ProtocolError},
     platform_serialization::{PlatformVersionEncode, PlatformVersionedDecode},
     platform_serialization_derive::{PlatformDeserialize, PlatformSerialize},
 };
@@ -106,11 +108,35 @@ pub type RetrievedValues<K, I> = IndexMap<K, I>;
 ///
 /// Contains a map of data contract revisions to data contracts.
 pub type DataContractHistory = RetrievedValues<u64, DataContract>;
+/// History of a document.
+///
+/// Contains a map of revision timestamps to documents.
+pub type DocumentHistory = RetrievedValues<u64, Document>;
 /// Multiple data contracts.
 ///
 /// Mapping between data contract IDs and data contracts.
 /// If data contract is not found, it is represented as `None`.
 pub type DataContracts = RetrievedObjects<Identifier, DataContract>;
+
+/// Information about a Platform address including its nonce and balance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "mocks",
+    derive(Encode, Decode, PlatformSerialize, PlatformDeserialize,),
+    platform_serialize(unversioned)
+)]
+pub struct AddressInfo {
+    /// Address that owns the balance.
+    pub address: PlatformAddress,
+    /// Nonce associated with the address.
+    pub nonce: AddressNonce,
+    /// Balance stored for the address.
+    pub balance: Credits,
+}
+
+/// Mapping between platform addresses and their balance/nonce information.
+/// Missing entries are represented as `None`.
+pub type AddressInfos = RetrievedObjects<PlatformAddress, AddressInfo>;
 
 /// Multiple contenders for a vote resolution.
 ///
@@ -317,7 +343,7 @@ impl PlatformVersionEncode for ContestedResources {
 
 #[cfg(feature = "mocks")]
 impl PlatformVersionedDecode for ContestedResources {
-    fn platform_versioned_decode<D: bincode::de::Decoder>(
+    fn platform_versioned_decode<D: bincode::de::Decoder<Context = ()>>(
         decoder: &mut D,
         platform_version: &platform_version::PlatformVersion,
     ) -> Result<Self, bincode::error::DecodeError> {
@@ -348,7 +374,10 @@ impl FromIterator<ContestedResource> for ContestedResources {
     derive(PlatformSerialize, PlatformDeserialize, Encode, Decode),
     platform_serialize(unversioned)
 )]
-pub struct ContestedVote(ContestedDocumentResourceVotePoll, ResourceVoteChoice);
+pub struct ContestedVote(
+    pub ContestedDocumentResourceVotePoll,
+    pub ResourceVoteChoice,
+);
 
 /// Votes casted by some identity.
 
@@ -576,7 +605,7 @@ impl PlatformVersionEncode for MasternodeProtocolVote {
 
 #[cfg(feature = "mocks")]
 impl PlatformVersionedDecode for MasternodeProtocolVote {
-    fn platform_versioned_decode<D: bincode::de::Decoder>(
+    fn platform_versioned_decode<D: bincode::de::Decoder<Context = ()>>(
         decoder: &mut D,
         platform_version: &PlatformVersion,
     ) -> Result<Self, bincode::error::DecodeError> {
@@ -651,3 +680,259 @@ pub struct ProposerBlockCountById(pub u64);
 
 /// Prices for direct purchase of tokens. Retrieved by [TokenPricingSchedule::fetch_many()].
 pub type TokenDirectPurchasePrices = RetrievedObjects<Identifier, TokenPricingSchedule>;
+
+/// Pre-programmed token distributions grouped by timestamp.
+///
+/// Each entry maps a timestamp (in milliseconds) to a collection of
+/// `(Identifier, Credits)` pairs representing the recipients and their token amounts in credits.
+#[derive(Debug, Clone, Default, derive_more::From)]
+#[cfg_attr(
+    feature = "mocks",
+    derive(Encode, Decode, PlatformSerialize, PlatformDeserialize),
+    platform_serialize(unversioned)
+)]
+pub struct TokenPreProgrammedDistributions(
+    pub BTreeMap<TimestampMillis, BTreeMap<Identifier, Credits>>,
+);
+
+impl TokenPreProgrammedDistributions {
+    /// Get the inner map.
+    pub fn into_inner(self) -> BTreeMap<TimestampMillis, BTreeMap<Identifier, Credits>> {
+        self.0
+    }
+}
+
+impl FromIterator<(TimestampMillis, BTreeMap<Identifier, Credits>)>
+    for TokenPreProgrammedDistributions
+{
+    fn from_iter<T: IntoIterator<Item = (TimestampMillis, BTreeMap<Identifier, Credits>)>>(
+        iter: T,
+    ) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+/// Address balance changes for a single block.
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "mocks",
+    derive(Encode, Decode, PlatformSerialize, PlatformDeserialize),
+    platform_serialize(unversioned)
+)]
+pub struct BlockAddressBalanceChanges {
+    /// The block height
+    pub block_height: u64,
+    /// The address balance changes in this block
+    pub changes: BTreeMap<PlatformAddress, dpp::balances::credits::CreditOperation>,
+}
+
+/// Recent address balance changes across multiple blocks.
+#[derive(Debug, Clone, Default, derive_more::From)]
+#[cfg_attr(
+    feature = "mocks",
+    derive(Encode, Decode, PlatformSerialize, PlatformDeserialize),
+    platform_serialize(unversioned)
+)]
+pub struct RecentAddressBalanceChanges(pub Vec<BlockAddressBalanceChanges>);
+
+impl RecentAddressBalanceChanges {
+    /// Get the inner vector
+    pub fn into_inner(self) -> Vec<BlockAddressBalanceChanges> {
+        self.0
+    }
+}
+
+/// Compacted address balance changes for a range of blocks.
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "mocks",
+    derive(Encode, Decode, PlatformSerialize, PlatformDeserialize),
+    platform_serialize(unversioned)
+)]
+pub struct CompactedBlockAddressBalanceChanges {
+    /// The start block height of the compacted range
+    pub start_block_height: u64,
+    /// The end block height of the compacted range
+    pub end_block_height: u64,
+    /// The merged address balance changes for this range
+    pub changes: BTreeMap<PlatformAddress, dpp::balances::credits::BlockAwareCreditOperation>,
+}
+
+/// Compacted address balance changes across multiple ranges.
+#[derive(Debug, Clone, Default, derive_more::From)]
+#[cfg_attr(
+    feature = "mocks",
+    derive(Encode, Decode, PlatformSerialize, PlatformDeserialize),
+    platform_serialize(unversioned)
+)]
+pub struct RecentCompactedAddressBalanceChanges(pub Vec<CompactedBlockAddressBalanceChanges>);
+
+impl RecentCompactedAddressBalanceChanges {
+    /// Get the inner vector
+    pub fn into_inner(self) -> Vec<CompactedBlockAddressBalanceChanges> {
+        self.0
+    }
+}
+
+/// Platform address trunk state for address balance synchronization.
+///
+/// This is a newtype wrapper around [`GroveTrunkQueryResult`](drive::grovedb::GroveTrunkQueryResult)
+/// that represents the result of querying the trunk (top levels) of the address funds tree.
+///
+/// The trunk query returns:
+/// - Elements (addresses with balances) found at the queried depth
+/// - Leaf boundary keys that indicate subtrees requiring further branch queries
+///
+/// This type implements [`FromProof`](crate::FromProof) by delegating to the underlying
+/// `GroveTrunkQueryResult` implementation.
+#[derive(Debug)]
+pub struct PlatformAddressTrunkState(pub drive::grovedb::GroveTrunkQueryResult);
+
+impl PlatformAddressTrunkState {
+    /// Get the inner `GroveTrunkQueryResult`.
+    pub fn into_inner(self) -> drive::grovedb::GroveTrunkQueryResult {
+        self.0
+    }
+}
+
+impl std::ops::Deref for PlatformAddressTrunkState {
+    type Target = drive::grovedb::GroveTrunkQueryResult;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for PlatformAddressTrunkState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+/// Shielded pool total balance
+#[derive(Debug, derive_more::From, Clone, Copy)]
+#[cfg_attr(
+    feature = "mocks",
+    derive(Encode, Decode, PlatformSerialize, PlatformDeserialize),
+    platform_serialize(unversioned)
+)]
+pub struct ShieldedPoolState(pub u64);
+
+/// Total number of notes in the shielded pool commitment tree (leaf count).
+///
+/// Wallets use this as the denominator for a determinate
+/// shielded-sync progress bar. The count IS provable: it is the first
+/// field (`total_count`) of the serialized `CommitmentTree` element
+/// whose bytes are bound into the Merk value hash, so a PathQuery proof
+/// of that element authenticates it against the root hash.
+#[derive(Debug, derive_more::From, Clone, Copy)]
+#[cfg_attr(
+    feature = "mocks",
+    derive(Encode, Decode, PlatformSerialize, PlatformDeserialize),
+    platform_serialize(unversioned)
+)]
+pub struct ShieldedNotesCount(pub u64);
+
+/// A single encrypted note (cmx + encrypted data)
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "mocks",
+    derive(Encode, Decode, PlatformSerialize, PlatformDeserialize),
+    platform_serialize(unversioned)
+)]
+pub struct ShieldedEncryptedNote {
+    /// The note commitment (cmx), 32 bytes
+    pub cmx: Vec<u8>,
+    /// The nullifier (32 bytes), needed for Rho derivation in trial decryption
+    pub nullifier: Vec<u8>,
+    /// The value commitment (cv_net), 32 bytes. Stored unencrypted so a wallet
+    /// can recover the value of an outgoing note via OVK decryption.
+    pub cv_net: Vec<u8>,
+    /// The encrypted note data
+    pub encrypted_note: Vec<u8>,
+}
+
+/// Collection of encrypted notes returned by query.
+///
+/// `total_count` is the on-chain total number of notes in the shielded
+/// `CommitmentTree` at the proven block — the denominator a wallet needs
+/// for a sync progress bar. It is extracted from the SAME note-fetch proof
+/// (the parent CommitmentTree element is always present in that proof), so
+/// every chunk fetch carries the total "for free" with no separate RPC.
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(
+    feature = "mocks",
+    derive(Encode, Decode, PlatformSerialize, PlatformDeserialize),
+    platform_serialize(unversioned)
+)]
+pub struct ShieldedEncryptedNotes {
+    /// The encrypted notes for the requested chunk, in tree order.
+    pub notes: Vec<ShieldedEncryptedNote>,
+    /// On-chain total number of notes in the shielded `CommitmentTree`.
+    /// Stable across a sync; carried on every chunk fetch.
+    pub total_count: u64,
+}
+
+/// Valid anchors for building spend proofs
+#[derive(Debug, Clone, Default, derive_more::From)]
+#[cfg_attr(
+    feature = "mocks",
+    derive(Encode, Decode, PlatformSerialize, PlatformDeserialize),
+    platform_serialize(unversioned)
+)]
+pub struct ShieldedAnchors(pub Vec<[u8; 32]>);
+
+/// The most recent shielded anchor (32 bytes)
+#[derive(Debug, Clone, Copy, derive_more::From)]
+#[cfg_attr(
+    feature = "mocks",
+    derive(Encode, Decode, PlatformSerialize, PlatformDeserialize),
+    platform_serialize(unversioned)
+)]
+pub struct MostRecentShieldedAnchor(pub [u8; 32]);
+
+/// Status of a single nullifier (spent or unspent)
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "mocks",
+    derive(Encode, Decode, PlatformSerialize, PlatformDeserialize),
+    platform_serialize(unversioned)
+)]
+pub struct ShieldedNullifierStatus {
+    /// The nullifier bytes (32 bytes)
+    pub nullifier: [u8; 32],
+    /// Whether this nullifier has been spent
+    pub is_spent: bool,
+}
+
+/// Collection of nullifier statuses returned by query
+#[derive(Debug, Clone, Default, derive_more::From)]
+#[cfg_attr(
+    feature = "mocks",
+    derive(Encode, Decode, PlatformSerialize, PlatformDeserialize),
+    platform_serialize(unversioned)
+)]
+pub struct ShieldedNullifierStatuses(pub Vec<ShieldedNullifierStatus>);
+
+/// Query parameters for encrypted notes (pagination)
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "mocks",
+    derive(Encode, Decode, PlatformSerialize, PlatformDeserialize),
+    platform_serialize(unversioned)
+)]
+pub struct ShieldedEncryptedNotesQuery {
+    /// Starting index in the encrypted notes count tree (inclusive, 0 = from beginning)
+    pub start_index: u64,
+    /// Max number of notes to return
+    pub count: u32,
+}
+
+/// Query parameters for nullifier status check
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "mocks",
+    derive(Encode, Decode, PlatformSerialize, PlatformDeserialize),
+    platform_serialize(unversioned)
+)]
+pub struct ShieldedNullifiersQuery(pub Vec<[u8; 32]>);

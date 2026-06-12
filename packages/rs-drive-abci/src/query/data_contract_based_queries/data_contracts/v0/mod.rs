@@ -2,6 +2,7 @@ use crate::error::query::QueryError;
 use crate::error::Error;
 use crate::platform_types::platform::Platform;
 use crate::platform_types::platform_state::PlatformState;
+use crate::query::response_metadata::CheckpointUsed;
 use crate::query::QueryValidationResult;
 use dapi_grpc::platform::v0::get_data_contracts_request::GetDataContractsRequestV0;
 use dapi_grpc::platform::v0::get_data_contracts_response;
@@ -14,6 +15,8 @@ use dpp::serialization::PlatformSerializableWithPlatformVersion;
 use dpp::validation::ValidationResult;
 use dpp::version::PlatformVersion;
 use dpp::{check_validation_result_with_data, ProtocolError};
+use drive::error::query::QuerySyntaxError;
+use drive::util::grove_operations::GroveDBToUse;
 
 impl<C> Platform<C> {
     pub(super) fn query_data_contracts_v0(
@@ -22,6 +25,15 @@ impl<C> Platform<C> {
         platform_state: &PlatformState,
         platform_version: &PlatformVersion,
     ) -> Result<QueryValidationResult<GetDataContractsResponseV0>, Error> {
+        if ids.len() > platform_version.drive_abci.query.max_returned_elements as usize {
+            return Ok(QueryValidationResult::new_with_error(QueryError::Query(
+                QuerySyntaxError::InvalidLimit(format!(
+                    "trying to get {} data contracts, maximum is {}",
+                    ids.len(),
+                    platform_version.drive_abci.query.max_returned_elements
+                )),
+            )));
+        }
         let contract_ids = check_validation_result_with_data!(ids
             .into_iter()
             .map(|contract_id_vec| {
@@ -42,9 +54,10 @@ impl<C> Platform<C> {
 
             GetDataContractsResponseV0 {
                 result: Some(get_data_contracts_response_v0::Result::Proof(
-                    self.response_proof_v0(platform_state, proof),
+                    self.response_proof_v0(platform_state, proof, GroveDBToUse::Current)
+                        .map(|(_, proof)| proof)?,
                 )),
-                metadata: Some(self.response_metadata_v0(platform_state)),
+                metadata: Some(self.response_metadata_v0(platform_state, CheckpointUsed::Current)),
             }
         } else {
             let contracts = self.drive.get_contracts_with_fetch_info(
@@ -76,7 +89,7 @@ impl<C> Platform<C> {
                         data_contract_entries: contracts,
                     },
                 )),
-                metadata: Some(self.response_metadata_v0(platform_state)),
+                metadata: Some(self.response_metadata_v0(platform_state, CheckpointUsed::Current)),
             }
         };
 
@@ -127,6 +140,51 @@ mod tests {
                 metadata: Some(_),
             }) if contracts.data_contract_entries.len() == 1 && contracts.data_contract_entries[0].data_contract.is_none()
         ));
+    }
+
+    #[test]
+    fn test_ids_exceeding_max_limit_is_rejected() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+        let max = version.drive_abci.query.max_returned_elements as usize;
+
+        let request = GetDataContractsRequestV0 {
+            ids: (0..=max).map(|i| vec![i as u8; 32]).collect(),
+            prove: false,
+        };
+
+        let result = platform
+            .query_data_contracts_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.errors.as_slice(),
+            [QueryError::Query(
+                drive::error::query::QuerySyntaxError::InvalidLimit(_)
+            )]
+        ));
+    }
+
+    #[test]
+    fn test_ids_at_max_limit_is_accepted() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+        let max = version.drive_abci.query.max_returned_elements as usize;
+
+        let request = GetDataContractsRequestV0 {
+            ids: (0..max).map(|i| vec![i as u8; 32]).collect(),
+            prove: false,
+        };
+
+        let result = platform
+            .query_data_contracts_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(
+            !result.errors.iter().any(|e| matches!(
+                e,
+                QueryError::Query(drive::error::query::QuerySyntaxError::InvalidLimit(_))
+            )),
+            "should not be rejected at exactly the max limit"
+        );
     }
 
     #[test]

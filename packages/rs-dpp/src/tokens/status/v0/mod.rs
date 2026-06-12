@@ -1,7 +1,15 @@
+#[cfg(feature = "json-conversion")]
+use crate::serialization::json_safe_fields;
 use bincode::{Decode, Encode};
 use derive_more::From;
 
+#[cfg_attr(feature = "json-conversion", json_safe_fields)]
 #[derive(Debug, Clone, Encode, Decode, From, PartialEq)]
+#[cfg_attr(
+    feature = "serde-conversion",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase")
+)]
 /// Token status
 pub struct TokenStatusV0 {
     pub paused: bool,

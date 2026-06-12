@@ -1,7 +1,7 @@
 use crate::error::query::QueryError;
 use crate::error::Error;
 use crate::platform_types::platform::Platform;
-use crate::platform_types::platform_state::v0::PlatformStateV0Methods;
+use crate::platform_types::platform_state::PlatformStateV0Methods;
 use crate::query::QueryValidationResult;
 use dapi_grpc::platform::v0::get_epochs_info_request::GetEpochsInfoRequestV0;
 use dapi_grpc::platform::v0::get_epochs_info_response::get_epochs_info_response_v0::EpochInfos;
@@ -12,8 +12,10 @@ use dpp::block::extended_epoch_info::v0::ExtendedEpochInfoV0Getters;
 use dpp::check_validation_result_with_data;
 
 use crate::platform_types::platform_state::PlatformState;
+use crate::query::response_metadata::CheckpointUsed;
 use dpp::validation::ValidationResult;
 use dpp::version::PlatformVersion;
+use drive::util::grove_operations::GroveDBToUse;
 
 impl<C> Platform<C> {
     pub(super) fn query_epoch_infos_v0(
@@ -61,9 +63,10 @@ impl<C> Platform<C> {
 
             GetEpochsInfoResponseV0 {
                 result: Some(get_epochs_info_response_v0::Result::Proof(
-                    self.response_proof_v0(platform_state, proof),
+                    self.response_proof_v0(platform_state, proof, GroveDBToUse::Current)
+                        .map(|(_, proof)| proof)?,
                 )),
-                metadata: Some(self.response_metadata_v0(platform_state)),
+                metadata: Some(self.response_metadata_v0(platform_state, CheckpointUsed::Current)),
             }
         } else {
             let result = check_validation_result_with_data!(self.drive.get_epochs_infos(
@@ -90,7 +93,7 @@ impl<C> Platform<C> {
                 result: Some(get_epochs_info_response_v0::Result::Epochs(EpochInfos {
                     epoch_infos,
                 })),
-                metadata: Some(self.response_metadata_v0(platform_state)),
+                metadata: Some(self.response_metadata_v0(platform_state, CheckpointUsed::Current)),
             }
         };
 
@@ -149,6 +152,73 @@ mod tests {
                 result: Some(get_epochs_info_response_v0::Result::Epochs(EpochInfos { epoch_infos })),
                 metadata: Some(_),
             }) if epoch_infos.is_empty()
+        ));
+    }
+
+    #[test]
+    fn test_query_epoch_infos_start_epoch_too_high() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        let request = GetEpochsInfoRequestV0 {
+            start_epoch: Some(u16::MAX as u32),
+            count: 1,
+            ascending: true,
+            prove: false,
+        };
+
+        let result = platform
+            .query_epoch_infos_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.errors.as_slice(),
+            [QueryError::InvalidArgument(msg)] if msg.contains("start epoch too high")
+        ));
+    }
+
+    #[test]
+    fn test_query_epoch_infos_count_too_high() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        // start 10, plus count u32::MAX-10 overflows u16::MAX cleanly via start+count check.
+        let request = GetEpochsInfoRequestV0 {
+            start_epoch: Some(10),
+            count: u16::MAX as u32,
+            ascending: true,
+            prove: false,
+        };
+
+        let result = platform
+            .query_epoch_infos_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.errors.as_slice(),
+            [QueryError::InvalidArgument(msg)] if msg.contains("count too high")
+        ));
+    }
+
+    #[test]
+    fn test_query_empty_epoch_infos_proof() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        let request = GetEpochsInfoRequestV0 {
+            start_epoch: None,
+            count: 3,
+            ascending: true,
+            prove: true,
+        };
+
+        let result = platform
+            .query_epoch_infos_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.data,
+            Some(GetEpochsInfoResponseV0 {
+                result: Some(get_epochs_info_response_v0::Result::Proof(_)),
+                metadata: Some(_),
+            })
         ));
     }
 }

@@ -1,45 +1,44 @@
 //! [Sdk] entrypoint to Dash Platform.
 
 use crate::error::{Error, StaleNodeError};
-use crate::internal_cache::InternalSdkCache;
+use crate::internal_cache::NonceCache;
 use crate::mock::MockResponse;
 #[cfg(feature = "mocks")]
 use crate::mock::{provider::GrpcContextProvider, MockDashPlatformSdk};
 use crate::platform::transition::put_settings::PutSettings;
-use crate::platform::{Fetch, Identifier};
-use arc_swap::{ArcSwapAny, ArcSwapOption};
+use crate::platform::Identifier;
+use arc_swap::ArcSwapOption;
 use dapi_grpc::mock::Mockable;
 use dapi_grpc::platform::v0::{Proof, ResponseMetadata};
 #[cfg(not(target_arch = "wasm32"))]
 use dapi_grpc::tonic::transport::Certificate;
+use dash_context_provider::ContextProvider;
+#[cfg(feature = "mocks")]
+use dash_context_provider::MockContextProvider;
 use dpp::bincode;
 use dpp::bincode::error::DecodeError;
 use dpp::dashcore::Network;
-use dpp::identity::identity_nonce::IDENTITY_NONCE_VALUE_FILTER;
 use dpp::prelude::IdentityNonce;
-use dpp::version::{PlatformVersion, PlatformVersionCurrentVersion};
+use dpp::version::PlatformVersion;
 use drive::grovedb::operations::proof::GroveDBProof;
-use drive_proof_verifier::types::{IdentityContractNonceFetcher, IdentityNonceFetcher};
-#[cfg(feature = "mocks")]
-use drive_proof_verifier::MockContextProvider;
-use drive_proof_verifier::{ContextProvider, FromProof};
+use drive_proof_verifier::FromProof;
 pub use http::Uri;
 #[cfg(feature = "mocks")]
 use rs_dapi_client::mock::MockDapiClient;
+pub use rs_dapi_client::Address;
 pub use rs_dapi_client::AddressList;
 pub use rs_dapi_client::RequestSettings;
 use rs_dapi_client::{
     transport::TransportRequest, DapiClient, DapiClientError, DapiRequestExecutor, ExecutionResult,
 };
-use std::collections::btree_map::Entry;
 use std::fmt::Debug;
 #[cfg(feature = "mocks")]
 use std::num::NonZeroUsize;
+use std::path::Path;
 #[cfg(feature = "mocks")]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{atomic, Arc};
-use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "mocks")]
 use tokio::sync::{Mutex, MutexGuard};
 use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
@@ -51,8 +50,40 @@ pub const DEFAULT_CONTRACT_CACHE_SIZE: usize = 100;
 pub const DEFAULT_TOKEN_CONFIG_CACHE_SIZE: usize = 100;
 /// How many quorum public keys fit in the cache.
 pub const DEFAULT_QUORUM_PUBLIC_KEYS_CACHE_SIZE: usize = 100;
-/// The default identity nonce stale time in seconds
-pub const DEFAULT_IDENTITY_NONCE_STALE_TIME_S: u64 = 1200; //20 mins
+/// Initial protocol version for the default auto-detect mode — i.e. when the
+/// caller does not pin a [`PlatformVersion`] via [`SdkBuilder::with_version`].
+///
+/// Set BELOW the latest version on purpose: ratchet-up autodetection
+/// (`maybe_update_protocol_version`) converges to the network's real version,
+/// so starting low keeps requests compatible with not-yet-upgraded nodes during
+/// an upgrade window. Bump this constant as the network's supported floor advances.
+///
+/// # v3.1+-only query surfaces
+///
+/// At the default floor the local encoder rejects the
+/// v3.1+-only surfaces — `Count` (`SelectProjection::count_star`), `group_by`,
+/// and `having` — with [`Error::Config`] *before* any network round-trip. To use
+/// them either pin a higher version via [`SdkBuilder::with_version`] (which also
+/// disables auto-detect), or issue one floor-compatible ratcheting query (no v3.1+
+/// surfaces) right after `build()` — e.g. the `ExtendedEpochInfo::fetch_current`
+/// current-state fetch below.
+/// Its response metadata lifts the SDK to the network's version, after which `Count` /
+/// `group_by` / `having` encode correctly.
+///
+/// ```no_run
+/// # use dash_sdk::{Sdk, SdkBuilder};
+/// # use dash_sdk::platform::fetch_current_no_parameters::FetchCurrent;
+/// # use dpp::block::extended_epoch_info::ExtendedEpochInfo;
+/// # async fn warm_up() -> Result<(), dash_sdk::Error> {
+/// let sdk: Sdk = SdkBuilder::new_mock().build()?;
+/// // Ratchets the SDK up to the network's version; Count/group_by/having then encode.
+/// let _ = ExtendedEpochInfo::fetch_current(&sdk).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub const DEFAULT_INITIAL_PROTOCOL_VERSION: u32 = dpp::version::v10::PROTOCOL_VERSION_10;
+/// The default metadata time tolerance for checkpoint queries in milliseconds
+const ADDRESS_STATE_TIME_TOLERANCE_MS: u64 = 31 * 60 * 1000;
 
 /// The default request settings for the SDK, used when the user does not provide any.
 ///
@@ -62,13 +93,43 @@ const DEFAULT_REQUEST_SETTINGS: RequestSettings = RequestSettings {
     timeout: None,
     ban_failed_address: None,
     connect_timeout: None,
+    max_decoding_message_size: None,
 };
 
-/// a type to represent staleness in seconds
-pub type StalenessInSeconds = u64;
-
-/// The last query timestamp
-pub type LastQueryTimestamp = u64;
+/// Build the default DAPI bootstrap address list for `network` from
+/// [`dash_network_seeds`].
+///
+/// The seed lists are single-source-of-truth, weekly-refreshed upstream in
+/// `rust-dashcore`. We filter to Evo (HPMN) masternodes — the only ones that
+/// run Dash Platform — and build `https://<ip>:<platform_http_port>` URIs.
+/// The Core port on `seed.address` is intentionally discarded: DAPI clients
+/// need the platform HTTP port, not the Core P2P port.
+///
+/// Malformed upstream entries are silently skipped rather than panicking;
+/// the DAPI client handles retry/rotation across the remaining addresses.
+///
+/// ## Panics
+///
+/// Panics on networks other than `Mainnet` and `Testnet` — no upstream
+/// seed list exists for devnet/regtest.
+fn default_address_list_for_network(network: Network) -> AddressList {
+    if !matches!(network, Network::Mainnet | Network::Testnet) {
+        panic!("default address list is only available for mainnet and testnet");
+    }
+    let mut list = AddressList::new();
+    for seed in dash_network_seeds::evo_seeds(network) {
+        let Some(port) = seed.platform_http_port else {
+            continue;
+        };
+        let url = format!("https://{}:{}", seed.address.ip(), port);
+        if let Ok(uri) = url.parse::<Uri>() {
+            if let Ok(address) = Address::try_from(uri) {
+                list.add(address);
+            }
+        }
+    }
+    list
+}
 
 /// Dash Platform SDK
 ///
@@ -104,8 +165,8 @@ pub struct Sdk {
     /// This is set to `true` by default. `false` is not implemented yet.
     proofs: bool,
 
-    /// An internal SDK cache managed exclusively by the SDK
-    internal_cache: Arc<InternalSdkCache>,
+    /// Nonce cache managed exclusively by the SDK.
+    nonce_cache: Arc<NonceCache>,
 
     /// Context provider used by the SDK.
     ///
@@ -113,6 +174,13 @@ pub struct Sdk {
     ///
     /// Note that setting this to None can panic.
     context_provider: ArcSwapOption<Box<dyn ContextProvider>>,
+
+    /// Protocol version number detected from the network. Shared between clones.
+    protocol_version: Arc<atomic::AtomicU32>,
+
+    /// Whether to auto-detect protocol version from network response metadata.
+    /// Set to `false` when the user explicitly calls [`SdkBuilder::with_version()`].
+    auto_detect_protocol_version: bool,
 
     /// Last seen height; used to determine if the remote node is stale.
     ///
@@ -144,9 +212,11 @@ impl Clone for Sdk {
             network: self.network,
             inner: self.inner.clone(),
             proofs: self.proofs,
-            internal_cache: Arc::clone(&self.internal_cache),
+            nonce_cache: Arc::clone(&self.nonce_cache),
             context_provider: ArcSwapOption::new(self.context_provider.load_full()),
             cancel_token: self.cancel_token.clone(),
+            protocol_version: Arc::clone(&self.protocol_version),
+            auto_detect_protocol_version: self.auto_detect_protocol_version,
             metadata_last_seen_height: Arc::clone(&self.metadata_last_seen_height),
             metadata_height_tolerance: self.metadata_height_tolerance,
             metadata_time_tolerance_ms: self.metadata_time_tolerance_ms,
@@ -185,9 +255,6 @@ enum SdkInstance {
     Dapi {
         /// DAPI client used to communicate with Dash Platform.
         dapi: DapiClient,
-
-        /// Platform version configured for this Sdk
-        version: &'static PlatformVersion,
     },
     /// Mock SDK
     #[cfg(feature = "mocks")]
@@ -199,13 +266,11 @@ enum SdkInstance {
         /// Mock SDK implementation processing mock expectations and responses.
         mock: Arc<Mutex<MockDashPlatformSdk>>,
         address_list: AddressList,
-        /// Platform version configured for this Sdk
-        version: &'static PlatformVersion,
     },
 }
 
 impl Sdk {
-    /// Initialize Dash Platform  SDK in mock mode.
+    /// Initialize Dash Platform SDK in mock mode.
     ///
     /// This is a helper method that uses [`SdkBuilder`] to initialize the SDK in mock mode.
     ///
@@ -216,68 +281,92 @@ impl Sdk {
             .expect("mock should be created")
     }
 
-    /// Retrieve object `O` from proof contained in `request` (of type `R`) and `response`.
+    /// Return freshness criteria (height tolerance and time tolerance) for given request method.
     ///
-    /// This method is used to retrieve objects from proofs returned by Dash Platform.
-    ///
-    /// ## Generic Parameters
-    ///
-    /// - `R`: Type of the request that was used to fetch the proof.
-    /// - `O`: Type of the object to be retrieved from the proof.
-    pub(crate) async fn parse_proof<R, O: FromProof<R> + MockResponse>(
-        &self,
-        request: O::Request,
-        response: O::Response,
-    ) -> Result<Option<O>, Error>
-    where
-        O::Request: Mockable,
-    {
-        self.parse_proof_with_metadata(request, response)
-            .await
-            .map(|result| result.0)
-    }
-
-    /// Retrieve object `O` from proof contained in `request` (of type `R`) and `response`.
-    ///
-    /// This method is used to retrieve objects from proofs returned by Dash Platform.
-    ///
-    /// ## Generic Parameters
-    ///
-    /// - `R`: Type of the request that was used to fetch the proof.
-    /// - `O`: Type of the object to be retrieved from the proof.
-    pub(crate) async fn parse_proof_with_metadata<R, O: FromProof<R> + MockResponse>(
-        &self,
-        request: O::Request,
-        response: O::Response,
-    ) -> Result<(Option<O>, ResponseMetadata), Error>
-    where
-        O::Request: Mockable,
-    {
-        let (object, metadata, _proof) = self
-            .parse_proof_with_metadata_and_proof(request, response)
-            .await?;
-
-        Ok((object, metadata))
+    /// Note that if self.metadata_height_tolerance or self.metadata_time_tolerance_ms is None,
+    /// respective tolerance will be None regardless of method, to allow disabling staleness checks globally.
+    fn freshness_criteria(&self, method_name: &str) -> (Option<u64>, Option<u64>) {
+        match method_name {
+            "get_addresses_trunk_state" | "get_addresses_branch_state" => (
+                None,
+                self.metadata_time_tolerance_ms
+                    .and(Some(ADDRESS_STATE_TIME_TOLERANCE_MS)),
+            ),
+            _ => (
+                self.metadata_height_tolerance,
+                self.metadata_time_tolerance_ms,
+            ),
+        }
     }
 
     /// Verify response metadata against the current state of the SDK.
-    fn verify_response_metadata(&self, metadata: &ResponseMetadata) -> Result<(), Error> {
-        if let Some(height_tolerance) = self.metadata_height_tolerance {
+    pub fn verify_response_metadata(
+        &self,
+        method_name: &str,
+        metadata: &ResponseMetadata,
+    ) -> Result<(), Error> {
+        let (metadata_height_tolerance, metadata_time_tolerance_ms) =
+            self.freshness_criteria(method_name);
+        if let Some(height_tolerance) = metadata_height_tolerance {
             verify_metadata_height(
                 metadata,
                 height_tolerance,
                 Arc::clone(&(self.metadata_last_seen_height)),
             )?;
         };
-        if let Some(time_tolerance) = self.metadata_time_tolerance_ms {
+        if let Some(time_tolerance) = metadata_time_tolerance_ms {
             let now = chrono::Utc::now().timestamp_millis() as u64;
             verify_metadata_time(metadata, now, time_tolerance)?;
         };
 
+        self.maybe_update_protocol_version(metadata.protocol_version);
+
         Ok(())
     }
 
-    // TODO: Changed to public for tests
+    /// Update the stored protocol version if `received_version` is newer and known.
+    ///
+    /// Uses `fetch_max` so the highest version always wins under concurrent updates.
+    /// The version is stored per-SDK instance (not in the process-wide global),
+    /// so multiple SDK instances can track different networks independently.
+    fn maybe_update_protocol_version(&self, received_version: u32) {
+        if !self.auto_detect_protocol_version {
+            return;
+        }
+
+        if received_version == 0 {
+            return;
+        }
+
+        let current = self.protocol_version.load(Ordering::Relaxed);
+
+        if received_version <= current {
+            return;
+        }
+
+        // Validate that we know this version before accepting it
+        if PlatformVersion::get(received_version).is_err() {
+            tracing::warn!(
+                received_version,
+                current_version = current,
+                "received unknown protocol version from network; keeping current"
+            );
+            return;
+        }
+
+        let previous = self
+            .protocol_version
+            .fetch_max(received_version, Ordering::Relaxed);
+        if previous < received_version {
+            tracing::info!(
+                target: "dash_sdk::protocol_version",
+                from = previous,
+                to = received_version,
+                "ratcheting protocol version upward"
+            );
+        }
+    }
+
     /// Retrieve object `O` from proof contained in `request` (of type `R`) and `response`.
     ///
     /// This method is used to retrieve objects from proofs returned by Dash Platform.
@@ -286,10 +375,27 @@ impl Sdk {
     ///
     /// - `R`: Type of the request that was used to fetch the proof.
     /// - `O`: Type of the object to be retrieved from the proof.
+    ///
+    /// ## Protocol version bootstrapping
+    ///
+    /// On a fresh auto-detect SDK (i.e. one built without [`SdkBuilder::with_version()`]), the
+    /// first call to this method uses [`DEFAULT_INITIAL_PROTOCOL_VERSION`] as a fallback because
+    /// no network response has been received yet to teach the SDK the real network version.
+    ///
+    /// The actual network version is learned only *after* proof parsing succeeds, when
+    /// [`Self::verify_response_metadata()`] processes `metadata.protocol_version`.  If the
+    /// connected network runs an older protocol version **and** proof interpretation differs
+    /// between that version and `latest()`, the very first request may fail before the SDK can
+    /// correct itself.  Subsequent requests will use the correct version.
+    ///
+    /// This is a known bootstrap limitation.  Callers that must guarantee correct version
+    /// behaviour on the first request should pin the version explicitly via
+    /// [`SdkBuilder::with_version()`].
     pub(crate) async fn parse_proof_with_metadata_and_proof<R, O: FromProof<R> + MockResponse>(
         &self,
         request: O::Request,
         response: O::Response,
+        method_name: &'static str,
     ) -> Result<(Option<O>, ResponseMetadata, Proof), Error>
     where
         O::Request: Mockable,
@@ -313,7 +419,15 @@ impl Sdk {
             }
         }?;
 
-        self.verify_response_metadata(&metadata)?;
+        // Security invariant: proof+signature verification above (the `?`) must
+        // precede this call, which ratchets the protocol version from the now-trusted
+        // `metadata.protocol_version`. Never reorder — the ratchet must not consume
+        // unverified metadata.
+        self.verify_response_metadata(method_name, &metadata)
+            .inspect_err(|err| {
+                tracing::warn!(%err,method=method_name,"received response with stale metadata; try another server");
+            })?;
+
         Ok((object, metadata, proof))
     }
 
@@ -336,22 +450,23 @@ impl Sdk {
     /// * the `self` instance is not a `Mock` variant,
     /// * the `self` instance is in use by another thread.
     #[cfg(feature = "mocks")]
-    pub fn mock(&mut self) -> MutexGuard<MockDashPlatformSdk> {
+    pub fn mock(&mut self) -> MutexGuard<'_, MockDashPlatformSdk> {
         if let Sdk {
             inner: SdkInstance::Mock { ref mock, .. },
             ..
         } = self
         {
             mock.try_lock()
-                .expect("mock sdk is in use by another thread and connot be reconfigured")
+                .expect("mock sdk is in use by another thread and cannot be reconfigured")
         } else {
             panic!("not a mock")
         }
     }
 
-    /// Updates or fetches the nonce for a given identity from the cache,
-    /// querying Platform if the cached value is stale or absent. Optionally
-    /// increments the nonce before storing it, based on the provided settings.
+    /// Get or fetch identity nonce, querying Platform when stale or absent.
+    /// Treats a missing nonce as `0` before applying the optional bump; on first
+    /// interaction this may return `0` or `1` depending on `bump_first`. Does not
+    /// verify identity existence.
     pub async fn get_identity_nonce(
         &self,
         identity_id: Identifier,
@@ -359,87 +474,25 @@ impl Sdk {
         settings: Option<PutSettings>,
     ) -> Result<IdentityNonce, Error> {
         let settings = settings.unwrap_or_default();
-        let current_time_s = match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(n) => n.as_secs(),
-            Err(_) => panic!("SystemTime before UNIX EPOCH!"),
-        };
+        let nonce = self
+            .nonce_cache
+            .get_identity_nonce(self, identity_id, bump_first, &settings)
+            .await?;
 
-        // we start by only using a read lock, as this speeds up the system
-        let mut identity_nonce_counter = self.internal_cache.identity_nonce_counter.lock().await;
-        let entry = identity_nonce_counter.entry(identity_id);
+        tracing::trace!(
+            identity_id = %identity_id,
+            bump_first,
+            nonce,
+            "Fetched identity nonce"
+        );
 
-        let should_query_platform = match &entry {
-            Entry::Vacant(_) => true,
-            Entry::Occupied(e) => {
-                let (_, last_query_time) = e.get();
-                *last_query_time
-                    < current_time_s.saturating_sub(
-                        settings
-                            .identity_nonce_stale_time_s
-                            .unwrap_or(DEFAULT_IDENTITY_NONCE_STALE_TIME_S),
-                    )
-            }
-        };
-
-        if should_query_platform {
-            let platform_nonce = IdentityNonceFetcher::fetch_with_settings(
-                self,
-                identity_id,
-                settings.request_settings,
-            )
-            .await?
-            .unwrap_or(IdentityNonceFetcher(0))
-            .0;
-            match entry {
-                Entry::Vacant(e) => {
-                    let insert_nonce = if bump_first {
-                        platform_nonce + 1
-                    } else {
-                        platform_nonce
-                    };
-                    e.insert((insert_nonce, current_time_s));
-                    Ok(insert_nonce & IDENTITY_NONCE_VALUE_FILTER)
-                }
-                Entry::Occupied(mut e) => {
-                    let (current_nonce, _) = e.get();
-                    let insert_nonce = if platform_nonce > *current_nonce {
-                        if bump_first {
-                            platform_nonce + 1
-                        } else {
-                            platform_nonce
-                        }
-                    } else if bump_first {
-                        *current_nonce + 1
-                    } else {
-                        *current_nonce
-                    };
-                    e.insert((insert_nonce, current_time_s));
-                    Ok(insert_nonce & IDENTITY_NONCE_VALUE_FILTER)
-                }
-            }
-        } else {
-            match entry {
-                Entry::Vacant(_) => {
-                    panic!("this can not happen, vacant entry not possible");
-                }
-                Entry::Occupied(mut e) => {
-                    let (current_nonce, _) = e.get();
-                    if bump_first {
-                        let insert_nonce = current_nonce + 1;
-                        e.insert((insert_nonce, current_time_s));
-                        Ok(insert_nonce & IDENTITY_NONCE_VALUE_FILTER)
-                    } else {
-                        Ok(*current_nonce & IDENTITY_NONCE_VALUE_FILTER)
-                    }
-                }
-            }
-        }
+        Ok(nonce)
     }
 
-    // TODO: Move to a separate struct
-    /// Updates or fetches the nonce for a given identity and contract pair from a cache,
-    /// querying Platform if the cached value is stale or absent. Optionally
-    /// increments the nonce before storing it, based on the provided settings.
+    /// Get or fetch identity-contract nonce, querying Platform when stale or absent.
+    /// Treats a missing nonce as `0` before applying the optional bump; on first
+    /// interaction this may return `0` or `1` depending on `bump_first`. Does not
+    /// verify identity or contract existence.
     pub async fn get_identity_contract_nonce(
         &self,
         identity_id: Identifier,
@@ -448,105 +501,51 @@ impl Sdk {
         settings: Option<PutSettings>,
     ) -> Result<IdentityNonce, Error> {
         let settings = settings.unwrap_or_default();
-        let current_time_s = match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(n) => n.as_secs(),
-            Err(_) => panic!("SystemTime before UNIX EPOCH!"),
-        };
+        self.nonce_cache
+            .get_identity_contract_nonce(self, identity_id, contract_id, bump_first, &settings)
+            .await
+    }
 
-        // we start by only using a read lock, as this speeds up the system
-        let mut identity_contract_nonce_counter = self
-            .internal_cache
-            .identity_contract_nonce_counter
-            .lock()
-            .await;
-        let entry = identity_contract_nonce_counter.entry((identity_id, contract_id));
-
-        let should_query_platform = match &entry {
-            Entry::Vacant(_) => true,
-            Entry::Occupied(e) => {
-                let (_, last_query_time) = e.get();
-                *last_query_time
-                    < current_time_s.saturating_sub(
-                        settings
-                            .identity_nonce_stale_time_s
-                            .unwrap_or(DEFAULT_IDENTITY_NONCE_STALE_TIME_S),
-                    )
-            }
-        };
-
-        if should_query_platform {
-            let platform_nonce = IdentityContractNonceFetcher::fetch_with_settings(
-                self,
-                (identity_id, contract_id),
-                settings.request_settings,
-            )
-            .await?
-            .unwrap_or(IdentityContractNonceFetcher(0))
-            .0;
-            match entry {
-                Entry::Vacant(e) => {
-                    let insert_nonce = if bump_first {
-                        platform_nonce + 1
-                    } else {
-                        platform_nonce
-                    };
-                    e.insert((insert_nonce, current_time_s));
-                    Ok(insert_nonce & IDENTITY_NONCE_VALUE_FILTER)
-                }
-                Entry::Occupied(mut e) => {
-                    let (current_nonce, _) = e.get();
-                    let insert_nonce = if platform_nonce > *current_nonce {
-                        if bump_first {
-                            platform_nonce + 1
-                        } else {
-                            platform_nonce
-                        }
-                    } else if bump_first {
-                        *current_nonce + 1
-                    } else {
-                        *current_nonce
-                    };
-                    e.insert((insert_nonce, current_time_s));
-                    Ok(insert_nonce & IDENTITY_NONCE_VALUE_FILTER)
-                }
-            }
-        } else {
-            match entry {
-                Entry::Vacant(_) => {
-                    panic!("this can not happen, vacant entry not possible");
-                }
-                Entry::Occupied(mut e) => {
-                    let (current_nonce, _) = e.get();
-                    if bump_first {
-                        let insert_nonce = current_nonce + 1;
-                        e.insert((insert_nonce, current_time_s));
-                        Ok(insert_nonce & IDENTITY_NONCE_VALUE_FILTER)
-                    } else {
-                        Ok(*current_nonce & IDENTITY_NONCE_VALUE_FILTER)
-                    }
-                }
-            }
-        }
+    /// Marks identity nonce cache entries as stale so they are re-fetched from
+    /// Platform on the next call to [`get_identity_nonce`] or
+    /// [`get_identity_contract_nonce`].
+    pub async fn refresh_identity_nonce(&self, identity_id: &Identifier) {
+        self.nonce_cache.refresh(identity_id).await;
     }
 
     /// Return [Dash Platform version](PlatformVersion) information used by this SDK.
     ///
-    ///
-    ///
-    /// This is the version configured in [`SdkBuilder`].
-    /// Useful whenever you need to provide [PlatformVersion] to other SDK and DPP methods.
+    /// When auto-detection is enabled (default), returns [`DEFAULT_INITIAL_PROTOCOL_VERSION`]
+    /// until the first network response is received, then tracks the network's version.
+    /// When pinned via [`SdkBuilder::with_version()`], always returns the pinned version.
     pub fn version<'v>(&self) -> &'v PlatformVersion {
-        match &self.inner {
-            SdkInstance::Dapi { version, .. } => version,
-            #[cfg(feature = "mocks")]
-            SdkInstance::Mock { version, .. } => version,
-        }
+        let v = self.protocol_version.load(Ordering::Relaxed);
+        PlatformVersion::get(v).unwrap_or_else(|_| PlatformVersion::latest())
+    }
+
+    /// Return the raw protocol version number currently used by this SDK.
+    pub fn protocol_version_number(&self) -> u32 {
+        self.protocol_version.load(Ordering::Relaxed)
     }
 
     // TODO: Move to settings
     /// Indicate if the sdk should request and verify proofs.
     pub fn prove(&self) -> bool {
         self.proofs
+    }
+
+    /// Build a [`QuerySettings`] borrowing this SDK's protocol version,
+    /// request settings, and `prove` flag.
+    ///
+    /// Hand the resulting context to [`crate::platform::Query::query`] when
+    /// you need to encode a user-facing query into a wire `TransportRequest`
+    /// without taking a full `&Sdk` dependency through the encoder layer.
+    pub fn query_settings(&self) -> crate::platform::QuerySettings<'_> {
+        crate::platform::QuerySettings {
+            request_settings: &self.dapi_client_settings,
+            protocol_version: self.version(),
+            prove: self.prove(),
+        }
     }
 
     // TODO: If we remove this setter we don't need to use ArcSwap.
@@ -561,12 +560,12 @@ impl Sdk {
             .swap(Some(Arc::new(Box::new(context_provider))));
     }
 
-    /// Returns a future that resolves when the Sdk is cancelled (eg. shutdown was requested).
-    pub fn cancelled(&self) -> WaitForCancellationFuture {
+    /// Returns a future that resolves when the Sdk is cancelled (e.g. shutdown was requested).
+    pub fn cancelled(&self) -> WaitForCancellationFuture<'_> {
         self.cancel_token.cancelled()
     }
 
-    /// Request shutdown of the Sdk and all related operation.
+    /// Request shutdown of the Sdk and all related operations.
     pub fn shutdown(&self) {
         self.cancel_token.cancel();
     }
@@ -588,7 +587,7 @@ impl Sdk {
 /// - `metadata`: Metadata of the received response
 /// - `now_ms`: Current local time in milliseconds
 /// - `tolerance_ms`: Tolerance in milliseconds
-fn verify_metadata_time(
+pub(crate) fn verify_metadata_time(
     metadata: &ResponseMetadata,
     now_ms: u64,
     tolerance_ms: u64,
@@ -597,12 +596,6 @@ fn verify_metadata_time(
 
     // metadata_time - tolerance_ms <= now_ms <= metadata_time + tolerance_ms
     if now_ms.abs_diff(metadata_time) > tolerance_ms {
-        tracing::warn!(
-            expected_time = now_ms,
-            received_time = metadata_time,
-            tolerance_ms,
-            "received response with stale time; you should retry with another server"
-        );
         return Err(StaleNodeError::Time {
             expected_timestamp_ms: now_ms,
             received_timestamp_ms: metadata_time,
@@ -643,12 +636,6 @@ fn verify_metadata_height(
 
     // If expected_height <= tolerance, then Sdk just started, so we just assume what we got is correct.
     if expected_height > tolerance && received_height < expected_height - tolerance {
-        tracing::warn!(
-            expected_height,
-            received_height,
-            tolerance,
-            "received message with stale height; you should retry with another server"
-        );
         return Err(StaleNodeError::Height {
             expected_height,
             received_height,
@@ -711,7 +698,7 @@ impl DapiRequestExecutor for Sdk {
 /// 2. Configure the builder with [`SdkBuilder::with_core()`]
 /// 3. Call [`SdkBuilder::build()`] to create the [Sdk] instance.
 pub struct SdkBuilder {
-    /// List of addressses to connect to.
+    /// List of addresses to connect to.
     ///
     /// If `None`, a mock client will be created.
     addresses: Option<AddressList>,
@@ -729,6 +716,10 @@ pub struct SdkBuilder {
 
     /// Platform version to use in this Sdk
     version: &'static PlatformVersion,
+
+    /// Whether the user explicitly called `with_version()`.
+    /// When true, auto-detection of protocol version from network metadata is disabled.
+    version_explicit: bool,
 
     /// Cache size for data contracts. Used by mock [GrpcContextProvider].
     #[cfg(feature = "mocks")]
@@ -774,7 +765,7 @@ impl Default for SdkBuilder {
         Self {
             addresses: None,
             settings: None,
-            network: Network::Dash,
+            network: Network::Mainnet,
             core_ip: "".to_string(),
             core_port: 0,
             core_password: "".to_string().into(),
@@ -800,7 +791,9 @@ impl Default for SdkBuilder {
 
             cancel_token: CancellationToken::new(),
 
-            version: PlatformVersion::latest(),
+            version: PlatformVersion::get(DEFAULT_INITIAL_PROTOCOL_VERSION)
+                .expect("DEFAULT_INITIAL_PROTOCOL_VERSION must be a known PlatformVersion"),
+            version_explicit: false,
             #[cfg(not(target_arch = "wasm32"))]
             ca_certificate: None,
 
@@ -811,6 +804,14 @@ impl Default for SdkBuilder {
 }
 
 impl SdkBuilder {
+    /// Enable or disable proofs on requests.
+    ///
+    /// In mock/offline testing with recorded vectors, set to false to match dumps
+    /// that were captured without proofs.
+    pub fn with_proofs(mut self, proofs: bool) -> Self {
+        self.proofs = proofs;
+        self
+    }
     /// Create a new SdkBuilder with provided address list.
     pub fn new(addresses: AddressList) -> Self {
         Self {
@@ -819,23 +820,29 @@ impl SdkBuilder {
         }
     }
 
+    /// Replace the address list on this builder.
+    pub fn with_address_list(mut self, addresses: AddressList) -> Self {
+        self.addresses = Some(addresses);
+        self
+    }
+
     /// Create a new SdkBuilder that will generate mock client.
     pub fn new_mock() -> Self {
         Self::default()
     }
 
-    /// Create a new SdkBuilder instance preconfigured for testnet. NOT IMPLEMENTED YET.
+    /// Create a new SdkBuilder instance preconfigured for testnet.
     ///
     /// This is a helper method that preconfigures [SdkBuilder] for testnet use.
     /// Use this method if you want to connect to Dash Platform testnet during development and testing
     /// of your solution.
     pub fn new_testnet() -> Self {
-        unimplemented!(
-            "Testnet address list not implemented yet. Use new() and provide address list."
-        )
+        let address_list = default_address_list_for_network(Network::Testnet);
+
+        Self::new(address_list).with_network(Network::Testnet)
     }
 
-    /// Create a new SdkBuilder instance preconfigured mainnet (production network). NOT IMPLEMENTED YET.
+    /// Create a new SdkBuilder instance preconfigured for mainnet (production network).
     ///
     /// This is a helper method that preconfigures [SdkBuilder] for production use.
     /// Use this method if you want to connect to Dash Platform mainnet with production-ready product.
@@ -848,14 +855,14 @@ impl SdkBuilder {
     ///
     /// This method is unstable and can be changed in the future.
     pub fn new_mainnet() -> Self {
-        unimplemented!(
-            "Mainnet address list not implemented yet. Use new() and provide address list."
-        )
+        let address_list = default_address_list_for_network(Network::Mainnet);
+
+        Self::new(address_list).with_network(Network::Mainnet)
     }
 
     /// Configure network type.
     ///
-    /// Defaults to Network::Dash which is mainnet.
+    /// Defaults to Network::Mainnet which is mainnet.
     pub fn with_network(mut self, network: Network) -> Self {
         self.network = network;
         self
@@ -866,35 +873,28 @@ impl SdkBuilder {
     /// Used mainly for testing purposes and local networks.
     ///
     /// If not set, uses standard system CA certificates.
+    ///
+    /// ## Parameters
+    ///
+    /// - `pem_certificate`: PEM-encoded CA certificate. User must ensure that the certificate is valid.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_ca_certificate(mut self, pem_certificate: Certificate) -> Self {
         self.ca_certificate = Some(pem_certificate);
         self
     }
 
-    /// Load CA certificate from file.
+    /// Load CA certificate from a PEM-encoded file.
     ///
     /// This is a convenience method that reads the certificate from a file and sets it using
     /// [SdkBuilder::with_ca_certificate()].
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_ca_certificate_file(
         self,
-        certificate_file_path: impl AsRef<std::path::Path>,
+        certificate_file_path: impl AsRef<Path>,
     ) -> std::io::Result<Self> {
         let pem = std::fs::read(certificate_file_path)?;
-
-        // parse the certificate and check if it's valid
-        let mut verified_pem = std::io::BufReader::new(pem.as_slice());
-        rustls_pemfile::certs(&mut verified_pem)
-            .next()
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "No valid certificates found in the file",
-                )
-            })??;
-
         let cert = Certificate::from_pem(pem);
+
         Ok(self.with_ca_certificate(cert))
     }
 
@@ -902,7 +902,7 @@ impl SdkBuilder {
     ///
     /// Tune request settings used to connect to the Dash Platform.
     ///
-    /// Defaults to [RequestSettings::default()].
+    /// Defaults to [`DEFAULT_REQUEST_SETTINGS`], which sets retries to 3.
     ///
     /// See [`RequestSettings`] for more information.
     pub fn with_settings(mut self, settings: RequestSettings) -> Self {
@@ -912,11 +912,33 @@ impl SdkBuilder {
 
     /// Configure platform version.
     ///
-    /// Select specific version of Dash Platform to use.
+    /// Select specific version of Dash Platform to use. This pins the version and
+    /// disables auto-detection.
     ///
-    /// Defaults to [PlatformVersion::latest()].
+    /// When unset, the SDK starts at [`DEFAULT_INITIAL_PROTOCOL_VERSION`] and
+    /// ratchets upward via auto-detection.
     pub fn with_version(mut self, version: &'static PlatformVersion) -> Self {
         self.version = version;
+        self.version_explicit = true;
+        self
+    }
+
+    /// Test-only seed for the auto-detect atomic — NOT the public way to enable
+    /// auto-detect (auto-detect is the default; [`Self::with_version`] is the opt-out).
+    ///
+    /// Auto-detect already starts every unpinned SDK at
+    /// [`DEFAULT_INITIAL_PROTOCOL_VERSION`] and ratchets upward via `fetch_max` in
+    /// `maybe_update_protocol_version` once the network's version is observed. This
+    /// seed exists only to let unit tests start *below* that floor — exercising the
+    /// upward-only ratchet from an older network's version without disabling auto-detect.
+    ///
+    /// Seeds `self.version` and keeps `version_explicit` `false`, so auto-detect stays
+    /// on. Builder chains are last-write-wins: a later `with_initial_version` re-enables
+    /// auto-detect that an earlier `with_version` disabled.
+    #[cfg(test)]
+    pub(crate) fn with_initial_version(mut self, version: &'static PlatformVersion) -> Self {
+        self.version = version;
+        self.version_explicit = false;
         self
     }
 
@@ -937,7 +959,7 @@ impl SdkBuilder {
 
     /// Set cancellation token that will be used by the Sdk.
     ///
-    /// Once that cancellation token is cancelled, all pending requests shall teriminate.
+    /// Once that cancellation token is cancelled, all pending requests shall terminate.
     pub fn with_cancellation_token(mut self, cancel_token: CancellationToken) -> Self {
         self.cancel_token = cancel_token;
         self
@@ -947,7 +969,7 @@ impl SdkBuilder {
     ///
     /// This is a convenience method that configures the SDK to use Dash Core as a wallet and context provider.
     ///
-    /// For more control over the configuration, use [SdkBuilder::with_wallet()] and [SdkBuilder::with_context_provider()].
+    /// For more control over the configuration, use [`SdkBuilder::with_context_provider()`].
     ///
     /// This is temporary implementation, intended for development purposes.
     pub fn with_core(mut self, ip: &str, port: u16, user: &str, password: &str) -> Self {
@@ -1003,7 +1025,7 @@ impl SdkBuilder {
     /// * retrieved data contracts - in files named `data_contract-*.json`
     ///
     /// These files can be used together with [MockDashPlatformSdk] to replay the requests and responses.
-    /// See [MockDashPlatformSdk::load_expectations()] for more information.
+    /// See [MockDashPlatformSdk::load_expectations_sync()] for more information.
     ///
     /// Available only when `mocks` feature is enabled.
     #[cfg(feature = "mocks")]
@@ -1020,8 +1042,6 @@ impl SdkBuilder {
     ///
     /// This method will return an error if the Sdk cannot be created.
     pub fn build(self) -> Result<Sdk, Error> {
-        PlatformVersion::set_current(self.version);
-
         let dapi_client_settings = match self.settings {
             Some(settings) => DEFAULT_REQUEST_SETTINGS.override_by(settings),
             None => DEFAULT_REQUEST_SETTINGS,
@@ -1044,19 +1064,25 @@ impl SdkBuilder {
                 let mut sdk= Sdk{
                     network: self.network,
                     dapi_client_settings,
-                    inner:SdkInstance::Dapi { dapi,  version:self.version },
+                    inner:SdkInstance::Dapi { dapi },
                     proofs:self.proofs,
                     context_provider: ArcSwapOption::new( self.context_provider.map(Arc::new)),
                     cancel_token: self.cancel_token,
-                    internal_cache: Default::default(),
-                    // Note: in future, we need to securely initialize initial height during Sdk bootstrap or first request.
+                    nonce_cache: Default::default(),
+                    // Seed atomic with self.version; whether auto-detect is on
+                    // is controlled separately by `version_explicit`.
+                    protocol_version: Arc::new(atomic::AtomicU32::new(
+                        self.version.protocol_version,
+                    )),
+                    auto_detect_protocol_version: !self.version_explicit,
+                    // Note: in the future, we need to securely initialize initial height during Sdk bootstrap or first request.
                     metadata_last_seen_height: Arc::new(atomic::AtomicU64::new(0)),
                     metadata_height_tolerance: self.metadata_height_tolerance,
                     metadata_time_tolerance_ms: self.metadata_time_tolerance_ms,
                     #[cfg(feature = "mocks")]
                     dump_dir: self.dump_dir,
                 };
-                // if context provider is not set correctly (is None), it means we need to fallback to core wallet
+                // if context provider is not set correctly (is None), it means we need to fall back to core wallet
                 if  sdk.context_provider.load().is_none() {
                     #[cfg(feature = "mocks")]
                     if !self.core_ip.is_empty() {
@@ -1092,7 +1118,7 @@ impl SdkBuilder {
             #[cfg(feature = "mocks")]
             // mock mode
             None => {
-                let dapi =Arc::new(tokio::sync::Mutex::new(  MockDapiClient::new()));
+                let dapi =Arc::new(Mutex::new(  MockDapiClient::new()));
                 // We create mock context provider that will use the mock DAPI client to retrieve data contracts.
                 let  context_provider = self.context_provider.unwrap_or_else(||{
                     let mut cp=MockContextProvider::new();
@@ -1102,7 +1128,7 @@ impl SdkBuilder {
                     Box::new(cp)
                 }
                 );
-                let mock_sdk = MockDashPlatformSdk::new(self.version, Arc::clone(&dapi));
+                let mock_sdk = MockDashPlatformSdk::new(Arc::clone(&dapi));
                 let mock_sdk = Arc::new(Mutex::new(mock_sdk));
                 let sdk= Sdk {
                     network: self.network,
@@ -1111,18 +1137,21 @@ impl SdkBuilder {
                         mock:mock_sdk.clone(),
                         dapi,
                         address_list: AddressList::new(),
-                        version: self.version,
                     },
                     dump_dir: self.dump_dir.clone(),
                     proofs:self.proofs,
-                    internal_cache: Default::default(),
-                    context_provider:ArcSwapAny::new( Some(Arc::new(context_provider))),
+                    nonce_cache: Default::default(),
+                    protocol_version: Arc::new(atomic::AtomicU32::new(
+                        self.version.protocol_version,
+                    )),
+                    auto_detect_protocol_version: !self.version_explicit,
+                    context_provider: ArcSwapOption::new(Some(Arc::new(context_provider))),
                     cancel_token: self.cancel_token,
                     metadata_last_seen_height: Arc::new(atomic::AtomicU64::new(0)),
                     metadata_height_tolerance: self.metadata_height_tolerance,
                     metadata_time_tolerance_ms: self.metadata_time_tolerance_ms,
                 };
-                let mut guard = mock_sdk.try_lock().expect("mock sdk is in use by another thread and connot be reconfigured");
+                let mut guard = mock_sdk.try_lock().expect("mock sdk is in use by another thread and cannot be reconfigured");
                 guard.set_sdk(sdk.clone());
                 if let Some(ref dump_dir) = self.dump_dir {
                     guard.load_expectations_sync(dump_dir)?;
@@ -1171,10 +1200,85 @@ pub fn prettify_proof(proof: &Proof) -> String {
 mod test {
     use std::sync::Arc;
 
-    use dapi_grpc::platform::v0::ResponseMetadata;
+    use dapi_grpc::platform::v0::{GetIdentityRequest, ResponseMetadata};
+    use rs_dapi_client::transport::TransportRequest;
     use test_case::test_matrix;
 
     use crate::SdkBuilder;
+
+    use super::Network;
+
+    /// Mainnet Evo masternodes expose the Platform HTTP endpoint on 443.
+    const MAINNET_PLATFORM_HTTP_PORT: u16 = 443;
+    /// Testnet Evo masternodes expose the Platform HTTP endpoint on 1443.
+    const TESTNET_PLATFORM_HTTP_PORT: u16 = 1443;
+
+    #[test]
+    fn new_testnet_sources_bootstrap_from_seeds() {
+        let builder = SdkBuilder::new_testnet();
+        let address_list = builder
+            .addresses
+            .as_ref()
+            .expect("testnet builder should configure default addresses");
+
+        assert_eq!(builder.network, Network::Testnet);
+        assert!(
+            !address_list.is_empty(),
+            "testnet must have at least one bootstrap address"
+        );
+        for address in address_list.get_live_addresses() {
+            assert_eq!(
+                address.uri().port_u16(),
+                Some(TESTNET_PLATFORM_HTTP_PORT),
+                "testnet bootstrap address must use the platform HTTP port",
+            );
+        }
+    }
+
+    #[test]
+    fn new_mainnet_sources_bootstrap_from_seeds() {
+        let builder = SdkBuilder::new_mainnet();
+        let address_list = builder
+            .addresses
+            .as_ref()
+            .expect("mainnet builder should configure default addresses");
+
+        assert_eq!(builder.network, Network::Mainnet);
+        assert!(
+            !address_list.is_empty(),
+            "mainnet must have at least one bootstrap address"
+        );
+        for address in address_list.get_live_addresses() {
+            assert_eq!(
+                address.uri().port_u16(),
+                Some(MAINNET_PLATFORM_HTTP_PORT),
+                "mainnet bootstrap address must use the platform HTTP port",
+            );
+        }
+    }
+
+    /// Smoke signal: the upstream seed lists are far larger than 10 entries on
+    /// both networks. If parsing drops most of them we want a loud test
+    /// failure rather than silently shipping a near-empty bootstrap list.
+    #[test]
+    fn bootstrap_counts_reasonable() {
+        let mainnet = SdkBuilder::new_mainnet()
+            .addresses
+            .expect("mainnet builder should configure default addresses");
+        let testnet = SdkBuilder::new_testnet()
+            .addresses
+            .expect("testnet builder should configure default addresses");
+        assert!(
+            mainnet.len() >= 10,
+            "expected >=10 mainnet bootstrap addresses, got {}",
+            mainnet.len()
+        );
+        assert!(
+            testnet.len() >= 10,
+            "expected >=10 testnet bootstrap addresses, got {}",
+            testnet.len()
+        );
+    }
 
     #[test_matrix(97..102, 100, 2, false; "valid height")]
     #[test_case(103, 100, 2, true; "invalid height")]
@@ -1189,8 +1293,7 @@ mod test {
             ..Default::default()
         };
 
-        let last_seen_height =
-            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(expected_height));
+        let last_seen_height = Arc::new(std::sync::atomic::AtomicU64::new(expected_height));
 
         let result =
             super::verify_metadata_height(&metadata, tolerance, Arc::clone(&last_seen_height));
@@ -1217,7 +1320,9 @@ mod test {
             ..Default::default()
         };
 
-        sdk1.verify_response_metadata(&metadata)
+        // use dummy request type to satisfy generic parameter
+        let request = GetIdentityRequest::default();
+        sdk1.verify_response_metadata(request.method_name(), &metadata)
             .expect("metadata should be valid");
 
         assert_eq!(
@@ -1236,7 +1341,9 @@ mod test {
             height: 2,
             ..Default::default()
         };
-        sdk2.verify_response_metadata(&metadata)
+        // use dummy request type to satisfy generic parameter
+        let request = GetIdentityRequest::default();
+        sdk2.verify_response_metadata(request.method_name(), &metadata)
             .expect("metadata should be valid");
 
         assert_eq!(
@@ -1257,7 +1364,9 @@ mod test {
             height: 3,
             ..Default::default()
         };
-        sdk3.verify_response_metadata(&metadata)
+        // use dummy request type to satisfy generic parameter
+        let request = GetIdentityRequest::default();
+        sdk3.verify_response_metadata(request.method_name(), &metadata)
             .expect("metadata should be valid");
 
         assert_eq!(
@@ -1280,8 +1389,421 @@ mod test {
             ..Default::default()
         };
 
-        sdk1.verify_response_metadata(&metadata)
+        let request = GetIdentityRequest::default();
+        sdk1.verify_response_metadata(request.method_name(), &metadata)
             .expect_err("metadata should be invalid");
+    }
+
+    /// Helper: build a mock SDK with auto-detect enabled and a specific starting version.
+    /// Does NOT call `with_version()` (which would disable auto-detect).
+    fn mock_sdk_with_auto_detect(starting_version: u32) -> super::Sdk {
+        use std::sync::atomic::Ordering;
+
+        let sdk = SdkBuilder::new_mock()
+            .build()
+            .expect("mock Sdk should be created");
+        sdk.protocol_version
+            .store(starting_version, Ordering::Relaxed);
+        sdk
+    }
+
+    #[test]
+    fn test_version_update_from_metadata() {
+        let sdk = mock_sdk_with_auto_detect(1);
+
+        assert_eq!(sdk.protocol_version_number(), 1);
+
+        let metadata = ResponseMetadata {
+            protocol_version: 2,
+            height: 1,
+            ..Default::default()
+        };
+
+        sdk.verify_response_metadata("test", &metadata)
+            .expect("metadata should be valid");
+
+        assert_eq!(sdk.protocol_version_number(), 2);
+        assert_eq!(sdk.version().protocol_version, 2);
+    }
+
+    #[test]
+    fn test_unknown_version_ignored() {
+        use dpp::version::PlatformVersion;
+
+        let sdk = mock_sdk_with_auto_detect(PlatformVersion::latest().protocol_version);
+        let original_version = sdk.protocol_version_number();
+
+        let metadata = ResponseMetadata {
+            protocol_version: 999,
+            height: 1,
+            ..Default::default()
+        };
+
+        sdk.verify_response_metadata("test", &metadata)
+            .expect("metadata should be valid");
+
+        assert_eq!(sdk.protocol_version_number(), original_version);
+        assert_eq!(sdk.version().protocol_version, original_version);
+    }
+
+    #[test]
+    fn test_version_shared_between_clones() {
+        let sdk = mock_sdk_with_auto_detect(1);
+
+        let clone = sdk.clone();
+
+        let metadata = ResponseMetadata {
+            protocol_version: 2,
+            height: 1,
+            ..Default::default()
+        };
+
+        clone
+            .verify_response_metadata("test", &metadata)
+            .expect("metadata should be valid");
+
+        assert_eq!(
+            sdk.protocol_version_number(),
+            2,
+            "original should see update from clone"
+        );
+    }
+
+    #[test]
+    fn test_version_downgrade_ignored() {
+        let sdk = mock_sdk_with_auto_detect(2);
+
+        assert_eq!(sdk.protocol_version_number(), 2);
+
+        let metadata = ResponseMetadata {
+            protocol_version: 1,
+            height: 1,
+            ..Default::default()
+        };
+
+        sdk.verify_response_metadata("test", &metadata)
+            .expect("metadata should be valid");
+
+        assert_eq!(sdk.protocol_version_number(), 2);
+    }
+
+    #[test]
+    fn test_version_zero_ignored() {
+        use dpp::version::PlatformVersion;
+
+        let sdk = mock_sdk_with_auto_detect(PlatformVersion::latest().protocol_version);
+        let original_version = sdk.protocol_version_number();
+
+        let metadata = ResponseMetadata {
+            protocol_version: 0,
+            height: 1,
+            ..Default::default()
+        };
+
+        sdk.verify_response_metadata("test", &metadata)
+            .expect("metadata should be valid");
+
+        assert_eq!(sdk.protocol_version_number(), original_version);
+    }
+
+    #[test]
+    fn test_concurrent_updates_converge_to_highest() {
+        use std::thread;
+
+        let sdk = mock_sdk_with_auto_detect(1);
+
+        assert_eq!(sdk.protocol_version_number(), 1);
+
+        let mut handles = Vec::new();
+        // Spawn threads that race to update to version 2 and version 3
+        for version in [2u32, 3, 2, 3, 2, 3] {
+            let sdk_clone = sdk.clone();
+            handles.push(thread::spawn(move || {
+                let metadata = ResponseMetadata {
+                    protocol_version: version,
+                    height: 1,
+                    ..Default::default()
+                };
+                sdk_clone
+                    .verify_response_metadata("test", &metadata)
+                    .expect("metadata should be valid");
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("thread should not panic");
+        }
+
+        // Highest known version (3) must win regardless of thread ordering
+        assert_eq!(
+            sdk.protocol_version_number(),
+            3,
+            "concurrent updates must converge to highest version"
+        );
+    }
+
+    // TC-7 (global DPP version sync) removed — set_current() is no longer called
+    // from the SDK. Version is stored per-instance, not in the process-wide global.
+
+    #[test]
+    fn test_explicit_version_disables_auto_detect() {
+        use dpp::version::PlatformVersion;
+
+        // Explicitly pin to version 1 via with_version()
+        let sdk = SdkBuilder::new_mock()
+            .with_version(PlatformVersion::get(1).unwrap())
+            .build()
+            .expect("mock Sdk should be created");
+
+        assert_eq!(sdk.protocol_version_number(), 1);
+        assert!(!sdk.auto_detect_protocol_version);
+
+        // Network reports version 2 — should be ignored because version is pinned
+        let metadata = ResponseMetadata {
+            protocol_version: 2,
+            height: 1,
+            ..Default::default()
+        };
+
+        sdk.verify_response_metadata("test", &metadata)
+            .expect("metadata should be valid");
+
+        assert_eq!(
+            sdk.protocol_version_number(),
+            1,
+            "pinned version must not be auto-updated"
+        );
+    }
+
+    #[test]
+    fn test_with_initial_version_seeds_to_older_network_version() {
+        use dpp::version::PlatformVersion;
+
+        // Caller knows the network is on PV 1 and seeds the auto-detect
+        // atomic accordingly. `version_explicit` stays false, so fetch_max
+        // can still ratchet upward when the network later moves to a newer PV.
+        let initial = PlatformVersion::get(1).expect("PV 1 exists");
+        let sdk = SdkBuilder::new_mock()
+            .with_initial_version(initial)
+            .build()
+            .expect("mock Sdk should be created");
+
+        assert_eq!(
+            sdk.protocol_version_number(),
+            1,
+            "with_initial_version must seed the atomic without pinning"
+        );
+        assert_eq!(sdk.version().protocol_version, 1);
+
+        // Metadata at PV 1 is accepted (matches current seed, no ratchet needed).
+        let metadata = ResponseMetadata {
+            protocol_version: 1,
+            height: 1,
+            ..Default::default()
+        };
+        sdk.verify_response_metadata("test", &metadata)
+            .expect("metadata should be valid");
+        assert_eq!(sdk.protocol_version_number(), 1);
+    }
+
+    #[test]
+    fn test_with_initial_version_after_with_version_restores_auto_detect() {
+        use dpp::version::PlatformVersion;
+
+        // Last-write-wins composability: a later `with_initial_version`
+        // must re-enable auto-detect that an earlier `with_version`
+        // disabled.
+        let v_latest = PlatformVersion::latest();
+        let v_old = PlatformVersion::get(1).expect("PV 1 exists");
+
+        let sdk = SdkBuilder::new_mock()
+            .with_version(v_latest)
+            .with_initial_version(v_old)
+            .build()
+            .expect("mock Sdk should be created");
+
+        assert_eq!(
+            sdk.protocol_version_number(),
+            v_old.protocol_version,
+            "with_initial_version must overwrite the prior with_version seed"
+        );
+        assert!(
+            sdk.auto_detect_protocol_version,
+            "with_initial_version must restore auto-detect after with_version disabled it"
+        );
+
+        // Ratchet upward via metadata observation works because auto-detect is on.
+        let metadata = ResponseMetadata {
+            protocol_version: v_latest.protocol_version,
+            height: 1,
+            ..Default::default()
+        };
+        sdk.verify_response_metadata("test", &metadata)
+            .expect("metadata should be valid");
+        assert_eq!(sdk.protocol_version_number(), v_latest.protocol_version);
+    }
+
+    #[test]
+    fn test_mock_version_follows_outer_sdk_atomic() {
+        use dpp::version::PlatformVersion;
+
+        // Build a mock SDK with auto-detect, seeded at PV 1. After a
+        // metadata-driven ratchet to a newer PV, both the outer SDK's
+        // `version()` and the inner `MockDashPlatformSdk::version()`
+        // must report the same value — single source of truth.
+        let v_old = PlatformVersion::get(1).expect("PV 1 exists");
+        let v_new = PlatformVersion::latest();
+
+        let mut sdk = SdkBuilder::new_mock()
+            .with_initial_version(v_old)
+            .build()
+            .expect("mock Sdk should be created");
+
+        assert_eq!(sdk.version().protocol_version, v_old.protocol_version);
+        {
+            let mock = sdk.mock();
+            assert_eq!(
+                mock.version().protocol_version,
+                v_old.protocol_version,
+                "mock version must mirror outer SDK before ratchet"
+            );
+        }
+
+        let metadata = ResponseMetadata {
+            protocol_version: v_new.protocol_version,
+            height: 1,
+            ..Default::default()
+        };
+        sdk.verify_response_metadata("test", &metadata)
+            .expect("metadata should be valid");
+
+        assert_eq!(sdk.version().protocol_version, v_new.protocol_version);
+        let mock = sdk.mock();
+        assert_eq!(
+            mock.version().protocol_version,
+            v_new.protocol_version,
+            "mock version must follow outer ratchet (CMT-001 regression)"
+        );
+    }
+
+    #[test]
+    fn test_default_builder_seeds_initial_protocol_version_floor() {
+        // A default builder must seed the SDK at the floor, not latest().
+        let sdk = SdkBuilder::new_mock()
+            .build()
+            .expect("mock Sdk should be created");
+
+        assert_eq!(
+            sdk.protocol_version_number(),
+            super::DEFAULT_INITIAL_PROTOCOL_VERSION,
+            "unpinned SDK must boot at the upgrade-safe floor, not latest()"
+        );
+        assert_eq!(
+            sdk.version().protocol_version,
+            super::DEFAULT_INITIAL_PROTOCOL_VERSION
+        );
+        assert!(
+            sdk.auto_detect_protocol_version,
+            "default SDK must keep auto-detect enabled"
+        );
+    }
+
+    #[test]
+    fn test_default_floor_ratchets_up_but_never_down() {
+        let sdk = SdkBuilder::new_mock()
+            .build()
+            .expect("mock Sdk should be created");
+        let floor = super::DEFAULT_INITIAL_PROTOCOL_VERSION;
+        assert_eq!(sdk.protocol_version_number(), floor);
+
+        // Ratchet to a fixed known target (PV12), not `floor + N`: stays valid as the
+        // floor advances, and `maybe_update_protocol_version` only accepts known versions.
+        let target = dpp::version::v12::PROTOCOL_VERSION_12;
+        assert!(
+            target > floor,
+            "ratchet test target must exceed the floor; bump it if the floor reaches v12"
+        );
+        sdk.maybe_update_protocol_version(target);
+        assert_eq!(
+            sdk.protocol_version_number(),
+            target,
+            "auto-detect must ratchet upward from the floor"
+        );
+
+        // Never down: an older network version is ignored.
+        sdk.maybe_update_protocol_version(floor - 1);
+        assert_eq!(
+            sdk.protocol_version_number(),
+            target,
+            "ratchet must never downgrade below the highest observed version"
+        );
+    }
+
+    /// Regression guard for the verify-before-ratchet security invariant.
+    ///
+    /// The full tampered-*signed*-proof path isn't unit-testable here: it needs a
+    /// quorum BLS signature, a context provider, and a `FromProof` verifier round-trip.
+    /// That path's safety rests on `parse_proof_with_metadata_and_proof` running proof
+    /// verification (the `?`) BEFORE `verify_response_metadata` → `maybe_update_protocol_version`
+    /// (see the guard comment at that call site). Here we lock in the ratchet's own gates:
+    /// it must NOT raise the stored version off untrustworthy inputs (unknown / zero / lower),
+    /// so even a metadata value that slipped past verification can't move the SDK to a bogus
+    /// protocol version.
+    #[test]
+    fn test_ratchet_rejects_unknown_and_non_upward_versions() {
+        let sdk = SdkBuilder::new_mock()
+            .build()
+            .expect("mock Sdk should be created");
+        let floor = super::DEFAULT_INITIAL_PROTOCOL_VERSION;
+        assert_eq!(sdk.protocol_version_number(), floor);
+
+        // Unknown (above LATEST_VERSION): rejected, version unchanged.
+        sdk.maybe_update_protocol_version(dpp::version::LATEST_VERSION + 1);
+        assert_eq!(
+            sdk.protocol_version_number(),
+            floor,
+            "unknown protocol version must not move the stored version"
+        );
+
+        // Zero (e.g. metadata default / stripped field): ignored.
+        sdk.maybe_update_protocol_version(0);
+        assert_eq!(
+            sdk.protocol_version_number(),
+            floor,
+            "zero protocol version must be ignored"
+        );
+
+        // Equal: no-op (no spurious downgrade or churn).
+        sdk.maybe_update_protocol_version(floor);
+        assert_eq!(sdk.protocol_version_number(), floor);
+
+        // Lower known version: ignored by the upward-only guard.
+        sdk.maybe_update_protocol_version(floor - 1);
+        assert_eq!(
+            sdk.protocol_version_number(),
+            floor,
+            "lower known version must not downgrade the stored version"
+        );
+    }
+
+    #[test]
+    fn test_explicit_pin_overrides_default_floor() {
+        use dpp::version::PlatformVersion;
+
+        // Pin off the floor so the override is observable wherever the floor sits.
+        let pinned_number = super::DEFAULT_INITIAL_PROTOCOL_VERSION - 1;
+        let pinned = PlatformVersion::get(pinned_number).expect("pinned PV exists");
+        let sdk = SdkBuilder::new_mock()
+            .with_version(pinned)
+            .build()
+            .expect("mock Sdk should be created");
+
+        assert_eq!(
+            sdk.protocol_version_number(),
+            pinned_number,
+            "explicit with_version must win over the default floor"
+        );
+        assert!(!sdk.auto_detect_protocol_version);
     }
 
     #[test_matrix([90,91,100,109,110], 100, 10, false; "valid time")]

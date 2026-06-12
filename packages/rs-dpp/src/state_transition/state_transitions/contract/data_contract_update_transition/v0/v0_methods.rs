@@ -1,6 +1,6 @@
 use crate::data_contract::DataContract;
 use crate::identity::signer::Signer;
-use crate::identity::{KeyID, PartialIdentity};
+use crate::identity::{IdentityPublicKey, KeyID, PartialIdentity};
 use crate::serialization::Signable;
 
 use crate::prelude::{IdentityNonce, UserFeeIncrease};
@@ -15,7 +15,7 @@ use platform_version::version::PlatformVersion;
 use platform_version::TryIntoPlatformVersioned;
 
 impl DataContractUpdateTransitionMethodsV0 for DataContractUpdateTransitionV0 {
-    fn new_from_data_contract<S: Signer>(
+    async fn new_from_data_contract<S: Signer<IdentityPublicKey>>(
         data_contract: DataContract,
         identity: &PartialIdentity,
         key_id: KeyID,
@@ -44,7 +44,7 @@ impl DataContractUpdateTransitionMethodsV0 for DataContractUpdateTransitionV0 {
                         "public key did not exist".to_string(),
                     ),
                 ))?;
-        state_transition.set_signature(signer.sign(public_key, &value)?);
+        state_transition.set_signature(signer.sign(public_key, &value).await?);
         Ok(state_transition)
     }
 }

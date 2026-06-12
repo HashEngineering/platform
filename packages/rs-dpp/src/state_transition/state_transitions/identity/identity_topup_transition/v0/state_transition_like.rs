@@ -4,15 +4,16 @@ use platform_value::BinaryData;
 
 use crate::prelude::UserFeeIncrease;
 use crate::state_transition::identity_topup_transition::IdentityTopUpTransition;
+use crate::state_transition::StateTransitionHasUserFeeIncrease;
 use crate::{
     prelude::Identifier,
-    state_transition::{StateTransitionLike, StateTransitionType},
+    state_transition::{StateTransitionLike, StateTransitionOwned, StateTransitionType},
 };
 
 use crate::state_transition::identity_topup_transition::v0::IdentityTopUpTransitionV0;
 
-use crate::state_transition::StateTransition;
 use crate::state_transition::StateTransitionType::IdentityTopUp;
+use crate::state_transition::{StateTransition, StateTransitionSingleSigned};
 use crate::version::FeatureVersion;
 
 impl From<IdentityTopUpTransitionV0> for StateTransition {
@@ -31,26 +32,10 @@ impl StateTransitionLike for IdentityTopUpTransitionV0 {
     fn state_transition_type(&self) -> StateTransitionType {
         IdentityTopUp
     }
-    /// returns the signature as a byte-array
-    fn signature(&self) -> &BinaryData {
-        &self.signature
-    }
-    /// set a new signature
-    fn set_signature(&mut self, signature: BinaryData) {
-        self.signature = signature
-    }
+
     /// Returns ID of the topUpd contract
     fn modified_data_ids(&self) -> Vec<Identifier> {
         vec![self.identity_id]
-    }
-
-    fn set_signature_bytes(&mut self, signature: Vec<u8>) {
-        self.signature = BinaryData::new(signature)
-    }
-
-    /// Get owner ID
-    fn owner_id(&self) -> Identifier {
-        self.identity_id
     }
 
     /// We want transactions to be unique based on the asset lock proof, here there is a
@@ -68,12 +53,35 @@ impl StateTransitionLike for IdentityTopUpTransitionV0 {
             }
         }
     }
+}
 
+impl StateTransitionHasUserFeeIncrease for IdentityTopUpTransitionV0 {
     fn user_fee_increase(&self) -> UserFeeIncrease {
         self.user_fee_increase
     }
 
     fn set_user_fee_increase(&mut self, user_fee_increase: UserFeeIncrease) {
         self.user_fee_increase = user_fee_increase
+    }
+}
+
+impl StateTransitionSingleSigned for IdentityTopUpTransitionV0 {
+    /// returns the signature as a byte-array
+    fn signature(&self) -> &BinaryData {
+        &self.signature
+    }
+    /// set a new signature
+    fn set_signature(&mut self, signature: BinaryData) {
+        self.signature = signature
+    }
+    fn set_signature_bytes(&mut self, signature: Vec<u8>) {
+        self.signature = BinaryData::new(signature)
+    }
+}
+
+impl StateTransitionOwned for IdentityTopUpTransitionV0 {
+    /// Get owner ID
+    fn owner_id(&self) -> Identifier {
+        self.identity_id
     }
 }

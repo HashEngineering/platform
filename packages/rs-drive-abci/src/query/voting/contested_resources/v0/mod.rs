@@ -2,6 +2,7 @@ use crate::error::query::QueryError;
 use crate::error::Error;
 use crate::platform_types::platform::Platform;
 use crate::platform_types::platform_state::PlatformState;
+use crate::query::response_metadata::CheckpointUsed;
 use crate::query::QueryValidationResult;
 use bincode::error::EncodeError;
 use dapi_grpc::platform::v0::get_contested_resources_request::GetContestedResourcesRequestV0;
@@ -16,6 +17,7 @@ use dpp::version::PlatformVersion;
 use dpp::{check_validation_result_with_data, ProtocolError};
 use drive::error::query::QuerySyntaxError;
 use drive::query::vote_polls_by_document_type_query::VotePollsByDocumentTypeQuery;
+use drive::util::grove_operations::GroveDBToUse;
 
 impl<C> Platform<C> {
     pub(super) fn query_contested_resources_v0(
@@ -192,11 +194,12 @@ impl<C> Platform<C> {
                     Err(e) => return Err(e.into()),
                 };
 
+            let (grovedb_used, proof) =
+                self.response_proof_v0(platform_state, proof, GroveDBToUse::Current)?;
+
             GetContestedResourcesResponseV0 {
-                result: Some(get_contested_resources_response_v0::Result::Proof(
-                    self.response_proof_v0(platform_state, proof),
-                )),
-                metadata: Some(self.response_metadata_v0(platform_state)),
+                result: Some(get_contested_resources_response_v0::Result::Proof(proof)),
+                metadata: Some(self.response_metadata_v0(platform_state, grovedb_used)),
             }
         } else {
             let results =
@@ -226,10 +229,127 @@ impl<C> Platform<C> {
                         },
                     ),
                 ),
-                metadata: Some(self.response_metadata_v0(platform_state)),
+                metadata: Some(self.response_metadata_v0(platform_state, CheckpointUsed::Current)),
             }
         };
 
         Ok(QueryValidationResult::new_with_data(response))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::tests::setup_platform;
+    use dpp::dashcore::Network;
+
+    #[test]
+    fn test_query_contested_resources_invalid_contract_id() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        let request = GetContestedResourcesRequestV0 {
+            contract_id: vec![0; 8],
+            document_type_name: "x".to_string(),
+            index_name: "x".to_string(),
+            start_index_values: vec![],
+            end_index_values: vec![],
+            start_at_value_info: None,
+            count: None,
+            order_ascending: true,
+            prove: false,
+        };
+
+        let result = platform
+            .query_contested_resources_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.errors.as_slice(),
+            [QueryError::InvalidArgument(msg)] if msg.contains("contract_id must be a valid identifier")
+        ));
+    }
+
+    #[test]
+    fn test_query_contested_resources_contract_not_found() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        let request = GetContestedResourcesRequestV0 {
+            contract_id: vec![0; 32],
+            document_type_name: "x".to_string(),
+            index_name: "x".to_string(),
+            start_index_values: vec![],
+            end_index_values: vec![],
+            start_at_value_info: None,
+            count: None,
+            order_ascending: true,
+            prove: false,
+        };
+
+        let result = platform
+            .query_contested_resources_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.errors.as_slice(),
+            [QueryError::Query(QuerySyntaxError::DataContractNotFound(_))]
+        ));
+    }
+
+    #[test]
+    fn test_query_contested_resources_contract_not_found_prove() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        let request = GetContestedResourcesRequestV0 {
+            contract_id: vec![0; 32],
+            document_type_name: "x".to_string(),
+            index_name: "x".to_string(),
+            start_index_values: vec![],
+            end_index_values: vec![],
+            start_at_value_info: None,
+            count: None,
+            order_ascending: true,
+            prove: true,
+        };
+
+        let result = platform
+            .query_contested_resources_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        // Contract lookup runs before the prove/no-prove split.
+        assert!(matches!(
+            result.errors.as_slice(),
+            [QueryError::Query(QuerySyntaxError::DataContractNotFound(_))]
+        ));
+    }
+
+    #[test]
+    fn test_query_contested_resources_short_contract_id_rejected() {
+        // Verify the InvalidArgument message for a too-short contract_id
+        // includes the "contested resources query" suffix specific to this
+        // endpoint.
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        let request = GetContestedResourcesRequestV0 {
+            contract_id: vec![0; 31], // off-by-one short
+            document_type_name: "x".to_string(),
+            index_name: "x".to_string(),
+            start_index_values: vec![],
+            end_index_values: vec![],
+            start_at_value_info: None,
+            count: None,
+            order_ascending: true,
+            prove: false,
+        };
+
+        let result = platform
+            .query_contested_resources_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.errors.as_slice(),
+            [QueryError::InvalidArgument(msg)]
+                if msg.contains("contract_id must be a valid identifier")
+                    && msg.contains("contested resources query")
+        ));
     }
 }

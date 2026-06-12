@@ -32,6 +32,20 @@ export default {
         target: {
           type: ['string', 'null'],
         },
+        // Extra build args forwarded to `docker compose build` for this
+        // image. Each key/value pair becomes a `build.args` entry rendered
+        // into the per-config `dynamic-compose.yml` and picked up by compose
+        // at build time. Image-specific keys live here:
+        // - CARGO_BUILD_PROFILE: "dev" | "release" — Rust profile for
+        //   drive-abci / rs-dapi. Release is required for SDK_TEST_DATA
+        //   shielded seeding at N > a few thousand.
+        // - SDK_TEST_DATA: "true" — enable the SDK test-data cfg flag in
+        //   the binary at compile time.
+        buildArgs: {
+          type: 'object',
+          propertyNames: { type: 'string', pattern: '^[A-Za-z_][A-Za-z0-9_]*$' },
+          additionalProperties: { type: 'string' },
+        },
       },
       required: ['enabled', 'context', 'dockerFile', 'target'],
       additionalProperties: false,
@@ -307,6 +321,19 @@ export default {
           required: ['host', 'port', 'users', 'allowIps'],
           additionalProperties: false,
         },
+        zmq: {
+          type: 'object',
+          properties: {
+            host: {
+              $ref: '#/definitions/host',
+            },
+            port: {
+              $ref: '#/definitions/port',
+            },
+          },
+          required: ['host', 'port'],
+          additionalProperties: false,
+        },
         spork: {
           type: 'object',
           properties: {
@@ -474,14 +501,60 @@ export default {
           description: 'List of core indexes to enable. `platform.enable`, '
             + ' `core.masternode.enable`, and `core.insight.enabled` add indexes dynamically',
         },
+        compactFilters: {
+          type: 'boolean',
+          description: 'Build the BIP158 cfilter index and advertise '
+            + 'NODE_COMPACT_FILTERS to peers, so BIP157 SPV clients can sync '
+            + 'filter headers + filters from this node. Defaults to true on '
+            + 'every preset; flip to false to skip the cfilter index '
+            + '(~10% chain-size disk overhead on mainnet).',
+        },
       },
-      required: ['docker', 'p2p', 'rpc', 'spork', 'masternode', 'miner', 'devnet', 'log',
+      required: ['docker', 'p2p', 'rpc', 'zmq', 'spork', 'masternode', 'miner', 'devnet', 'log',
         'indexes', 'insight'],
       additionalProperties: false,
     },
     platform: {
       type: 'object',
       properties: {
+        quorumList: {
+          type: 'object',
+          properties: {
+            enabled: {
+              type: 'boolean',
+            },
+            docker: {
+              $ref: '#/definitions/docker',
+            },
+            api: {
+              type: 'object',
+              properties: {
+                host: {
+                  $ref: '#/definitions/host',
+                },
+                port: {
+                  $ref: '#/definitions/port',
+                },
+              },
+              required: ['host', 'port'],
+              additionalProperties: false,
+            },
+            previousBlocksOffset: {
+              type: 'integer',
+              minimum: 0,
+            },
+            versionCheckHost: {
+              type: 'string',
+              description: 'Host to use for version checking (used in local networks)',
+            },
+            addressHostOverride: {
+              type: 'string',
+              description: 'Override for address host (used in local networks)',
+            },
+          },
+          required: ['enabled', 'docker', 'api', 'previousBlocksOffset', 'versionCheckHost', 'addressHostOverride'],
+          additionalProperties: false,
+        },
         gateway: {
           type: 'object',
           properties: {
@@ -514,10 +587,7 @@ export default {
                   required: ['maxRequests'],
                   additionalProperties: false,
                 },
-                dapiApi: {
-                  $ref: 'gatewayUpstream',
-                },
-                dapiCoreStreams: {
+                rsDapi: {
                   $ref: 'gatewayUpstream',
                 },
                 dapiJsonRpc: {
@@ -525,7 +595,7 @@ export default {
                 },
               },
               additionalProperties: false,
-              required: ['driveGrpc', 'dapiApi', 'dapiCoreStreams', 'dapiJsonRpc'],
+              required: ['driveGrpc', 'rsDapi', 'dapiJsonRpc'],
             },
             metrics: {
               $ref: '#/definitions/enabledHostPort',
@@ -632,7 +702,7 @@ export default {
                 },
                 provider: {
                   type: 'string',
-                  enum: ['zerossl', 'self-signed', 'file'],
+                  enum: ['zerossl', 'letsencrypt', 'self-signed', 'file'],
                 },
                 providerConfigs: {
                   type: 'object',
@@ -650,6 +720,16 @@ export default {
                         },
                       },
                       required: ['apiKey', 'id'],
+                      additionalProperties: false,
+                    },
+                    letsencrypt: {
+                      type: ['object'],
+                      properties: {
+                        email: {
+                          type: ['string', 'null'],
+                        },
+                      },
+                      required: ['email'],
                       additionalProperties: false,
                     },
                   },
@@ -791,7 +871,7 @@ export default {
         dapi: {
           type: 'object',
           properties: {
-            api: {
+            rsDapi: {
               type: 'object',
               properties: {
                 docker: {
@@ -819,17 +899,46 @@ export default {
                   required: ['image', 'build', 'deploy'],
                   additionalProperties: false,
                 },
+                metrics: {
+                  $ref: '#/definitions/enabledHostPort',
+                },
+                logs: {
+                  type: 'object',
+                  properties: {
+                    level: {
+                      type: 'string',
+                      minLength: 1,
+                      description: 'error, warn, info, debug, trace, off or logging specification string in RUST_LOG format',
+                      enum: ['error', 'warn', 'info', 'debug', 'trace', 'off'],
+                    },
+                    jsonFormat: {
+                      type: 'boolean',
+                      description: 'Emit structured JSON application logs when true',
+                    },
+                    accessLogPath: {
+                      type: ['string', 'null'],
+                      description: 'Filesystem path for access logs; leave empty or null to disable access logging',
+                    },
+                    accessLogFormat: {
+                      type: 'string',
+                      description: 'Access log format',
+                      enum: ['combined', 'json'],
+                    },
+                  },
+                  required: ['level', 'jsonFormat', 'accessLogPath', 'accessLogFormat'],
+                  additionalProperties: false,
+                },
                 waitForStResultTimeout: {
                   type: 'integer',
                   minimum: 1,
                   description: 'How many millis to wait for state transition result before timeout',
                 },
               },
-              required: ['docker', 'waitForStResultTimeout'],
+              required: ['docker', 'metrics', 'logs', 'waitForStResultTimeout'],
               additionalProperties: false,
             },
           },
-          required: ['api'],
+          required: ['rsDapi'],
           additionalProperties: false,
         },
         drive: {
@@ -986,6 +1095,9 @@ export default {
                         $ref: '#/definitions/tenderdashNodeAddress',
                       },
                     },
+                    allowlistOnly: {
+                      type: 'boolean',
+                    },
                     flushThrottleTimeout: {
                       $ref: '#/definitions/duration',
                     },
@@ -1010,7 +1122,7 @@ export default {
                       minimum: 1,
                     },
                   },
-                  required: ['host', 'port', 'persistentPeers', 'seeds', 'flushThrottleTimeout', 'maxPacketMsgPayloadSize', 'sendRate', 'recvRate', 'maxConnections', 'maxOutgoingConnections'],
+                  required: ['host', 'port', 'persistentPeers', 'seeds', 'allowlistOnly', 'flushThrottleTimeout', 'maxPacketMsgPayloadSize', 'sendRate', 'recvRate', 'maxConnections', 'maxOutgoingConnections'],
                   additionalProperties: false,
                 },
                 mempool: {

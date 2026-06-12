@@ -8,6 +8,8 @@ use dpp::version::PlatformVersion;
 use dapi_grpc::platform::v0::get_protocol_version_upgrade_vote_status_request::GetProtocolVersionUpgradeVoteStatusRequestV0;
 use dapi_grpc::platform::v0::get_protocol_version_upgrade_vote_status_response::get_protocol_version_upgrade_vote_status_response_v0::{VersionSignal, VersionSignals};
 use dapi_grpc::platform::v0::get_protocol_version_upgrade_vote_status_response::{get_protocol_version_upgrade_vote_status_response_v0, GetProtocolVersionUpgradeVoteStatusResponseV0};
+use drive::util::grove_operations::GroveDBToUse;
+use crate::query::response_metadata::CheckpointUsed;
 use crate::error::query::QueryError;
 use crate::platform_types::platform_state::PlatformState;
 
@@ -57,10 +59,11 @@ impl<C> Platform<C> {
             GetProtocolVersionUpgradeVoteStatusResponseV0 {
                 result: Some(
                     get_protocol_version_upgrade_vote_status_response_v0::Result::Proof(
-                        self.response_proof_v0(platform_state, proof),
+                        self.response_proof_v0(platform_state, proof, GroveDBToUse::Current)
+                            .map(|(_, proof)| proof)?,
                     ),
                 ),
-                metadata: Some(self.response_metadata_v0(platform_state)),
+                metadata: Some(self.response_metadata_v0(platform_state, CheckpointUsed::Current)),
             }
         } else {
             let result =
@@ -86,7 +89,7 @@ impl<C> Platform<C> {
                         },
                     ),
                 ),
-                metadata: Some(self.response_metadata_v0(platform_state)),
+                metadata: Some(self.response_metadata_v0(platform_state, CheckpointUsed::Current)),
             }
         };
 
@@ -421,5 +424,70 @@ mod tests {
 
         assert_eq!(upgrade.len(), 1);
         assert_eq!(upgrade.get(&validator_pro_tx_hash), Some(1).as_ref());
+    }
+
+    #[test]
+    fn test_query_upgrade_vote_status_bad_start_hash_length() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        // 8 bytes instead of 32
+        let request = GetProtocolVersionUpgradeVoteStatusRequestV0 {
+            start_pro_tx_hash: vec![0; 8],
+            count: 5,
+            prove: false,
+        };
+
+        let result = platform
+            .query_version_upgrade_vote_status_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.errors.as_slice(),
+            [QueryError::InvalidArgument(msg)] if msg.contains("start_pro_tx_hash not 32 bytes long")
+        ));
+    }
+
+    #[test]
+    fn test_query_upgrade_vote_status_count_too_high() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        let request = GetProtocolVersionUpgradeVoteStatusRequestV0 {
+            start_pro_tx_hash: vec![],
+            count: u16::MAX as u32,
+            prove: false,
+        };
+
+        let result = platform
+            .query_version_upgrade_vote_status_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.errors.as_slice(),
+            [QueryError::InvalidArgument(msg)] if msg.contains("count too high")
+        ));
+    }
+
+    #[test]
+    fn test_query_upgrade_vote_status_empty_start_hash() {
+        // empty start_pro_tx_hash should map to None and succeed
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        let request = GetProtocolVersionUpgradeVoteStatusRequestV0 {
+            start_pro_tx_hash: vec![],
+            count: 5,
+            prove: false,
+        };
+
+        let result = platform
+            .query_version_upgrade_vote_status_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.data,
+            Some(GetProtocolVersionUpgradeVoteStatusResponseV0 {
+                result: Some(get_protocol_version_upgrade_vote_status_response_v0::Result::Versions(VersionSignals { version_signals })),
+                metadata: Some(_),
+            }) if version_signals.is_empty()
+        ));
     }
 }

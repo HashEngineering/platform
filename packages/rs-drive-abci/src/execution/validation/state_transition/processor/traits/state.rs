@@ -1,0 +1,495 @@
+use crate::error::execution::ExecutionError;
+use crate::error::Error;
+use crate::execution::types::state_transition_execution_context::StateTransitionExecutionContext;
+use crate::execution::validation::state_transition::identity_create::StateTransitionStateValidationForIdentityCreateTransitionV0;
+use crate::execution::validation::state_transition::identity_create_from_addresses::StateTransitionStateValidationForIdentityCreateFromAddressesTransitionV0;
+use crate::execution::validation::state_transition::identity_create_from_shielded_pool::StateTransitionIdentityCreateFromShieldedPoolTransitionActionTransformer;
+use crate::execution::validation::state_transition::identity_create_from_shielded_pool::StateTransitionStateValidationForIdentityCreateFromShieldedPoolTransitionV0;
+use crate::execution::validation::state_transition::transformer::StateTransitionActionTransformer;
+use crate::execution::validation::state_transition::ValidationMode;
+use crate::platform_types::platform::PlatformRef;
+use crate::rpc::core::CoreRPCLike;
+use dpp::block::block_info::BlockInfo;
+use dpp::prelude::ConsensusValidationResult;
+use dpp::state_transition::StateTransition;
+use drive::grovedb::TransactionArg;
+use drive::state_transition_action::StateTransitionAction;
+
+/// A trait for validating state transitions within a blockchain.
+pub(crate) trait StateTransitionStateValidation: StateTransitionActionTransformer {
+    /// Validates the state transition by analyzing the changes in the platform state after applying the transaction.
+    ///
+    /// # Arguments
+    ///
+    /// * `platform` - A reference to the platform containing the state data.
+    /// * `tx` - The transaction argument to be applied.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `C: CoreRPCLike` - A type constraint indicating that C should implement `CoreRPCLike`.
+    ///
+    /// # Returns
+    ///
+    /// * `Result<ConsensusValidationResult<StateTransitionAction>, Error>` - A result with either a ConsensusValidationResult containing a StateTransitionAction or an Error.
+    fn validate_state<C: CoreRPCLike>(
+        &self,
+        action: Option<StateTransitionAction>,
+        platform: &PlatformRef<C>,
+        validation_mode: ValidationMode,
+        block_info: &BlockInfo,
+        execution_context: &mut StateTransitionExecutionContext,
+        tx: TransactionArg,
+    ) -> Result<ConsensusValidationResult<StateTransitionAction>, Error>;
+
+    /// Do we perform the validate state call on this transaction?
+    /// Some parts of state validation (balances/nonces) happen outside this call.
+    fn has_state_validation(&self) -> bool {
+        true
+    }
+
+    /// Validates full state on check tx, this is only the case for masternode voting.
+    /// This is because masternodes do not pay for the voting, so we need to make sure they can
+    /// actually vote
+    fn validates_full_state_on_check_tx(&self) -> bool {
+        false
+    }
+}
+
+impl StateTransitionStateValidation for StateTransition {
+    fn validate_state<C: CoreRPCLike>(
+        &self,
+        action: Option<StateTransitionAction>,
+        platform: &PlatformRef<C>,
+        validation_mode: ValidationMode,
+        block_info: &BlockInfo,
+        execution_context: &mut StateTransitionExecutionContext,
+        tx: TransactionArg,
+    ) -> Result<ConsensusValidationResult<StateTransitionAction>, Error> {
+        match self {
+            // The replay attack is prevented by checking if a data contract exists with this id first
+            StateTransition::DataContractCreate(st) => st.validate_state(
+                action,
+                platform,
+                validation_mode,
+                block_info,
+                execution_context,
+                tx,
+            ),
+            // The replay attack is prevented by identity data contract nonce
+            StateTransition::DataContractUpdate(st) => st.validate_state(
+                action,
+                platform,
+                validation_mode,
+                block_info,
+                execution_context,
+                tx,
+            ),
+            StateTransition::IdentityCreate(st) => {
+                let action =
+                    action.ok_or(Error::Execution(ExecutionError::CorruptedCodeExecution(
+                        "identity create validation should always an action",
+                    )))?;
+                let StateTransitionAction::IdentityCreateAction(action) = action else {
+                    return Err(Error::Execution(ExecutionError::CorruptedCodeExecution(
+                        "action must be a identity create transition action",
+                    )));
+                };
+                st.validate_state_for_identity_create_transition(
+                    action,
+                    platform,
+                    execution_context,
+                    tx,
+                )
+            }
+            StateTransition::IdentityUpdate(st) => st.validate_state(
+                action,
+                platform,
+                validation_mode,
+                block_info,
+                execution_context,
+                tx,
+            ),
+            StateTransition::IdentityTopUp(_) => {
+                Err(Error::Execution(ExecutionError::CorruptedCodeExecution(
+                    "identity top up should not have state validation",
+                )))
+            }
+            StateTransition::IdentityCreditWithdrawal(_) => {
+                Err(Error::Execution(ExecutionError::CorruptedCodeExecution(
+                    "identity credit withdrawal should not have state validation",
+                )))
+            }
+            // The replay attack is prevented by identity data contract nonce
+            StateTransition::Batch(st) => st.validate_state(
+                action,
+                platform,
+                validation_mode,
+                block_info,
+                execution_context,
+                tx,
+            ),
+            StateTransition::IdentityCreditTransfer(st) => st.validate_state(
+                action,
+                platform,
+                validation_mode,
+                block_info,
+                execution_context,
+                tx,
+            ),
+            StateTransition::MasternodeVote(st) => st.validate_state(
+                action,
+                platform,
+                validation_mode,
+                block_info,
+                execution_context,
+                tx,
+            ),
+            StateTransition::IdentityCreditTransferToAddresses(_) => {
+                Err(Error::Execution(ExecutionError::CorruptedCodeExecution(
+                    "identity credit transfer to addresses should not have state validation",
+                )))
+            }
+            StateTransition::IdentityCreateFromAddresses(st) => {
+                let action =
+                    action.ok_or(Error::Execution(ExecutionError::CorruptedCodeExecution(
+                        "identity create from addresses validation should always an action",
+                    )))?;
+                let StateTransitionAction::IdentityCreateFromAddressesAction(action) = action
+                else {
+                    return Err(Error::Execution(ExecutionError::CorruptedCodeExecution(
+                        "action must be a identity create from addresses transition action",
+                    )));
+                };
+                st.validate_state_for_identity_create_from_addresses_transition(
+                    action,
+                    platform,
+                    execution_context,
+                    tx,
+                )
+            }
+            StateTransition::IdentityTopUpFromAddresses(_) => {
+                Err(Error::Execution(ExecutionError::CorruptedCodeExecution(
+                    "identity top up from addresses should not have state validation",
+                )))
+            }
+            StateTransition::AddressFundsTransfer(_) => {
+                Err(Error::Execution(ExecutionError::CorruptedCodeExecution(
+                    "address funds transfer should not have state validation",
+                )))
+            }
+            StateTransition::AddressFundingFromAssetLock(_) => {
+                Err(Error::Execution(ExecutionError::CorruptedCodeExecution(
+                    "address funding from asset lock should not have state validation",
+                )))
+            }
+            StateTransition::AddressCreditWithdrawal(_) => {
+                Err(Error::Execution(ExecutionError::CorruptedCodeExecution(
+                    "address credit withdrawal should not have state validation",
+                )))
+            }
+            StateTransition::Shield(_) => Err(Error::Execution(
+                ExecutionError::CorruptedCodeExecution("shield should not have state validation"),
+            )),
+            StateTransition::ShieldedTransfer(_) => {
+                Err(Error::Execution(ExecutionError::CorruptedCodeExecution(
+                    "shielded transfer should not have state validation",
+                )))
+            }
+            StateTransition::Unshield(_) => Err(Error::Execution(
+                ExecutionError::CorruptedCodeExecution("unshield should not have state validation"),
+            )),
+            StateTransition::ShieldFromAssetLock(_) => {
+                Err(Error::Execution(ExecutionError::CorruptedCodeExecution(
+                    "shield from asset lock should not have state validation",
+                )))
+            }
+            StateTransition::ShieldedWithdrawal(_) => {
+                Err(Error::Execution(ExecutionError::CorruptedCodeExecution(
+                    "shielded withdrawal should not have state validation",
+                )))
+            }
+            StateTransition::IdentityCreateFromShieldedPool(st) => {
+                // Type 20 keeps `has_advanced_structure_validation_with_state() == false` (the
+                // cheap PoP/key-structure checks stay in `validate_shielded_proof`, ahead of
+                // Halo 2), so the processor never pre-builds the action — it always arrives here
+                // as `None`. Build the optimistic SUCCESS action now via `transform` (the
+                // pool/anchor/nullifier/balance checks); if that already rejects, forward the
+                // rejection, otherwise hand the success action to `validate_state`, which branches
+                // success-vs-Unshield-fallback on the identity-creation state checks. Fail CLOSED
+                // at runtime if the no-pre-build invariant is ever broken: using a pre-built
+                // action would silently route around those checks.
+                let action = match action {
+                    Some(_) => {
+                        return Err(Error::Execution(ExecutionError::CorruptedCodeExecution(
+                            "IdentityCreateFromShieldedPool must not be pre-built by the processor \
+                             (advanced_structure_with_state is false)",
+                        )));
+                    }
+                    None => {
+                        let transform_result = st
+                            .transform_into_action_for_identity_create_from_shielded_pool_transition(
+                                platform,
+                                execution_context,
+                                tx,
+                            )?;
+                        if !transform_result.is_valid_with_data() {
+                            return Ok(transform_result);
+                        }
+                        transform_result.into_data()?
+                    }
+                };
+                let StateTransitionAction::IdentityCreateFromShieldedPoolAction(action) = action
+                else {
+                    return Err(Error::Execution(ExecutionError::CorruptedCodeExecution(
+                        "action must be an identity create from shielded pool transition action",
+                    )));
+                };
+                st.validate_state_for_identity_create_from_shielded_pool_transition(
+                    action,
+                    platform,
+                    execution_context,
+                    tx,
+                )
+            }
+        }
+    }
+
+    fn has_state_validation(&self) -> bool {
+        match self {
+            StateTransition::IdentityCreateFromAddresses(_)
+            | StateTransition::IdentityCreateFromShieldedPool(_)
+            | StateTransition::DataContractCreate(_)
+            | StateTransition::IdentityCreate(_)
+            | StateTransition::DataContractUpdate(_)
+            | StateTransition::Batch(_)
+            | StateTransition::IdentityUpdate(_)
+            | StateTransition::IdentityCreditTransfer(_)
+            | StateTransition::MasternodeVote(_) => true,
+            StateTransition::AddressFundsTransfer(_)
+            | StateTransition::IdentityTopUp(_)
+            | StateTransition::AddressFundingFromAssetLock(_)
+            | StateTransition::IdentityTopUpFromAddresses(_)
+            | StateTransition::IdentityCreditWithdrawal(_)
+            | StateTransition::AddressCreditWithdrawal(_)
+            | StateTransition::IdentityCreditTransferToAddresses(_)
+            | StateTransition::Shield(_)
+            | StateTransition::ShieldedTransfer(_)
+            | StateTransition::Unshield(_)
+            | StateTransition::ShieldFromAssetLock(_)
+            | StateTransition::ShieldedWithdrawal(_) => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn make_data_contract_create_st() -> StateTransition {
+        use dpp::tests::fixtures::get_data_contract_fixture;
+        use platform_version::TryIntoPlatformVersioned;
+        let platform_version = platform_version::version::PlatformVersion::latest();
+        let created_data_contract =
+            get_data_contract_fixture(None, 1, platform_version.protocol_version);
+        let transition: dpp::state_transition::data_contract_create_transition::DataContractCreateTransition =
+            created_data_contract.try_into_platform_versioned(platform_version).unwrap();
+        transition.into()
+    }
+
+    fn make_data_contract_update_st() -> StateTransition {
+        use dpp::data_contract::accessors::v0::DataContractV0Getters;
+        use dpp::tests::fixtures::get_data_contract_fixture;
+        use platform_version::TryIntoPlatformVersioned;
+        let platform_version = platform_version::version::PlatformVersion::latest();
+        let created_data_contract =
+            get_data_contract_fixture(None, 1, platform_version.protocol_version);
+        let data_contract = created_data_contract.data_contract().clone();
+        let transition: dpp::state_transition::data_contract_update_transition::DataContractUpdateTransition =
+            (data_contract, 2u64).try_into_platform_versioned(platform_version).unwrap();
+        transition.into()
+    }
+
+    use dpp::state_transition::batch_transition::BatchTransition;
+    use dpp::state_transition::batch_transition::BatchTransitionV0;
+    use dpp::state_transition::data_contract_create_transition::DataContractCreateTransition;
+    use dpp::state_transition::data_contract_update_transition::DataContractUpdateTransition;
+    use dpp::state_transition::identity_create_transition::IdentityCreateTransition;
+    use dpp::state_transition::identity_create_transition::v0::IdentityCreateTransitionV0;
+    use dpp::state_transition::identity_credit_transfer_transition::IdentityCreditTransferTransition;
+    use dpp::state_transition::identity_credit_transfer_transition::v0::IdentityCreditTransferTransitionV0;
+    use dpp::state_transition::identity_credit_withdrawal_transition::IdentityCreditWithdrawalTransition;
+    use dpp::state_transition::identity_credit_withdrawal_transition::v0::IdentityCreditWithdrawalTransitionV0;
+    use dpp::state_transition::identity_topup_transition::IdentityTopUpTransition;
+    use dpp::state_transition::identity_topup_transition::v0::IdentityTopUpTransitionV0;
+    use dpp::state_transition::identity_update_transition::IdentityUpdateTransition;
+    use dpp::state_transition::identity_update_transition::v0::IdentityUpdateTransitionV0;
+    use dpp::state_transition::masternode_vote_transition::MasternodeVoteTransition;
+    use dpp::state_transition::masternode_vote_transition::v0::MasternodeVoteTransitionV0;
+    use dpp::state_transition::state_transitions::identity::identity_credit_transfer_to_addresses_transition::IdentityCreditTransferToAddressesTransition;
+    use dpp::state_transition::state_transitions::identity::identity_credit_transfer_to_addresses_transition::v0::IdentityCreditTransferToAddressesTransitionV0;
+    use dpp::state_transition::state_transitions::identity::identity_create_from_addresses_transition::IdentityCreateFromAddressesTransition;
+    use dpp::state_transition::state_transitions::identity::identity_create_from_addresses_transition::v0::IdentityCreateFromAddressesTransitionV0;
+    use dpp::state_transition::state_transitions::identity::identity_topup_from_addresses_transition::IdentityTopUpFromAddressesTransition;
+    use dpp::state_transition::state_transitions::identity::identity_topup_from_addresses_transition::v0::IdentityTopUpFromAddressesTransitionV0;
+    use dpp::state_transition::state_transitions::address_funds::address_funds_transfer_transition::AddressFundsTransferTransition;
+    use dpp::state_transition::state_transitions::address_funds::address_funds_transfer_transition::v0::AddressFundsTransferTransitionV0;
+    use dpp::state_transition::state_transitions::address_funds::address_funding_from_asset_lock_transition::AddressFundingFromAssetLockTransition;
+    use dpp::state_transition::state_transitions::address_funds::address_funding_from_asset_lock_transition::v0::AddressFundingFromAssetLockTransitionV0;
+    use dpp::state_transition::state_transitions::address_funds::address_credit_withdrawal_transition::AddressCreditWithdrawalTransition;
+    use dpp::state_transition::state_transitions::address_funds::address_credit_withdrawal_transition::v0::AddressCreditWithdrawalTransitionV0;
+    use dpp::state_transition::shielded_transfer_transition::ShieldedTransferTransition;
+    use dpp::state_transition::shielded_transfer_transition::v0::ShieldedTransferTransitionV0;
+
+    mod has_state_validation {
+        use super::*;
+
+        #[test]
+        fn should_return_true_for_transitions_with_state_validation() {
+            let transitions: Vec<(&str, StateTransition)> = vec![
+                (
+                    "IdentityCreateFromAddresses",
+                    StateTransition::IdentityCreateFromAddresses(
+                        IdentityCreateFromAddressesTransition::V0(
+                            IdentityCreateFromAddressesTransitionV0::default(),
+                        ),
+                    ),
+                ),
+                ("DataContractCreate", make_data_contract_create_st()),
+                (
+                    "IdentityCreate",
+                    StateTransition::IdentityCreate(IdentityCreateTransition::V0(
+                        IdentityCreateTransitionV0::default(),
+                    )),
+                ),
+                ("DataContractUpdate", make_data_contract_update_st()),
+                (
+                    "Batch",
+                    StateTransition::Batch(BatchTransition::V0(BatchTransitionV0::default())),
+                ),
+                (
+                    "IdentityUpdate",
+                    StateTransition::IdentityUpdate(IdentityUpdateTransition::V0(
+                        IdentityUpdateTransitionV0::default(),
+                    )),
+                ),
+                (
+                    "IdentityCreditTransfer",
+                    StateTransition::IdentityCreditTransfer(IdentityCreditTransferTransition::V0(
+                        IdentityCreditTransferTransitionV0::default(),
+                    )),
+                ),
+                (
+                    "MasternodeVote",
+                    StateTransition::MasternodeVote(MasternodeVoteTransition::V0(
+                        MasternodeVoteTransitionV0::default(),
+                    )),
+                ),
+                {
+                    use dpp::state_transition::state_transitions::shielded::identity_create_from_shielded_pool_transition::v0::IdentityCreateFromShieldedPoolTransitionV0;
+                    use dpp::state_transition::state_transitions::shielded::identity_create_from_shielded_pool_transition::IdentityCreateFromShieldedPoolTransition;
+                    (
+                        "IdentityCreateFromShieldedPool",
+                        StateTransition::IdentityCreateFromShieldedPool(
+                            IdentityCreateFromShieldedPoolTransition::V0(
+                                IdentityCreateFromShieldedPoolTransitionV0 {
+                                    public_keys: vec![],
+                                    denomination: 0,
+                                    send_to_address_on_creation_failure:
+                                        dpp::address_funds::PlatformAddress::P2pkh([0u8; 20]),
+                                    actions: vec![],
+                                    anchor: [0u8; 32],
+                                    proof: vec![],
+                                    binding_signature: [0u8; 64],
+                                    identity_id: Default::default(),
+                                },
+                            ),
+                        ),
+                    )
+                },
+            ];
+            for (name, st) in transitions {
+                assert!(
+                    st.has_state_validation(),
+                    "expected has_state_validation=true for {}",
+                    name
+                );
+            }
+        }
+
+        #[test]
+        fn should_return_false_for_transitions_without_state_validation() {
+            let transitions: Vec<(&str, StateTransition)> = vec![
+                (
+                    "AddressFundsTransfer",
+                    StateTransition::AddressFundsTransfer(AddressFundsTransferTransition::V0(
+                        AddressFundsTransferTransitionV0::default(),
+                    )),
+                ),
+                (
+                    "IdentityTopUp",
+                    StateTransition::IdentityTopUp(IdentityTopUpTransition::V0(
+                        IdentityTopUpTransitionV0::default(),
+                    )),
+                ),
+                (
+                    "AddressFundingFromAssetLock",
+                    StateTransition::AddressFundingFromAssetLock(
+                        AddressFundingFromAssetLockTransition::V0(
+                            AddressFundingFromAssetLockTransitionV0::default(),
+                        ),
+                    ),
+                ),
+                (
+                    "IdentityTopUpFromAddresses",
+                    StateTransition::IdentityTopUpFromAddresses(
+                        IdentityTopUpFromAddressesTransition::V0(
+                            IdentityTopUpFromAddressesTransitionV0::default(),
+                        ),
+                    ),
+                ),
+                (
+                    "IdentityCreditWithdrawal",
+                    StateTransition::IdentityCreditWithdrawal(
+                        IdentityCreditWithdrawalTransition::V0(
+                            IdentityCreditWithdrawalTransitionV0::default(),
+                        ),
+                    ),
+                ),
+                (
+                    "AddressCreditWithdrawal",
+                    StateTransition::AddressCreditWithdrawal(
+                        AddressCreditWithdrawalTransition::V0(
+                            AddressCreditWithdrawalTransitionV0::default(),
+                        ),
+                    ),
+                ),
+                (
+                    "IdentityCreditTransferToAddresses",
+                    StateTransition::IdentityCreditTransferToAddresses(
+                        IdentityCreditTransferToAddressesTransition::V0(
+                            IdentityCreditTransferToAddressesTransitionV0::default(),
+                        ),
+                    ),
+                ),
+                (
+                    "ShieldedTransfer",
+                    StateTransition::ShieldedTransfer(ShieldedTransferTransition::V0(
+                        ShieldedTransferTransitionV0 {
+                            actions: vec![],
+                            value_balance: 0,
+                            anchor: [0u8; 32],
+                            proof: vec![],
+                            binding_signature: [0u8; 64],
+                        },
+                    )),
+                ),
+            ];
+            for (name, st) in transitions {
+                assert!(
+                    !st.has_state_validation(),
+                    "expected has_state_validation=false for {}",
+                    name
+                );
+            }
+        }
+    }
+}

@@ -3,40 +3,39 @@ pub mod v0_methods;
 
 use bincode::{Decode, Encode};
 
-#[cfg(feature = "state-transition-value-conversion")]
+#[cfg(feature = "value-conversion")]
 use platform_value::btreemap_extensions::BTreeValueRemoveFromMapHelper;
 use platform_value::{Identifier, Value};
-#[cfg(feature = "state-transition-serde-conversion")]
+#[cfg(feature = "serde-conversion")]
 use serde::{Deserialize, Serialize};
 
 use std::collections::BTreeMap;
 
 use std::string::ToString;
 
-#[cfg(feature = "state-transition-value-conversion")]
 use crate::data_contract::DataContract;
 
 use crate::{document, errors::ProtocolError};
 
 use crate::block::block_info::BlockInfo;
+use crate::data_contract::accessors::v0::DataContractV0Getters;
 use crate::data_contract::document_type::accessors::DocumentTypeV0Getters;
 use crate::data_contract::document_type::methods::DocumentTypeBasicMethods;
 use crate::data_contract::document_type::DocumentTypeRef;
 use crate::document::{Document, v0::DocumentV0};
 use crate::fee::Credits;
-#[cfg(feature = "state-transition-value-conversion")]
+#[cfg(feature = "value-conversion")]
+use crate::state_transition::batch_transition;
+use crate::state_transition::batch_transition::document_base_transition::v0::v0_methods::DocumentBaseTransitionV0Methods;
+#[cfg(feature = "value-conversion")]
 use crate::state_transition::batch_transition::document_base_transition::v0::DocumentBaseTransitionV0;
-#[cfg(feature = "state-transition-value-conversion")]
+#[cfg(feature = "value-conversion")]
 use crate::state_transition::batch_transition::document_base_transition::v0::DocumentTransitionObjectLike;
 use crate::state_transition::batch_transition::document_base_transition::DocumentBaseTransition;
 use derive_more::Display;
-#[cfg(feature = "state-transition-value-conversion")]
+#[cfg(feature = "value-conversion")]
 use platform_value::btreemap_extensions::BTreeValueRemoveTupleFromMapHelper;
 use platform_version::version::PlatformVersion;
-
-#[cfg(feature = "state-transition-value-conversion")]
-use crate::state_transition::batch_transition;
-use crate::state_transition::batch_transition::document_base_transition::v0::v0_methods::DocumentBaseTransitionV0Methods;
 
 mod property_names {
     pub const ENTROPY: &str = "$entropy";
@@ -50,28 +49,25 @@ pub use super::super::document_base_transition::IDENTIFIER_FIELDS;
 
 #[derive(Debug, Clone, Default, Encode, Decode, PartialEq, Display)]
 #[cfg_attr(
-    feature = "state-transition-serde-conversion",
+    feature = "serde-conversion",
     derive(Serialize, Deserialize),
     serde(rename_all = "camelCase")
 )]
 #[display("Base: {}, Entropy: {:?}, Data: {:?}", "base", "entropy", "data")]
 pub struct DocumentCreateTransitionV0 {
     /// Document Base Transition
-    #[cfg_attr(feature = "state-transition-serde-conversion", serde(flatten))]
+    #[cfg_attr(feature = "serde-conversion", serde(flatten))]
     pub base: DocumentBaseTransition,
 
     /// Entropy used to create a Document ID.
-    #[cfg_attr(
-        feature = "state-transition-serde-conversion",
-        serde(rename = "$entropy")
-    )]
+    #[cfg_attr(feature = "serde-conversion", serde(rename = "$entropy"))]
     pub entropy: [u8; 32],
 
-    #[cfg_attr(feature = "state-transition-serde-conversion", serde(flatten))]
+    #[cfg_attr(feature = "serde-conversion", serde(flatten))]
     pub data: BTreeMap<String, Value>,
 
     #[cfg_attr(
-        feature = "state-transition-serde-conversion",
+        feature = "serde-conversion",
         serde(rename = "$prefundedVotingBalance")
     )]
     /// Pre funded balance (for unique index conflict resolution voting - the identity will put money
@@ -82,7 +78,7 @@ pub struct DocumentCreateTransitionV0 {
 }
 
 impl DocumentCreateTransitionV0 {
-    #[cfg(feature = "state-transition-value-conversion")]
+    #[cfg(feature = "value-conversion")]
     pub(crate) fn from_value_map(
         mut map: BTreeMap<String, Value>,
         data_contract: DataContract,
@@ -107,7 +103,7 @@ impl DocumentCreateTransitionV0 {
         })
     }
 
-    #[cfg(feature = "state-transition-value-conversion")]
+    #[cfg(feature = "value-conversion")]
     pub(crate) fn to_value_map(&self) -> Result<BTreeMap<String, Value>, ProtocolError> {
         let mut transition_base_map = self.base.to_value_map()?;
         transition_base_map.insert(
@@ -152,6 +148,7 @@ pub trait DocumentFromCreateTransitionV0 {
         v0: DocumentCreateTransitionV0,
         owner_id: Identifier,
         block_info: &BlockInfo,
+        contract: &DataContract,
         document_type: &DocumentTypeRef,
         platform_version: &PlatformVersion,
     ) -> Result<Self, ProtocolError>
@@ -177,6 +174,7 @@ pub trait DocumentFromCreateTransitionV0 {
         v0: &DocumentCreateTransitionV0,
         owner_id: Identifier,
         block_info: &BlockInfo,
+        contract: &DataContract,
         document_type: &DocumentTypeRef,
         platform_version: &PlatformVersion,
     ) -> Result<Self, ProtocolError>
@@ -189,6 +187,7 @@ impl DocumentFromCreateTransitionV0 for Document {
         v0: DocumentCreateTransitionV0,
         owner_id: Identifier,
         block_info: &BlockInfo,
+        contract: &DataContract,
         document_type: &DocumentTypeRef,
         platform_version: &PlatformVersion,
     ) -> Result<Self, ProtocolError>
@@ -200,6 +199,17 @@ impl DocumentFromCreateTransitionV0 for Document {
         let requires_created_at = document_type
             .required_fields()
             .contains(document::property_names::CREATED_AT);
+
+        let creator_id = if document_type.should_use_creator_id(
+            contract.system_version_type(),
+            contract.config().version(),
+            platform_version,
+        )? {
+            Some(owner_id)
+        } else {
+            None
+        };
+
         let requires_updated_at = document_type
             .required_fields()
             .contains(document::property_names::UPDATED_AT);
@@ -270,6 +280,7 @@ impl DocumentFromCreateTransitionV0 for Document {
                 created_at_core_block_height,
                 updated_at_core_block_height,
                 transferred_at_core_block_height: None,
+                creator_id,
             }
             .into()),
             version => Err(ProtocolError::UnknownVersionMismatch {
@@ -284,6 +295,7 @@ impl DocumentFromCreateTransitionV0 for Document {
         v0: &DocumentCreateTransitionV0,
         owner_id: Identifier,
         block_info: &BlockInfo,
+        contract: &DataContract,
         document_type: &DocumentTypeRef,
         platform_version: &PlatformVersion,
     ) -> Result<Self, ProtocolError>
@@ -295,6 +307,19 @@ impl DocumentFromCreateTransitionV0 for Document {
         let requires_created_at = document_type
             .required_fields()
             .contains(document::property_names::CREATED_AT);
+
+        let properties = data.clone();
+
+        let creator_id = if document_type.should_use_creator_id(
+            contract.system_version_type(),
+            contract.config().version(),
+            platform_version,
+        )? {
+            Some(owner_id)
+        } else {
+            None
+        };
+
         let requires_updated_at = document_type
             .required_fields()
             .contains(document::property_names::UPDATED_AT);
@@ -354,7 +379,7 @@ impl DocumentFromCreateTransitionV0 for Document {
             0 => Ok(DocumentV0 {
                 id: base.id(),
                 owner_id,
-                properties: data.clone(),
+                properties,
                 revision: document_type.initial_revision(),
                 created_at,
                 updated_at,
@@ -365,6 +390,7 @@ impl DocumentFromCreateTransitionV0 for Document {
                 created_at_core_block_height,
                 updated_at_core_block_height,
                 transferred_at_core_block_height: None,
+                creator_id,
             }
             .into()),
             version => Err(ProtocolError::UnknownVersionMismatch {
@@ -451,7 +477,7 @@ mod test {
                     ("$id", Value::Identifier([0_u8; 32])),
                     ("id", Value::Identifier([0_u8; 32])),
                     ("$schema", Value::Text("schema".to_string())),
-                    ("$format_version", Value::Text("0".to_string())),
+                    ("$formatVersion", Value::Text("0".to_string())),
                     ("version", Value::U32(0)),
                     ("documentSchemas", documents),
                     ("ownerId", Value::Identifier([0_u8; 32])),
@@ -464,7 +490,7 @@ mod test {
     }
 
     #[test]
-    #[cfg(feature = "state-transition-json-conversion")]
+    #[cfg(feature = "json-conversion")]
     fn convert_to_json_with_dynamic_binary_paths() {
         let data_contract = data_contract_with_dynamic_properties();
         let alpha_binary = BinaryData::new(vec![10_u8; 32]);

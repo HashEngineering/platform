@@ -6,7 +6,7 @@ use bincode::{Decode, Encode};
 use derive_more::Display;
 
 use platform_value::{Identifier, Value};
-#[cfg(feature = "state-transition-serde-conversion")]
+#[cfg(feature = "serde-conversion")]
 use serde::{Deserialize, Serialize};
 
 use crate::block::block_info::BlockInfo;
@@ -27,20 +27,17 @@ mod property_names {
 
 #[derive(Debug, Clone, Default, Encode, Decode, PartialEq, Display)]
 #[cfg_attr(
-    feature = "state-transition-serde-conversion",
+    feature = "serde-conversion",
     derive(Serialize, Deserialize),
     serde(rename_all = "camelCase")
 )]
 #[display("Base: {}, Revision: {}, Data: {:?}", "base", "revision", "data")]
 pub struct DocumentReplaceTransitionV0 {
-    #[cfg_attr(feature = "state-transition-serde-conversion", serde(flatten))]
+    #[cfg_attr(feature = "serde-conversion", serde(flatten))]
     pub base: DocumentBaseTransition,
-    #[cfg_attr(
-        feature = "state-transition-serde-conversion",
-        serde(rename = "$revision")
-    )]
+    #[cfg_attr(feature = "serde-conversion", serde(rename = "$revision"))]
     pub revision: Revision,
-    #[cfg_attr(feature = "state-transition-serde-conversion", serde(flatten))]
+    #[cfg_attr(feature = "serde-conversion", serde(flatten))]
     pub data: BTreeMap<String, Value>,
 }
 
@@ -76,6 +73,7 @@ pub trait DocumentFromReplaceTransitionV0 {
         transferred_at: Option<TimestampMillis>,
         transferred_at_block_height: Option<BlockHeight>,
         transferred_at_core_block_height: Option<CoreBlockHeight>,
+        creator_id: Option<Identifier>,
         block_info: &BlockInfo,
         document_type: &DocumentTypeRef,
         platform_version: &PlatformVersion,
@@ -112,6 +110,7 @@ pub trait DocumentFromReplaceTransitionV0 {
         transferred_at: Option<TimestampMillis>,
         transferred_at_block_height: Option<BlockHeight>,
         transferred_at_core_block_height: Option<CoreBlockHeight>,
+        creator_id: Option<Identifier>,
         block_info: &BlockInfo,
         document_type: &DocumentTypeRef,
         platform_version: &PlatformVersion,
@@ -130,6 +129,7 @@ impl DocumentFromReplaceTransitionV0 for Document {
         transferred_at: Option<TimestampMillis>,
         transferred_at_block_height: Option<BlockHeight>,
         transferred_at_core_block_height: Option<CoreBlockHeight>,
+        creator_id: Option<Identifier>,
         block_info: &BlockInfo,
         document_type: &DocumentTypeRef,
         platform_version: &PlatformVersion,
@@ -191,6 +191,7 @@ impl DocumentFromReplaceTransitionV0 for Document {
                 created_at_core_block_height,
                 updated_at_core_block_height,
                 transferred_at_core_block_height,
+                creator_id,
             }
             .into()),
             version => Err(ProtocolError::UnknownVersionMismatch {
@@ -210,6 +211,7 @@ impl DocumentFromReplaceTransitionV0 for Document {
         transferred_at: Option<TimestampMillis>,
         transferred_at_block_height: Option<BlockHeight>,
         transferred_at_core_block_height: Option<CoreBlockHeight>,
+        creator_id: Option<Identifier>,
         block_info: &BlockInfo,
         document_type: &DocumentTypeRef,
         platform_version: &PlatformVersion,
@@ -270,6 +272,7 @@ impl DocumentFromReplaceTransitionV0 for Document {
                 created_at_core_block_height,
                 updated_at_core_block_height,
                 transferred_at_core_block_height,
+                creator_id,
             }
             .into()),
             version => Err(ProtocolError::UnknownVersionMismatch {

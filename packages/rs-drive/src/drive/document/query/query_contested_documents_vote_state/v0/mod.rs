@@ -62,7 +62,7 @@ impl Drive {
     /// # Returns
     ///
     /// * `Result<QueryDocumentsOutcome, Error>` - Returns `QueryDocumentsOutcome` on success with the list of documents,
-    ///    number of skipped items, and cost. If the operation fails, it returns an `Error`.
+    ///   number of skipped items, and cost. If the operation fails, it returns an `Error`.
     #[inline(always)]
     pub(super) fn query_contested_documents_vote_state_v0(
         &self,
@@ -92,5 +92,21 @@ impl Drive {
             contenders: contested_document_vote_poll_drive_query_execution_result.contenders,
             cost,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vote_state_outcome_v0_defaults() {
+        // The outcome struct exposes trait methods — cover accessor and
+        // consuming branches on a default-initialised value.
+        let outcome = QueryContestedDocumentsVoteStateOutcomeV0::default();
+        assert!(outcome.contenders().is_empty());
+        assert_eq!(outcome.cost(), 0);
+        let owned = outcome.contenders_owned();
+        assert!(owned.is_empty());
     }
 }

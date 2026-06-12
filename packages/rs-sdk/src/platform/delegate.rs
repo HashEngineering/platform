@@ -11,14 +11,14 @@
 /// Delegate the execution of a transport request to the appropriate variant of an enum wrapper.
 ///
 /// Given two enums, request and response, that wrap multiple requests/responses for one object type, this macro
-/// implements [TransportRequest](crate::platform::dapi::transport::TransportRequest) for the request enum and
+/// implements [TransportRequest](rs_dapi_client::transport::TransportRequest) for the request enum and
 /// delegates the execution of the transport request to the appropriate variant.
 ///
 /// Each variant in request enum must have a corresponding variant in response enum.
 /// Variant names in request and response enums must match.
 /// Variants must take exactly one argument that implements
-/// [TransportRequest](crate::platform::dapi::transport::TransportRequest) (for request) and
-/// [TransportResponse](crate::platform::dapi::transport::TransportResponse) (for response), where for a given variant,
+/// [TransportRequest](rs_dapi_client::transport::TransportRequest) (for request) and
+/// `TransportResponse` (for response), where for a given variant,
 /// response must be the response type of the request variant.
 ///
 /// Macro [delegate_enum!](crate::delegate_enum!) can be used to generate these enums and implement required
@@ -34,9 +34,14 @@ macro_rules! delegate_transport_request_variant {
 
             const SETTINGS_OVERRIDES: $crate::platform::dapi::RequestSettings = $crate::platform::dapi::RequestSettings::default();
 
-            /// TODO: Not sure how to do that
             fn method_name(&self) -> &'static str {
-                ""
+                use $request::*;
+
+                match self {
+                    $(
+                        $variant(request) => request.method_name(),
+                    )*
+                }
             }
 
             fn execute_transport<'c>(
@@ -83,7 +88,7 @@ macro_rules! delegate_from_proof_variant {
                 response: O,
                 network: dpp::dashcore::Network,
                 version: &dpp::version::PlatformVersion,
-                provider: &'a dyn drive_proof_verifier::ContextProvider,
+                provider: &'a dyn dash_context_provider::ContextProvider,
             ) -> Result<(Option<Self>, ResponseMetadata, dapi_grpc::platform::v0::Proof), drive_proof_verifier::Error>
             where
                 Self: Sized + 'a,
@@ -122,21 +127,21 @@ macro_rules! delegate_from_proof_variant {
 ///
 /// In order to support multiple request/response types for one object (like, GetIdentityRequest and
 /// GetIdentityByPublicKeyHashRequest for Identity), we need to wrap them in an enum and
-/// delegate [TransportRequest](crate::platform::dapi::transport::TransportRequest)
+/// delegate [TransportRequest](rs_dapi_client::transport::TransportRequest)
 /// and [FromProof](drive_proof_verifier::FromProof) to the appropriate variant.
 ///
 /// This macro creates enums for requests (`$request`) and responses (`$response`) and variants  (`$variant`) for
-/// each request (`$req`) /response (`$req`) pair. Variant name in request and response enums are the same.
+/// each request (`$req`) /response (`$resp`) pair. Variant name in request and response enums are the same.
 ///
 /// It also calls [delegate_transport_request_variant!](crate::delegate_transport_request_variant!) and
 /// [delegate_from_proof_variant!](crate::delegate_from_proof_variant!) to delegate
-/// [TransportRequest](crate::platform::dapi::transport::TransportRequest)
+/// [TransportRequest](rs_dapi_client::transport::TransportRequest)
 /// and [FromProof](drive_proof_verifier::FromProof)
 /// traits to the appropriate variant.
 macro_rules! delegate_enum {
     ($request:ident, $response:ident, $object:ty, $(($variant:ident, $req: ty, $resp: ty)),+) => {
         /// Wrapper around multiple requests for one object type.
-        #[derive(Debug, Clone, derive_more::From, dapi_grpc_macros::Mockable)]
+        #[derive(Debug, Clone, derive_more::From, dash_platform_macros::Mockable)]
         #[cfg_attr(feature="mocks", derive(serde::Serialize, serde::Deserialize))]
         #[allow(missing_docs)]
         pub enum $request {
@@ -146,7 +151,7 @@ macro_rules! delegate_enum {
         }
 
         /// Wrapper around multiple responses for one object type.
-        #[derive(Debug, Clone, Default, derive_more::From, dapi_grpc_macros::Mockable)]
+        #[derive(Debug, Clone, Default, derive_more::From, dash_platform_macros::Mockable)]
         #[cfg_attr(feature="mocks", derive(serde::Serialize, serde::Deserialize))]
         #[allow(missing_docs)]
         pub enum $response {

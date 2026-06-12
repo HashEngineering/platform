@@ -1,8 +1,8 @@
 use crate::masternode_list_item_helpers::UpdateMasternodeListItem;
-use dashcore_rpc::dashcore_rpc_json::{DMNState, MasternodeListItem, MasternodeType};
 use dpp::bls_signatures::{Bls12381G2Impl, SecretKey as BlsPrivateKey};
 use dpp::dashcore::hashes::Hash;
 use dpp::dashcore::{ProTxHash, QuorumHash, Txid};
+use dpp::dashcore_rpc::dashcore_rpc_json::{DMNState, MasternodeListItem, MasternodeType};
 use dpp::identity::hash::IdentityPublicKeyHashMethodsV0;
 use dpp::identity::IdentityPublicKey;
 use drive_abci::mimic::test_quorum::TestQuorumInfo;
@@ -158,11 +158,11 @@ pub fn generate_test_masternodes(
     }
 
     fn invert_btreemap(input: BTreeMap<u32, Vec<u16>>) -> BTreeMap<u16, Vec<u32>> {
-        let mut output = BTreeMap::new();
+        let mut output: BTreeMap<u16, Vec<u32>> = BTreeMap::new();
 
         for (key, values) in input {
             for value in values {
-                output.entry(value).or_insert_with(Vec::new).push(key);
+                output.entry(value).or_default().push(key);
             }
         }
 
@@ -202,7 +202,7 @@ pub fn generate_test_masternodes(
             let (identity_public_key, private_key) =
                 IdentityPublicKey::random_voting_key_with_rng(0, rng, PlatformVersion::latest())
                     .expect("expected a random voting key");
-            simple_signer.add_key(identity_public_key.clone(), private_key);
+            simple_signer.add_identity_public_key(identity_public_key.clone(), private_key);
             identity_public_key.public_key_hash().unwrap()
         } else {
             rng.gen()
@@ -221,7 +221,7 @@ pub fn generate_test_masternodes(
                     PlatformVersion::latest(),
                 )
                 .expect("expected a random voting key");
-            simple_signer.add_key(identity_public_key.clone(), private_key);
+            simple_signer.add_identity_public_key(identity_public_key.clone(), private_key);
             identity_public_key.public_key_hash().unwrap()
         } else {
             rng.gen()

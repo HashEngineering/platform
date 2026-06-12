@@ -1,15 +1,18 @@
-mod balance;
 mod nonce;
 pub(crate) mod signature_purpose_matches_requirements;
-mod state;
 mod structure;
+mod transform_into_action;
 
+use dpp::address_funds::PlatformAddress;
 use dpp::block::block_info::BlockInfo;
 use dpp::dashcore::Network;
+use dpp::fee::Credits;
+use dpp::prelude::AddressNonce;
 use dpp::state_transition::identity_credit_withdrawal_transition::IdentityCreditWithdrawalTransition;
 use dpp::validation::{ConsensusValidationResult, SimpleConsensusValidationResult};
 use dpp::version::PlatformVersion;
 use drive::state_transition_action::StateTransitionAction;
+use std::collections::BTreeMap;
 
 use drive::grovedb::TransactionArg;
 
@@ -19,21 +22,22 @@ use crate::execution::types::state_transition_execution_context::StateTransition
 use crate::platform_types::platform::PlatformRef;
 use crate::rpc::core::CoreRPCLike;
 
-use crate::execution::validation::state_transition::identity_credit_withdrawal::state::v0::IdentityCreditWithdrawalStateTransitionStateValidationV0;
+use crate::execution::validation::state_transition::identity_credit_withdrawal::transform_into_action::v0::IdentityCreditWithdrawalStateTransitionStateValidationV0;
 use crate::execution::validation::state_transition::identity_credit_withdrawal::structure::v0::IdentityCreditWithdrawalStateTransitionStructureValidationV0;
 use crate::execution::validation::state_transition::identity_credit_withdrawal::structure::v1::IdentityCreditWithdrawalStateTransitionStructureValidationV1;
-use crate::execution::validation::state_transition::processor::v0::{
-    StateTransitionBasicStructureValidationV0, StateTransitionStateValidationV0,
-};
-use crate::execution::validation::state_transition::transformer::StateTransitionActionTransformerV0;
+use crate::execution::validation::state_transition::processor::basic_structure::StateTransitionBasicStructureValidationV0;
+use crate::execution::validation::state_transition::transformer::StateTransitionActionTransformer;
 use crate::execution::validation::state_transition::ValidationMode;
-use crate::platform_types::platform_state::v0::PlatformStateV0Methods;
+use crate::platform_types::platform_state::PlatformStateV0Methods;
 
-impl StateTransitionActionTransformerV0 for IdentityCreditWithdrawalTransition {
+impl StateTransitionActionTransformer for IdentityCreditWithdrawalTransition {
     fn transform_into_action<C: CoreRPCLike>(
         &self,
         platform: &PlatformRef<C>,
         block_info: &BlockInfo,
+        _remaining_address_input_balances: &Option<
+            BTreeMap<PlatformAddress, (AddressNonce, Credits)>,
+        >,
         _validation_mode: ValidationMode,
         execution_context: &mut StateTransitionExecutionContext,
         tx: TransactionArg,
@@ -96,41 +100,6 @@ impl StateTransitionBasicStructureValidationV0 for IdentityCreditWithdrawalTrans
     }
 }
 
-impl StateTransitionStateValidationV0 for IdentityCreditWithdrawalTransition {
-    fn validate_state<C: CoreRPCLike>(
-        &self,
-        _action: Option<StateTransitionAction>,
-        platform: &PlatformRef<C>,
-        _validation_mode: ValidationMode,
-        block_info: &BlockInfo,
-        execution_context: &mut StateTransitionExecutionContext,
-        tx: TransactionArg,
-    ) -> Result<ConsensusValidationResult<StateTransitionAction>, Error> {
-        let platform_version = platform.state.current_platform_version()?;
-
-        match platform_version
-            .drive_abci
-            .validation_and_processing
-            .state_transitions
-            .identity_credit_withdrawal_state_transition
-            .state
-        {
-            0 => self.validate_state_v0(
-                platform,
-                block_info,
-                execution_context,
-                tx,
-                platform_version,
-            ),
-            version => Err(Error::Execution(ExecutionError::UnknownVersionMismatch {
-                method: "identity credit withdrawal transition: validate_state".to_string(),
-                known_versions: vec![0],
-                received: version,
-            })),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::config::{PlatformConfig, PlatformTestConfig};
@@ -158,8 +127,8 @@ mod tests {
     use rand::prelude::StdRng;
     use rand::{Rng, SeedableRng};
 
-    #[test]
-    fn test_identity_credit_withdrawal_is_disabled_on_release() {
+    #[tokio::test]
+    async fn test_identity_credit_withdrawal_is_disabled_on_release() {
         let platform_version = PlatformVersion::first();
         let platform_config = PlatformConfig {
             testing_configs: PlatformTestConfig {
@@ -205,6 +174,7 @@ mod tests {
             platform_version,
             Some(1),
         )
+        .await
         .expect("expected a credit withdrawal transition");
 
         let credit_withdrawal_transition_serialized_transition = credit_withdrawal_transition
@@ -234,8 +204,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_identity_credit_withdrawal_with_withdrawal_address_creates_withdrawal_document() {
+    #[tokio::test]
+    async fn test_identity_credit_withdrawal_with_withdrawal_address_creates_withdrawal_document() {
         let platform_version = PlatformVersion::latest();
         let platform_config = PlatformConfig {
             testing_configs: PlatformTestConfig {
@@ -281,11 +251,21 @@ mod tests {
             platform_version,
             None,
         )
+        .await
         .expect("expected a credit withdrawal transition");
 
         let credit_withdrawal_transition_serialized_transition = credit_withdrawal_transition
             .serialize_to_bytes()
             .expect("expected documents batch serialized state transition");
+
+        // CheckTx root-invariance guard (devnet paloma h788): `check_tx` asserts under
+        // cfg(test) that it never mutates committed grovedb state, so running the canonical
+        // valid fixture through it pins the invariant for this transition type.
+        crate::test::helpers::state_mutation_guard::assert_check_tx_valid_at_all_levels(
+            &platform,
+            &credit_withdrawal_transition_serialized_transition,
+            "identity credit withdrawal",
+        );
 
         let transaction = platform.drive.grove.start_transaction();
 
@@ -304,12 +284,12 @@ mod tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::SuccessfulExecution(..)]
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
         );
     }
 
-    #[test]
-    fn test_identity_credit_withdrawal_without_withdrawal_address_creates_withdrawal_document_when_signing_with_withdrawal_key(
+    #[tokio::test]
+    async fn test_identity_credit_withdrawal_without_withdrawal_address_creates_withdrawal_document_when_signing_with_withdrawal_key(
     ) {
         let platform_version = PlatformVersion::latest();
         let platform_config = PlatformConfig {
@@ -356,6 +336,7 @@ mod tests {
             platform_version,
             None,
         )
+        .await
         .expect("expected a credit withdrawal transition");
 
         let credit_withdrawal_transition_serialized_transition = credit_withdrawal_transition
@@ -379,12 +360,12 @@ mod tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::SuccessfulExecution(..)]
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
         );
     }
 
-    #[test]
-    fn test_masternode_credit_withdrawal_without_withdrawal_address_creates_withdrawal_document_when_signing_with_withdrawal_key(
+    #[tokio::test]
+    async fn test_masternode_credit_withdrawal_without_withdrawal_address_creates_withdrawal_document_when_signing_with_withdrawal_key(
     ) {
         let platform_version = PlatformVersion::latest();
         let platform_config = PlatformConfig {
@@ -430,6 +411,7 @@ mod tests {
             platform_version,
             None,
         )
+        .await
         .expect("expected a credit withdrawal transition");
 
         let credit_withdrawal_transition_serialized_transition = credit_withdrawal_transition
@@ -453,12 +435,12 @@ mod tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::SuccessfulExecution(..)]
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
         );
     }
 
-    #[test]
-    fn test_masternode_credit_withdrawal_without_withdrawal_address_creates_withdrawal_document_when_signing_with_owner_key(
+    #[tokio::test]
+    async fn test_masternode_credit_withdrawal_without_withdrawal_address_creates_withdrawal_document_when_signing_with_owner_key(
     ) {
         let platform_version = PlatformVersion::latest();
         let platform_config = PlatformConfig {
@@ -504,6 +486,7 @@ mod tests {
             platform_version,
             None,
         )
+        .await
         .expect("expected a credit withdrawal transition");
 
         let credit_withdrawal_transition_serialized_transition = credit_withdrawal_transition
@@ -527,15 +510,16 @@ mod tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::SuccessfulExecution(..)]
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
         );
     }
 
     mod errors {
         use super::*;
         use dpp::consensus::state::state_error::StateError;
-        #[test]
-        fn test_credit_withdrawal_without_withdrawal_address_with_a_non_payable_transfer_key() {
+        #[tokio::test]
+        async fn test_credit_withdrawal_without_withdrawal_address_with_a_non_payable_transfer_key()
+        {
             let platform_version = PlatformVersion::latest();
             let platform_config = PlatformConfig {
                 testing_configs: PlatformTestConfig {
@@ -582,6 +566,7 @@ mod tests {
                     platform_version,
                     None,
                 )
+                .await
                 .expect("expected a credit withdrawal transition");
 
             let credit_withdrawal_transition_serialized_transition = credit_withdrawal_transition
@@ -612,8 +597,8 @@ mod tests {
             );
         }
 
-        #[test]
-        fn test_masternode_credit_withdrawal_with_withdrawal_address_creates_when_signing_with_owner_key_should_fail(
+        #[tokio::test]
+        async fn test_masternode_credit_withdrawal_with_withdrawal_address_creates_when_signing_with_owner_key_should_fail(
         ) {
             let platform_version = PlatformVersion::latest();
             let platform_config = PlatformConfig {
@@ -660,6 +645,7 @@ mod tests {
                     platform_version,
                     None,
                 )
+                .await
                 .expect("expected a credit withdrawal transition");
 
             let credit_withdrawal_transition_serialized_transition = credit_withdrawal_transition

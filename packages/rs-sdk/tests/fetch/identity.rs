@@ -1,10 +1,11 @@
 use dash_sdk::platform::types::identity::{NonUniquePublicKeyHashQuery, PublicKeyHash};
-use dash_sdk::platform::{Fetch, FetchMany};
+use dash_sdk::platform::{Fetch, FetchMany, IdentityKeysQuery};
 use dpp::identity::accessors::IdentityGettersV0;
 use dpp::identity::identity_public_key::accessors::v0::IdentityPublicKeyGettersV0;
 use dpp::prelude::IdentityPublicKey;
 use dpp::{identity::hash::IdentityPublicKeyHashMethodsV0, prelude::Identity};
 use drive_proof_verifier::types::{IdentityBalance, IdentityBalanceAndRevision};
+use std::collections::BTreeSet;
 
 use super::{common::setup_logs, config::Config};
 
@@ -25,6 +26,22 @@ async fn test_identity_read() {
         .expect("found identity");
 
     assert_eq!(identity.id(), id);
+}
+
+/// Given a non-existent identity ID, when I fetch the identity, I get None.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[ignore = "requires mock vectors to be generated against a running Platform"]
+async fn test_identity_read_not_found() {
+    setup_logs();
+
+    let cfg = Config::new();
+    let sdk = cfg.setup_api("test_identity_read_not_found").await;
+
+    let result = Identity::fetch(&sdk, super::generated_data::UNKNOWN_IDENTITY_ID)
+        .await
+        .expect("fetch should not error for non-existent identity");
+
+    assert!(result.is_none(), "non-existent identity should return None");
 }
 
 /// Given some existing identity public key, when I fetch the identity, and I get it.
@@ -91,6 +108,25 @@ async fn test_identity_balance_revision_read() {
     tracing::debug!(balance, revision, ?id, "identity balance and revision")
 }
 
+/// Given a non-existent identity ID, when I fetch the identity balance, I get None.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[ignore = "requires mock vectors to be generated against a running Platform"]
+async fn test_identity_balance_read_not_found() {
+    setup_logs();
+
+    let cfg = Config::new();
+    let sdk = cfg.setup_api("test_identity_balance_read_not_found").await;
+
+    let result = IdentityBalance::fetch(&sdk, super::generated_data::UNKNOWN_IDENTITY_ID)
+        .await
+        .expect("fetch should not error for non-existent identity");
+
+    assert!(
+        result.is_none(),
+        "non-existent identity balance should return None"
+    );
+}
+
 /// Given some existing identity ID, when I fetch the identity keys, I get some of them indexed by key ID.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_identity_public_keys_all_read() {
@@ -117,65 +153,117 @@ async fn test_identity_public_keys_all_read() {
     }
 }
 
-/// Given some non-unique public key, when I fetch identity that uses this key, I get associated identities containing this key.
+/// Given some existing identity ID and selected key IDs, when I fetch specific identity keys, I get only those keys.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn test_fetch_identity_by_non_unique_public_keys() {
+async fn test_identity_public_keys_specific_read() {
     setup_logs();
 
     let cfg = Config::new();
-    let id: dpp::prelude::Identifier = cfg.existing_identity_id;
+    let identity_id: dpp::prelude::Identifier = cfg.existing_identity_id;
 
+    let sdk = cfg
+        .setup_api("test_identity_public_keys_specific_read")
+        .await;
+
+    let all_public_keys = IdentityPublicKey::fetch_many(&sdk, identity_id)
+        .await
+        .expect("fetch identity public keys");
+
+    assert!(
+        !all_public_keys.is_empty(),
+        "identity must expose at least one public key"
+    );
+
+    let requested_key_ids = vec![0, 2];
+
+    let query = IdentityKeysQuery::new(identity_id, requested_key_ids.clone());
+
+    let fetched_subset = IdentityPublicKey::fetch_many(&sdk, query)
+        .await
+        .expect("fetch selected identity public keys");
+
+    assert_eq!(
+        fetched_subset.len(),
+        requested_key_ids.len(),
+        "number of fetched keys should match the requested set"
+    );
+
+    let requested_key_set: BTreeSet<u32> = requested_key_ids.iter().copied().collect();
+
+    for key_id in &requested_key_ids {
+        let expected = all_public_keys
+            .get(key_id)
+            .and_then(|value| value.as_ref())
+            .expect("expected key in base dataset");
+
+        let actual = fetched_subset
+            .get(key_id)
+            .and_then(|value| value.as_ref())
+            .expect("expected key in fetched subset");
+
+        assert_eq!(
+            actual, expected,
+            "fetched key {} does not match the original key",
+            key_id
+        );
+    }
+
+    let unexpected: Vec<u32> = fetched_subset
+        .keys()
+        .filter(|key| !requested_key_set.contains(key))
+        .copied()
+        .collect();
+
+    assert!(
+        unexpected.is_empty(),
+        "subset should not include unrequested keys: {:?}",
+        unexpected
+    );
+}
+
+/// Given some non-unique public key, when I fetch identity that uses this key, I get associated identities containing this key
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_fetch_identity_by_non_unique_public_keys() {
+    /// Unique key hash, generated when creating test data
+    const UNIQUE_KEY_HASH: [u8; 20] = [
+        26, 42, 184, 155, 158, 2, 137, 145, 219, 176, 130, 54, 208, 131, 144, 167, 61, 81, 214, 110,
+    ];
+
+    setup_logs();
+    let cfg = Config::new();
     let sdk = cfg
         .setup_api("test_fetch_identity_by_non_unique_public_keys")
         .await;
 
-    // First, fetch an identity to get a non-unique public key
-    let identity = Identity::fetch(&sdk, id)
+    let mut query = NonUniquePublicKeyHashQuery {
+        key_hash: UNIQUE_KEY_HASH,
+        after: None,
+    };
+
+    // Now fetch identities by this non-unique public key hash
+    let mut count = 0;
+    while let Some(found) = Identity::fetch(&sdk, query)
         .await
-        .expect("fetch identity")
-        .expect("found identity");
-
-    let pubkeys: Vec<_> = identity
-        .public_keys()
-        .iter()
-        .filter(|public_key| !public_key.1.key_type().is_unique_key_type())
-        .collect();
-
-    assert_ne!(
-        pubkeys.len(),
-        0,
-        "identity must have at least one non-unique public key"
-    );
-
-    for non_unique_key in pubkeys.iter() {
-        let key_hash = non_unique_key.1.public_key_hash().expect("public key hash");
-        let mut query = NonUniquePublicKeyHashQuery {
-            key_hash,
-            after: None,
-        };
-
-        // Now fetch identities by this non-unique public key hash
-        let mut count = 0;
-        while let Some(found) = Identity::fetch(&sdk, query)
-            .await
-            .expect("fetch identities by non-unique key hash")
-        {
-            count += 1;
-            tracing::debug!(
-                ?found,
-                ?key_hash,
-                ?count,
-                "fetched identities by non-unique public key hash"
-            );
-
-            query = NonUniquePublicKeyHashQuery {
-                key_hash,
-                after: Some(*found.id().as_bytes()),
-            };
-        }
-        assert_eq!(
-            count, 3,
-            "expected exactly 3 identities with this non-unique public key"
+        .expect("fetch identities by non-unique key hash")
+    {
+        count += 1;
+        tracing::debug!(
+            ?found,
+            ?UNIQUE_KEY_HASH,
+            ?count,
+            "fetched identities by non-unique public key hash"
         );
+
+        query = NonUniquePublicKeyHashQuery {
+            key_hash: UNIQUE_KEY_HASH,
+            after: Some(*found.id().as_bytes()),
+        };
     }
+
+    assert_eq!(
+        count,
+        3,
+        "expected exactly 3 identities with this unique public key {}",
+        hex::encode(UNIQUE_KEY_HASH)
+    );
 }

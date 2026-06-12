@@ -28,13 +28,14 @@ mod creation_tests {
     use drive::query::vote_poll_vote_state_query::ResolvedContestedDocumentVotePollDriveQuery;
     use drive::util::test_helpers::setup_contract;
     use crate::execution::validation::state_transition::state_transitions::tests::{add_contender_to_dpns_name_contest, create_dpns_identity_name_contest, create_dpns_name_contest_give_key_info, perform_votes_multi};
-    use crate::platform_types::platform_state::v0::PlatformStateV0Methods;
+    use crate::platform_types::platform_state::PlatformStateV0Methods;
     use crate::platform_types::state_transitions_processing_result::StateTransitionExecutionResult::PaidConsensusError;
     use crate::test::helpers::fast_forward_to_block::fast_forward_to_block;
     use dpp::consensus::state::state_error::StateError;
     use dpp::dashcore::Network;
     use dpp::dashcore::Network::Testnet;
     use dpp::data_contract::{DataContract, TokenConfiguration};
+    use dpp::document::transfer::Transferable;
     use dpp::identity::SecurityLevel;
     use dpp::state_transition::batch_transition::document_base_transition::DocumentBaseTransition;
     use dpp::state_transition::batch_transition::document_create_transition::DocumentCreateTransitionV0;
@@ -49,8 +50,8 @@ mod creation_tests {
     use crate::config::PlatformConfig;
     use crate::execution::validation::state_transition::tests::{create_card_game_external_token_contract_with_owner_identity, create_card_game_internal_token_contract_with_owner_identity_transfer_tokens, create_token_contract_with_owner_identity};
 
-    #[test]
-    fn test_document_creation() {
+    #[tokio::test]
+    async fn test_document_creation() {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .with_latest_protocol_version()
@@ -100,6 +101,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -123,7 +125,7 @@ mod creation_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
         );
 
         platform
@@ -134,8 +136,107 @@ mod creation_tests {
             .expect("expected to commit transaction");
     }
 
-    #[test]
-    fn test_document_creation_should_fail_if_reusing_entropy() {
+    #[tokio::test]
+    async fn test_document_creation_should_fail_when_creator_id_is_provided() {
+        let platform_version = PlatformVersion::latest();
+        let (mut platform, contract) = TestPlatformBuilder::new()
+            .build_with_mock_rpc()
+            .set_initial_state_structure()
+            .with_crypto_card_game_transfer_only(Transferable::Always);
+
+        let mut rng = StdRng::seed_from_u64(433);
+
+        let platform_state = platform.state.load();
+
+        let (identity, signer, key) = setup_identity(&mut platform, 958, dash_to_credits!(0.1));
+
+        let card_document_type = contract
+            .document_type_for_name("card")
+            .expect("expected a card document type");
+
+        let entropy = Bytes32::random_with_rng(&mut rng);
+
+        let mut document = card_document_type
+            .random_document_with_identifier_and_entropy(
+                &mut rng,
+                identity.id(),
+                entropy,
+                DocumentFieldFillType::FillIfNotRequired,
+                DocumentFieldFillSize::AnyDocumentFillSize,
+                platform_version,
+            )
+            .expect("expected a random document");
+
+        document.set("attack", 4.into());
+        document.set("defense", 7.into());
+        document.set("imageUrl", "https://example.com/card.png".into());
+
+        let forged_creator_bytes = Bytes32::random_with_rng(&mut rng);
+        let forged_creator = Identifier::from(forged_creator_bytes.0);
+        document.set("$creatorId", forged_creator.into());
+
+        let documents_batch_create_transition =
+            BatchTransition::new_document_creation_transition_from_document(
+                document,
+                card_document_type,
+                entropy.0,
+                &key,
+                2,
+                0,
+                None,
+                &signer,
+                platform_version,
+                None,
+            )
+            .await
+            .expect("expect to create documents batch transition");
+
+        let documents_batch_create_serialized_transition = documents_batch_create_transition
+            .serialize_to_bytes()
+            .expect("expected documents batch serialized state transition");
+
+        let transaction = platform.drive.grove.start_transaction();
+
+        let processing_result = platform
+            .platform
+            .process_raw_state_transitions(
+                &vec![documents_batch_create_serialized_transition],
+                &platform_state,
+                &BlockInfo::default(),
+                &transaction,
+                platform_version,
+                false,
+                None,
+            )
+            .expect("expected to process state transition");
+
+        assert_eq!(processing_result.invalid_paid_count(), 1);
+
+        platform
+            .drive
+            .grove
+            .commit_transaction(transaction)
+            .unwrap()
+            .expect("expected to commit transaction");
+
+        let result = processing_result.into_execution_results().remove(0);
+        let PaidConsensusError {
+            error: consensus_error,
+            ..
+        } = result
+        else {
+            panic!("expected a paid consensus error");
+        };
+
+        assert!(
+            consensus_error.to_string().contains("$creatorId"),
+            "expected the error to mention $creatorId but got: {}",
+            consensus_error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_document_creation_should_fail_if_reusing_entropy() {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .with_latest_protocol_version()
@@ -185,6 +286,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -208,7 +310,7 @@ mod creation_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
         );
 
         platform
@@ -246,6 +348,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -269,10 +372,10 @@ mod creation_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [PaidConsensusError(
-                ConsensusError::StateError(StateError::DocumentAlreadyPresentError { .. }),
-                _
-            )]
+            [PaidConsensusError {
+                error: ConsensusError::StateError(StateError::DocumentAlreadyPresentError { .. }),
+                ..
+            }]
         );
 
         platform
@@ -283,8 +386,8 @@ mod creation_tests {
             .expect("expected to commit transaction");
     }
 
-    #[test]
-    fn test_document_creation_with_very_big_field() {
+    #[tokio::test]
+    async fn test_document_creation_with_very_big_field() {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .with_latest_protocol_version()
@@ -353,6 +456,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -375,21 +479,21 @@ mod creation_tests {
             .expect("expected to process state transition");
         assert_eq!(
             processing_result.execution_results().first().unwrap(),
-            &PaidConsensusError(
-                ConsensusError::BasicError(BasicError::DocumentFieldMaxSizeExceededError(
+            &PaidConsensusError {
+                error: ConsensusError::BasicError(BasicError::DocumentFieldMaxSizeExceededError(
                     DocumentFieldMaxSizeExceededError::new(
                         "avatar".to_string(),
                         avatar_size as u64,
                         max_field_size as u64
                     )
                 )),
-                FeeResult {
+                actual_fees: FeeResult {
                     storage_fee: 11556000,
                     processing_fee: 526140,
                     fee_refunds: FeeRefunds::default(),
                     removed_bytes_from_system: 0
                 }
-            )
+            }
         );
 
         platform
@@ -400,8 +504,8 @@ mod creation_tests {
             .expect("expected to commit transaction");
     }
 
-    #[test]
-    fn test_document_creation_on_contested_unique_index() {
+    #[tokio::test]
+    async fn test_document_creation_on_contested_unique_index() {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .with_latest_protocol_version()
@@ -532,6 +636,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_preorder_transition_1 =
@@ -552,6 +657,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_preorder_transition_2 =
@@ -572,6 +678,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_transition_1 = documents_batch_create_transition_1
@@ -591,6 +698,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_transition_2 = documents_batch_create_transition_2
@@ -852,11 +960,11 @@ mod creation_tests {
         assert_eq!(second_contender.vote_tally(), Some(0));
     }
 
-    #[test]
-    fn test_document_creation_on_contested_unique_index_should_fail_if_not_paying_for_it() {
+    #[tokio::test]
+    async fn test_document_creation_on_contested_unique_index_should_fail_if_not_paying_for_it() {
         let platform_version = PlatformVersion::latest();
         let platform_config = PlatformConfig {
-            network: Network::Dash,
+            network: Network::Mainnet,
             ..Default::default()
         };
         let mut platform = TestPlatformBuilder::new()
@@ -948,6 +1056,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_preorder_transition_1 =
@@ -984,6 +1093,7 @@ mod creation_tests {
             documents_batch_inner_create_transition_1.into();
         documents_batch_create_transition_1
             .sign_external(&key_1, &signer_1, Some(|_, _| Ok(SecurityLevel::HIGH)))
+            .await
             .expect("expected to sign");
 
         let documents_batch_create_serialized_transition_1 = documents_batch_create_transition_1
@@ -1038,10 +1148,10 @@ mod creation_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [PaidConsensusError(
-                ConsensusError::StateError(StateError::DocumentContestNotPaidForError(_)),
-                _
-            )]
+            [PaidConsensusError {
+                error: ConsensusError::StateError(StateError::DocumentContestNotPaidForError(_)),
+                ..
+            }]
         );
 
         // Now let's run a query for the vote totals
@@ -1123,8 +1233,8 @@ mod creation_tests {
         assert!(documents.is_empty());
     }
 
-    #[test]
-    fn test_document_creation_on_contested_unique_index_should_not_fail_if_not_paying_for_it_on_testnet_before_epoch_2080(
+    #[tokio::test]
+    async fn test_document_creation_on_contested_unique_index_should_not_fail_if_not_paying_for_it_on_testnet_before_epoch_2080(
     ) {
         let platform_version = PlatformVersion::latest();
         let platform_config = PlatformConfig {
@@ -1220,6 +1330,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_preorder_transition_1 =
@@ -1255,6 +1366,7 @@ mod creation_tests {
             documents_batch_inner_create_transition_1.into();
         documents_batch_create_transition_1
             .sign_external(&key_1, &signer_1, Some(|_, _| Ok(SecurityLevel::HIGH)))
+            .await
             .expect("expected to sign");
 
         let documents_batch_create_serialized_transition_1 = documents_batch_create_transition_1
@@ -1309,7 +1421,7 @@ mod creation_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::SuccessfulExecution(..)]
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
         );
 
         // Now let's run a query for the vote totals
@@ -1391,8 +1503,8 @@ mod creation_tests {
         assert!(!documents.is_empty());
     }
 
-    #[test]
-    fn test_document_creation_on_contested_unique_index_should_fail_if_reusing_entropy() {
+    #[tokio::test]
+    async fn test_document_creation_on_contested_unique_index_should_fail_if_reusing_entropy() {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .with_latest_protocol_version()
@@ -1566,6 +1678,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_preorder_transition_1 =
@@ -1586,6 +1699,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_preorder_transition_2 =
@@ -1606,6 +1720,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_preorder_transition_3 =
@@ -1626,6 +1741,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_transition_1 = documents_batch_create_transition_1
@@ -1645,6 +1761,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_transition_2 = documents_batch_create_transition_2
@@ -1664,6 +1781,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_transition_3 = documents_batch_create_transition_3
@@ -1749,12 +1867,12 @@ mod creation_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [PaidConsensusError(
-                ConsensusError::StateError(
+            [PaidConsensusError {
+                error: ConsensusError::StateError(
                     StateError::DocumentContestDocumentWithSameIdAlreadyPresentError { .. }
                 ),
-                _
-            )]
+                ..
+            }]
         );
 
         // Now let's run a query for the vote totals
@@ -1958,8 +2076,8 @@ mod creation_tests {
         assert_eq!(second_contender.vote_tally(), Some(0));
     }
 
-    #[test]
-    fn test_that_a_contested_document_can_not_be_added_to_after_a_week() {
+    #[tokio::test]
+    async fn test_that_a_contested_document_can_not_be_added_to_after_a_week() {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .with_latest_protocol_version()
@@ -1974,7 +2092,8 @@ mod creation_tests {
             7,
             "quantum",
             platform_version,
-        );
+        )
+        .await;
 
         perform_votes_multi(
             &mut platform,
@@ -1989,7 +2108,8 @@ mod creation_tests {
             10,
             None,
             platform_version,
-        );
+        )
+        .await;
 
         let max_join_time = platform_version
             .dpp
@@ -2008,7 +2128,8 @@ mod creation_tests {
             "quantum",
             None, // this should succeed, as we are under a week
             platform_version,
-        );
+        )
+        .await;
 
         let time_now = platform_version
             .dpp
@@ -2042,11 +2163,12 @@ mod creation_tests {
             "quantum",
             Some(expected_error_message.as_str()), // this should fail, as we are over a week
             platform_version,
-        );
+        )
+        .await;
     }
 
-    #[test]
-    fn test_that_a_contest_can_not_be_joined_twice_by_the_same_identity() {
+    #[tokio::test]
+    async fn test_that_a_contest_can_not_be_joined_twice_by_the_same_identity() {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .with_latest_protocol_version()
@@ -2071,7 +2193,8 @@ mod creation_tests {
             7,
             "quantum",
             platform_version,
-        );
+        )
+        .await;
 
         let domain = dpns_contract
             .document_type_for_name("domain")
@@ -2101,6 +2224,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_transition_1 = documents_batch_create_transition_1
@@ -2136,14 +2260,18 @@ mod creation_tests {
 
         let result = processing_result.into_execution_results().remove(0);
 
-        let PaidConsensusError(consensus_error, _) = result else {
+        let PaidConsensusError {
+            error: consensus_error,
+            ..
+        } = result
+        else {
             panic!("expected a paid consensus error");
         };
         assert_eq!(consensus_error.to_string(), "An Identity with the id BjNejy4r9QAvLHpQ9Yq6yRMgNymeGZ46d48fJxJbMrfW is already a contestant for the vote_poll ContestedDocumentResourceVotePoll { contract_id: GWRSAVFMjXx8HpQFaNJMqBV7MBgMK4br5UESsB4S31Ec, document_type_name: domain, index_name: parentNameAndLabel, index_values: [string dash, string quantum] }");
     }
 
-    #[test]
-    fn test_that_a_contested_document_can_not_be_added_if_we_are_locked() {
+    #[tokio::test]
+    async fn test_that_a_contested_document_can_not_be_added_if_we_are_locked() {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .with_latest_protocol_version()
@@ -2158,7 +2286,8 @@ mod creation_tests {
             7,
             "quantum",
             platform_version,
-        );
+        )
+        .await;
 
         perform_votes_multi(
             &mut platform,
@@ -2173,7 +2302,8 @@ mod creation_tests {
             10,
             None,
             platform_version,
-        );
+        )
+        .await;
 
         fast_forward_to_block(
             &platform,
@@ -2198,7 +2328,8 @@ mod creation_tests {
             "quantum",
             None, // this should succeed, as we are under the `platform_version.dpp.validation.voting.allow_other_contenders_time_testing_ms`
             platform_version,
-        );
+        )
+        .await;
 
         let time_after_distribution_limit = platform_version
             .dpp
@@ -2250,11 +2381,12 @@ mod creation_tests {
             "quantum",
             Some(expected_error_message.as_str()), // this should fail, as it is locked
             platform_version,
-        );
+        )
+        .await;
     }
 
-    #[test]
-    fn test_document_creation_on_restricted_document_type_that_only_allows_contract_owner_to_create(
+    #[tokio::test]
+    async fn test_document_creation_on_restricted_document_type_that_only_allows_contract_owner_to_create(
     ) {
         let mut platform = TestPlatformBuilder::new()
             .with_latest_protocol_version()
@@ -2331,6 +2463,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -2392,6 +2525,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -2426,14 +2560,18 @@ mod creation_tests {
 
         let result = processing_result.into_execution_results().remove(0);
 
-        let PaidConsensusError(consensus_error, _) = result else {
+        let PaidConsensusError {
+            error: consensus_error,
+            ..
+        } = result
+        else {
             panic!("expected a paid consensus error");
         };
         assert_eq!(consensus_error.to_string(), "Document Creation on 86LHvdC1Tqx5P97LQUSibGFqf2vnKFpB6VkqQ7oso86e:card is not allowed because of the document type's creation restriction mode Owner Only");
     }
 
-    #[test]
-    fn test_document_creation_on_search_system_contract_fails_due_to_restriction() {
+    #[tokio::test]
+    async fn test_document_creation_on_search_system_contract_fails_due_to_restriction() {
         // Build test platform
         let mut platform = TestPlatformBuilder::new()
             .with_latest_protocol_version()
@@ -2513,6 +2651,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -2535,8 +2674,6 @@ mod creation_tests {
             )
             .expect("expected to process state transition");
 
-        println!("Processing result: {:?}", processing_result);
-
         // Since the creationRestrictionMode is 2 (NoCreationAllowed), this should fail
         assert_eq!(
             processing_result.invalid_paid_count(),
@@ -2553,7 +2690,11 @@ mod creation_tests {
 
         // Check the returned consensus error
         let result = processing_result.into_execution_results().remove(0);
-        let PaidConsensusError(consensus_error, _) = result else {
+        let PaidConsensusError {
+            error: consensus_error,
+            ..
+        } = result
+        else {
             panic!("expected a paid consensus error");
         };
 
@@ -2569,8 +2710,8 @@ mod creation_tests {
         );
     }
 
-    #[test]
-    fn test_document_creation_paid_with_a_token_burn() {
+    #[tokio::test]
+    async fn test_document_creation_paid_with_a_token_burn() {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .with_latest_protocol_version()
@@ -2649,6 +2790,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -2672,7 +2814,7 @@ mod creation_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
         );
 
         platform
@@ -2714,8 +2856,8 @@ mod creation_tests {
         assert_eq!(contract_owner_token_balance, None);
     }
 
-    #[test]
-    fn test_document_creation_paid_with_a_token_transfer() {
+    #[tokio::test]
+    async fn test_document_creation_paid_with_a_token_transfer() {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .with_latest_protocol_version()
@@ -2794,6 +2936,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -2817,7 +2960,7 @@ mod creation_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
         );
 
         platform
@@ -2858,8 +3001,8 @@ mod creation_tests {
         assert_eq!(contract_owner_token_balance, Some(10));
     }
 
-    #[test]
-    fn test_document_creation_paid_with_a_token_transfer_to_ones_self() {
+    #[tokio::test]
+    async fn test_document_creation_paid_with_a_token_transfer_to_ones_self() {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .with_latest_protocol_version()
@@ -2937,6 +3080,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -2960,7 +3104,7 @@ mod creation_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
         );
 
         platform
@@ -2988,8 +3132,8 @@ mod creation_tests {
         assert_eq!(token_balance, Some(15));
     }
 
-    #[test]
-    fn test_document_creation_paid_with_a_token_not_spending_enough() {
+    #[tokio::test]
+    async fn test_document_creation_paid_with_a_token_not_spending_enough() {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .with_latest_protocol_version()
@@ -3068,6 +3212,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -3091,12 +3236,12 @@ mod creation_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [PaidConsensusError(
-                ConsensusError::StateError(
+            [PaidConsensusError {
+                error: ConsensusError::StateError(
                     StateError::IdentityHasNotAgreedToPayRequiredTokenAmountError(_)
                 ),
-                _
-            )]
+                ..
+            }]
         );
 
         platform
@@ -3120,8 +3265,8 @@ mod creation_tests {
         assert_eq!(token_balance, Some(15));
     }
 
-    #[test]
-    fn test_document_creation_paid_with_a_token_minimum_cost_set_rare_scenario() {
+    #[tokio::test]
+    async fn test_document_creation_paid_with_a_token_minimum_cost_set_rare_scenario() {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .with_latest_protocol_version()
@@ -3200,6 +3345,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -3223,12 +3369,12 @@ mod creation_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [PaidConsensusError(
-                ConsensusError::StateError(
+            [PaidConsensusError {
+                error: ConsensusError::StateError(
                     StateError::IdentityHasNotAgreedToPayRequiredTokenAmountError(_)
                 ),
-                _
-            )]
+                ..
+            }]
         );
 
         platform
@@ -3252,8 +3398,8 @@ mod creation_tests {
         assert_eq!(token_balance, Some(15));
     }
 
-    #[test]
-    fn test_document_creation_paid_with_a_token_agreeing_to_too_much() {
+    #[tokio::test]
+    async fn test_document_creation_paid_with_a_token_agreeing_to_too_much() {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .with_latest_protocol_version()
@@ -3332,6 +3478,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -3355,7 +3502,7 @@ mod creation_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
         );
 
         platform
@@ -3379,8 +3526,8 @@ mod creation_tests {
         assert_eq!(token_balance, Some(5));
     }
 
-    #[test]
-    fn test_document_creation_paid_with_a_token_token_info_not_set() {
+    #[tokio::test]
+    async fn test_document_creation_paid_with_a_token_token_info_not_set() {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .with_latest_protocol_version()
@@ -3453,6 +3600,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -3476,10 +3624,12 @@ mod creation_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [PaidConsensusError(
-                ConsensusError::StateError(StateError::RequiredTokenPaymentInfoNotSetError(_)),
-                _
-            )]
+            [PaidConsensusError {
+                error: ConsensusError::StateError(StateError::RequiredTokenPaymentInfoNotSetError(
+                    _
+                )),
+                ..
+            }]
         );
 
         platform
@@ -3503,8 +3653,8 @@ mod creation_tests {
         assert_eq!(token_balance, Some(15));
     }
 
-    #[test]
-    fn test_document_creation_not_enough_token_balance_to_create_document() {
+    #[tokio::test]
+    async fn test_document_creation_not_enough_token_balance_to_create_document() {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .with_latest_protocol_version()
@@ -3584,6 +3734,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -3607,12 +3758,12 @@ mod creation_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [PaidConsensusError(
-                ConsensusError::StateError(StateError::IdentityDoesNotHaveEnoughTokenBalanceError(
-                    _
-                )),
-                _
-            )]
+            [PaidConsensusError {
+                error: ConsensusError::StateError(
+                    StateError::IdentityDoesNotHaveEnoughTokenBalanceError(_)
+                ),
+                ..
+            }]
         );
 
         platform
@@ -3636,8 +3787,8 @@ mod creation_tests {
         assert_eq!(token_balance, Some(8));
     }
 
-    #[test]
-    fn test_document_creation_paid_with_an_external_token() {
+    #[tokio::test]
+    async fn test_document_creation_paid_with_an_external_token() {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .with_latest_protocol_version()
@@ -3744,6 +3895,7 @@ mod creation_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
         assert_matches!(
@@ -3772,7 +3924,7 @@ mod creation_tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
         );
 
         platform

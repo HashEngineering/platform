@@ -55,7 +55,7 @@ impl Sdk {
     /// - The transition signing fails
     /// - Broadcasting the transition fails
     /// - The proof verification returns an unexpected result type
-    pub async fn token_mint<S: Signer>(
+    pub async fn token_mint<S: Signer<IdentityPublicKey>>(
         &self,
         mint_tokens_transition_builder: TokenMintTransitionBuilder,
         signing_key: &IdentityPublicKey,
@@ -63,12 +63,14 @@ impl Sdk {
     ) -> Result<MintResult, Error> {
         let platform_version = self.version();
 
+        let put_settings = mint_tokens_transition_builder.settings;
+
         let state_transition = mint_tokens_transition_builder
             .sign(self, signing_key, signer, platform_version)
             .await?;
 
         let proof_result = state_transition
-            .broadcast_and_wait::<StateTransitionProofResult>(self, None)
+            .broadcast_and_wait::<StateTransitionProofResult>(self, put_settings)
             .await?;
 
         match proof_result {

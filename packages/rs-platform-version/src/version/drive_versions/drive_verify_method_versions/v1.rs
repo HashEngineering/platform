@@ -1,19 +1,43 @@
 use crate::version::drive_versions::drive_verify_method_versions::{
-    DriveVerifyContractMethodVersions, DriveVerifyDocumentMethodVersions,
-    DriveVerifyGroupMethodVersions, DriveVerifyIdentityMethodVersions, DriveVerifyMethodVersions,
-    DriveVerifySingleDocumentMethodVersions, DriveVerifyStateTransitionMethodVersions,
-    DriveVerifySystemMethodVersions, DriveVerifyTokenMethodVersions, DriveVerifyVoteMethodVersions,
+    DriveVerifyAddressFundsMethodVersions, DriveVerifyContractMethodVersions,
+    DriveVerifyDocumentCountMethodVersions, DriveVerifyDocumentMethodVersions,
+    DriveVerifyDocumentSumMethodVersions, DriveVerifyGroupMethodVersions,
+    DriveVerifyIdentityMethodVersions, DriveVerifyMethodVersions,
+    DriveVerifyShieldedMethodVersions, DriveVerifySingleDocumentMethodVersions,
+    DriveVerifyStateTransitionMethodVersions, DriveVerifySystemMethodVersions,
+    DriveVerifyTokenMethodVersions, DriveVerifyVoteMethodVersions,
 };
 
 pub const DRIVE_VERIFY_METHOD_VERSIONS_V1: DriveVerifyMethodVersions = DriveVerifyMethodVersions {
     contract: DriveVerifyContractMethodVersions {
         verify_contract: 0,
         verify_contract_history: 0,
+        verify_contract_return_serialization: 0,
     },
     document: DriveVerifyDocumentMethodVersions {
         verify_proof: 0,
         verify_proof_keep_serialized: 0,
+        verify_document_history: 0,
         verify_start_at_document_in_proof: 0,
+    },
+    document_count: DriveVerifyDocumentCountMethodVersions {
+        verify_aggregate_count_proof: 0,
+        verify_carrier_aggregate_count_proof: 0,
+        verify_distinct_count_proof: 0,
+        verify_point_lookup_count_proof: 0,
+        verify_primary_key_count_tree_proof: 0,
+    },
+    document_sum: DriveVerifyDocumentSumMethodVersions {
+        verify_aggregate_sum_proof: 0,
+        verify_carrier_aggregate_sum_proof: 0,
+        verify_carrier_aggregate_count_and_sum_proof: 0,
+        verify_aggregate_count_and_sum_proof: 0,
+        verify_primary_key_sum_tree_proof: 0,
+        verify_primary_key_count_sum_tree_proof: 0,
+        verify_point_lookup_sum_proof: 0,
+        verify_distinct_sum_proof: 0,
+        verify_distinct_count_and_sum_proof: 0,
+        verify_point_lookup_count_and_sum_proof: 0,
     },
     identity: DriveVerifyIdentityMethodVersions {
         verify_full_identities_by_public_key_hashes: 0,
@@ -21,6 +45,7 @@ pub const DRIVE_VERIFY_METHOD_VERSIONS_V1: DriveVerifyMethodVersions = DriveVeri
         verify_full_identity_by_public_key_hash: 0,
         verify_identity_balance_for_identity_id: 0,
         verify_identity_balances_for_identity_ids: 0,
+        verify_identity_balance_revision_and_addresses_from_inputs: 0,
         verify_identity_id_by_unique_public_key_hash: 0,
         verify_identity_ids_by_unique_public_key_hashes: 0,
         verify_identity_keys_by_identity_id: 0,
@@ -76,7 +101,23 @@ pub const DRIVE_VERIFY_METHOD_VERSIONS_V1: DriveVerifyMethodVersions = DriveVeri
         verify_vote_polls_by_end_date_proof: 0,
         verify_specialized_balance: 0,
     },
+    address_funds: DriveVerifyAddressFundsMethodVersions {
+        verify_address_info: 0,
+        verify_addresses_infos: 0,
+        verify_address_funds_trunk_query: 0,
+        verify_address_funds_branch_query: 0,
+        verify_recent_address_balance_changes: 0,
+        verify_compacted_address_balance_changes: 0,
+    },
     state_transition: DriveVerifyStateTransitionMethodVersions {
         verify_state_transition_was_executed_with_proof: 0,
+    },
+    shielded: DriveVerifyShieldedMethodVersions {
+        verify_shielded_pool_state: 0,
+        verify_shielded_anchors: 0,
+        verify_most_recent_shielded_anchor: 0,
+        verify_shielded_encrypted_notes: 0,
+        verify_shielded_notes_count: 0,
+        verify_shielded_nullifiers: 0,
     },
 };

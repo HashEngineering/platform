@@ -5,8 +5,8 @@ use crate::execution::types::block_state_info::v0::BlockStateInfoV0Methods;
 use crate::metrics::HistogramTiming;
 use crate::platform_types::epoch_info::v0::{EpochInfoV0Getters, EpochInfoV0Methods};
 use crate::platform_types::platform::Platform;
-use crate::platform_types::platform_state::v0::PlatformStateV0Methods;
 use crate::platform_types::platform_state::PlatformState;
+use crate::platform_types::platform_state::PlatformStateV0Methods;
 use crate::platform_types::{block_execution_outcome, block_proposal};
 use crate::rpc::core::CoreRPCLike;
 use dpp::block::epoch::Epoch;
@@ -128,21 +128,6 @@ Your software version: {}, latest supported protocol version: {}."#,
         } else {
             // Stay on the last committed platform version
             last_committed_platform_version
-        };
-
-        // Patch platform version and run migrations if we have patches and/or
-        // migrations defined for this height.
-        // It modifies the protocol version to function version mapping to apply hotfixes
-        // Also it performs migrations to fix corrupted state or prepare it for new features
-        let block_platform_version = if let Some(patched_platform_version) = self
-            .apply_platform_version_patch_and_migrate_state_for_height(
-                block_proposal.height,
-                &mut block_platform_state,
-                transaction,
-            )? {
-            patched_platform_version
-        } else {
-            block_platform_version
         };
 
         match block_platform_version

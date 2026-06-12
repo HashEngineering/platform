@@ -3,6 +3,7 @@ use dpp::identity::accessors::IdentityGettersV0;
 
 use crate::platform::transition::broadcast::BroadcastStateTransition;
 use crate::platform::transition::put_settings::PutSettings;
+use crate::platform::transition::validation::ensure_valid_state_transition_structure;
 use crate::{Error, Sdk};
 use dpp::identity::signer::Signer;
 use dpp::identity::{Identity, IdentityPublicKey, PartialIdentity};
@@ -13,18 +14,17 @@ use super::waitable::Waitable;
 
 #[async_trait::async_trait]
 pub trait TransferToIdentity: Waitable {
-    /// Function to transfer credits from an identity to another identity. Returns the final
-    /// identity balance.
+    /// Transfers credits from an identity to another identity.
     ///
-    /// If signing_transfer_key_to_use is not set, we will try to use one in the signer that is
+    /// If `signing_transfer_key_to_use` is not set, we will try to use one in the signer that is
     /// available for the transfer.
     ///
     /// This method will resolve once the state transition is executed.
     ///
     /// ## Returns
     ///
-    /// Final balance of the identity after the transfer.
-    async fn transfer_credits<S: Signer + Send>(
+    /// A tuple of `(sender_balance, receiver_balance)` after the transfer.
+    async fn transfer_credits<S: Signer<IdentityPublicKey> + Send>(
         &self,
         sdk: &Sdk,
         to_identity_id: Identifier,
@@ -37,7 +37,7 @@ pub trait TransferToIdentity: Waitable {
 
 #[async_trait::async_trait]
 impl TransferToIdentity for Identity {
-    async fn transfer_credits<S: Signer + Send>(
+    async fn transfer_credits<S: Signer<IdentityPublicKey> + Send>(
         &self,
         sdk: &Sdk,
         to_identity_id: Identifier,
@@ -58,21 +58,19 @@ impl TransferToIdentity for Identity {
             new_identity_nonce,
             sdk.version(),
             None,
-        )?;
+        )
+        .await?;
+        ensure_valid_state_transition_structure(&state_transition, sdk.version())?;
 
         let (sender, receiver): (PartialIdentity, PartialIdentity) =
             state_transition.broadcast_and_wait(sdk, settings).await?;
 
         let sender_balance = sender.balance.ok_or_else(|| {
-            Error::DapiClientError(
-                "expected an identity balance after transfer (sender)".to_string(),
-            )
+            Error::Generic("expected an identity balance after transfer (sender)".to_string())
         })?;
 
         let receiver_balance = receiver.balance.ok_or_else(|| {
-            Error::DapiClientError(
-                "expected an identity balance after transfer (receiver)".to_string(),
-            )
+            Error::Generic("expected an identity balance after transfer (receiver)".to_string())
         })?;
 
         Ok((sender_balance, receiver_balance))

@@ -1,7 +1,6 @@
 use dpp::block::epoch::Epoch;
 
 use dpp::validation::ValidationResult;
-use drive::error::Error::GroveDB;
 
 use dpp::version::PlatformVersion;
 use drive::grovedb::Transaction;
@@ -25,8 +24,8 @@ use crate::platform_types::block_proposal;
 use crate::platform_types::epoch_info::v0::{EpochInfoV0Getters, EpochInfoV0Methods};
 use crate::platform_types::epoch_info::EpochInfo;
 use crate::platform_types::platform::Platform;
-use crate::platform_types::platform_state::v0::PlatformStateV0Methods;
 use crate::platform_types::platform_state::PlatformState;
+use crate::platform_types::platform_state::PlatformStateV0Methods;
 use crate::platform_types::verify_chain_lock_result::v0::VerifyChainLockResult;
 use crate::rpc::core::CoreRPCLike;
 
@@ -330,6 +329,33 @@ where
             timer,
         )?;
 
+        // Store the address balances to recent block storage
+        self.store_address_balances_to_recent_block_storage(
+            &state_transitions_result.address_balances_updated,
+            &block_info,
+            transaction,
+            platform_version,
+        )?;
+
+        // Clean up expired compacted address balance entries
+        self.cleanup_recent_block_storage_address_balances(
+            &block_info,
+            transaction,
+            platform_version,
+        )?;
+
+        // Record shielded pool anchor if the commitment tree changed this block.
+        // This stores block_height → anchor_bytes so shielded transactions can
+        // reference a recent anchor for spend authorization.
+        self.record_shielded_pool_anchor_if_changed(
+            block_proposal.height,
+            transaction,
+            platform_version,
+        )?;
+
+        // Prune anchors older than the configured retention depth
+        self.prune_shielded_pool_anchors(block_proposal.height, transaction, platform_version)?;
+
         // Pool withdrawals into transactions queue
 
         // Takes queued withdrawals, creates untiled withdrawal transaction payload, saves them to queue
@@ -360,6 +386,7 @@ where
                 block_state_info: block_state_info.into(),
                 epoch_info,
                 unsigned_withdrawal_transactions: unsigned_withdrawal_transaction_bytes,
+                block_address_balance_changes: std::collections::BTreeMap::new(),
                 block_platform_state,
                 proposer_results: None,
             }
@@ -383,7 +410,7 @@ where
             .grove
             .root_hash(Some(transaction), &platform_version.drive.grove_version)
             .unwrap()
-            .map_err(|e| Error::Drive(GroveDB(e)))?; //GroveDb errors are system errors
+            .map_err(|e| Error::Drive(drive::error::Error::from(e)))?; //GroveDb errors are system errors
 
         block_execution_context
             .block_state_info_mut()
@@ -400,6 +427,7 @@ where
             tracing::trace!(
                 method = "run_block_proposal_v0",
                 app_hash = hex::encode(root_hash),
+                block_hash = hex::encode(block_proposal.block_hash.unwrap_or_default()),
                 platform_state_fingerprint = hex::encode(
                     block_execution_context
                         .block_platform_state()

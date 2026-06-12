@@ -12,6 +12,7 @@ use drive::error::query::QuerySyntaxError;
 use std::collections::BTreeMap;
 
 use crate::platform_types::platform_state::PlatformState;
+use crate::query::response_metadata::CheckpointUsed;
 use dpp::identity::{KeyID, Purpose, SecurityLevel};
 use dpp::validation::ValidationResult;
 use dpp::version::PlatformVersion;
@@ -19,6 +20,7 @@ use drive::drive::identity::key::fetch::{
     IdentityKeysRequest, KeyKindRequestType, KeyRequestType, PurposeU8, SecurityLevelU8,
     SerializedKeyVec,
 };
+use drive::util::grove_operations::GroveDBToUse;
 
 fn from_i32_to_key_kind_request_type(value: i32) -> Option<KeyKindRequestType> {
     match value {
@@ -142,9 +144,10 @@ impl<C> Platform<C> {
 
             GetIdentityKeysResponseV0 {
                 result: Some(get_identity_keys_response_v0::Result::Proof(
-                    self.response_proof_v0(platform_state, proof),
+                    self.response_proof_v0(platform_state, proof, GroveDBToUse::Current)
+                        .map(|(_, proof)| proof)?,
                 )),
-                metadata: Some(self.response_metadata_v0(platform_state)),
+                metadata: Some(self.response_metadata_v0(platform_state, CheckpointUsed::Current)),
             }
         } else {
             let keys: SerializedKeyVec =
@@ -155,7 +158,7 @@ impl<C> Platform<C> {
                 result: Some(get_identity_keys_response_v0::Result::Keys(
                     get_identity_keys_response_v0::Keys { keys_bytes: keys },
                 )),
-                metadata: Some(self.response_metadata_v0(platform_state)),
+                metadata: Some(self.response_metadata_v0(platform_state, CheckpointUsed::Current)),
             }
         };
 
@@ -349,6 +352,236 @@ mod tests {
             }),
             limit: None,
             offset: None,
+            prove: false,
+        };
+
+        let result = platform
+            .query_keys_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.data,
+            Some(GetIdentityKeysResponseV0 {
+                result: Some(get_identity_keys_response_v0::Result::Keys(keys)),
+                ..
+            }) if keys.keys_bytes.is_empty()
+        ));
+    }
+
+    #[test]
+    fn test_invalid_security_level() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        // Security level 200 is invalid (not a valid u8 SecurityLevel enum value)
+        let request = GetIdentityKeysRequestV0 {
+            identity_id: vec![0; 32],
+            request_type: Some(KeyRequestType {
+                request: Some(Request::SearchKey(SearchKey {
+                    purpose_map: [(
+                        0,
+                        SecurityLevelMap {
+                            security_level_map: [(200, 0)].into_iter().collect(),
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                })),
+            }),
+            limit: None,
+            offset: None,
+            prove: false,
+        };
+
+        let result = platform
+            .query_keys_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.errors.as_slice(),
+            [QueryError::Query(QuerySyntaxError::InvalidKeyParameter(msg))] if msg.contains("security level")
+        ));
+    }
+
+    #[test]
+    fn test_invalid_purpose() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        // Purpose 200 is invalid
+        let request = GetIdentityKeysRequestV0 {
+            identity_id: vec![0; 32],
+            request_type: Some(KeyRequestType {
+                request: Some(Request::SearchKey(SearchKey {
+                    purpose_map: [(
+                        200,
+                        SecurityLevelMap {
+                            security_level_map: [(0, 0)].into_iter().collect(),
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                })),
+            }),
+            limit: None,
+            offset: None,
+            prove: false,
+        };
+
+        let result = platform
+            .query_keys_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.errors.as_slice(),
+            [QueryError::Query(QuerySyntaxError::InvalidKeyParameter(msg))] if msg.contains("purpose")
+        ));
+    }
+
+    #[test]
+    fn test_invalid_key_kind_request_type() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        // Key kind request type 99 is invalid (only 0 and 1 are valid)
+        let request = GetIdentityKeysRequestV0 {
+            identity_id: vec![0; 32],
+            request_type: Some(KeyRequestType {
+                request: Some(Request::SearchKey(SearchKey {
+                    purpose_map: [(
+                        0,
+                        SecurityLevelMap {
+                            security_level_map: [(0, 99)].into_iter().collect(),
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                })),
+            }),
+            limit: None,
+            offset: None,
+            prove: false,
+        };
+
+        let result = platform
+            .query_keys_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.errors.as_slice(),
+            [QueryError::Query(QuerySyntaxError::InvalidKeyParameter(msg))] if msg.contains("unknown key kind request type")
+        ));
+    }
+
+    #[test]
+    fn test_purpose_out_of_bounds() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        // Purpose > u8::MAX
+        let request = GetIdentityKeysRequestV0 {
+            identity_id: vec![0; 32],
+            request_type: Some(KeyRequestType {
+                request: Some(Request::SearchKey(SearchKey {
+                    purpose_map: [(
+                        256, // u8::MAX + 1
+                        SecurityLevelMap {
+                            security_level_map: [(0, 0)].into_iter().collect(),
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                })),
+            }),
+            limit: None,
+            offset: None,
+            prove: false,
+        };
+
+        let result = platform
+            .query_keys_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.errors.as_slice(),
+            [QueryError::Query(QuerySyntaxError::InvalidKeyParameter(msg))] if msg.contains("purpose out of bounds")
+        ));
+    }
+
+    #[test]
+    fn test_specific_keys_request_returns_empty_for_absent_identity() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        let request = GetIdentityKeysRequestV0 {
+            identity_id: vec![0; 32],
+            request_type: Some(KeyRequestType {
+                request: Some(Request::SpecificKeys(
+                    dapi_grpc::platform::v0::SpecificKeys {
+                        key_ids: vec![0, 1, 2],
+                    },
+                )),
+            }),
+            limit: Some(100),
+            offset: None,
+            prove: false,
+        };
+
+        let result = platform
+            .query_keys_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.data,
+            Some(GetIdentityKeysResponseV0 {
+                result: Some(get_identity_keys_response_v0::Result::Keys(keys)),
+                ..
+            }) if keys.keys_bytes.is_empty()
+        ));
+    }
+
+    #[test]
+    fn test_search_key_request_returns_empty_for_absent_identity() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        let request = GetIdentityKeysRequestV0 {
+            identity_id: vec![0; 32],
+            request_type: Some(KeyRequestType {
+                request: Some(Request::SearchKey(SearchKey {
+                    purpose_map: [(
+                        0, // AUTHENTICATION
+                        SecurityLevelMap {
+                            security_level_map: [(0, 0)].into_iter().collect(), // MASTER, CurrentKeyOfKindRequest
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                })),
+            }),
+            limit: Some(100),
+            offset: None,
+            prove: false,
+        };
+
+        let result = platform
+            .query_keys_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.data,
+            Some(GetIdentityKeysResponseV0 {
+                result: Some(get_identity_keys_response_v0::Result::Keys(keys)),
+                ..
+            }) if keys.keys_bytes.is_empty()
+        ));
+    }
+
+    #[test]
+    fn test_query_with_valid_limit_and_offset() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        let request = GetIdentityKeysRequestV0 {
+            identity_id: vec![0; 32],
+            request_type: Some(KeyRequestType {
+                request: Some(Request::AllKeys(AllKeys {})),
+            }),
+            limit: Some(10),
+            offset: Some(0),
             prove: false,
         };
 

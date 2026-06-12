@@ -9,8 +9,8 @@ use dapi_grpc::platform::v0::{
     get_identity_by_public_key_hash_request, get_identity_by_public_key_hash_response,
     GetIdentityByPublicKeyHashRequest, Proof,
 };
-use dashcore_rpc::dashcore_rpc_json::QuorumType;
 use dpp::bls_signatures::{Bls12381G2Impl, BlsError, Pairing, Signature};
+use dpp::dashcore_rpc::dashcore_rpc_json::QuorumType;
 use dpp::identity::accessors::IdentityGettersV0;
 use dpp::identity::identity_public_key::accessors::v0::IdentityPublicKeyGettersV0;
 use dpp::identity::identity_public_key::methods::hash::IdentityPublicKeyHashMethodsV0;
@@ -317,11 +317,11 @@ mod tests {
         ChainLockConfig, ExecutionConfig, InstantLockConfig, PlatformConfig, PlatformTestConfig,
         ValidatorSetConfig,
     };
-    use drive_abci::platform_types::platform_state::v0::PlatformStateV0Methods;
+    use drive_abci::platform_types::platform_state::PlatformStateV0Methods;
 
     use drive_abci::test::helpers::setup::TestPlatformBuilder;
 
-    use strategy_tests::{IdentityInsertInfo, StartIdentities, Strategy};
+    use strategy_tests::{IdentityInsertInfo, StartAddresses, StartIdentities, Strategy};
 
     use crate::strategy::CoreHeightIncrease::RandomCoreHeightIncrease;
 
@@ -349,15 +349,15 @@ mod tests {
         };
     }
 
-    #[test]
-    fn run_chain_query_epoch_info() {
+    #[tokio::test]
+    async fn run_chain_query_epoch_info() {
         let strategy = NetworkStrategy {
             strategy: Strategy {
                 start_contracts: vec![],
                 operations: vec![],
                 start_identities: StartIdentities::default(),
+                start_addresses: StartAddresses::default(),
                 identity_inserts: IdentityInsertInfo::default(),
-
                 identity_contract_nonce_gaps: None,
                 signer: None,
             },
@@ -384,7 +384,6 @@ mod tests {
             instant_lock: InstantLockConfig::default_100_67(),
             execution: ExecutionConfig {
                 verify_sum_trees: true,
-
                 ..Default::default()
             },
             block_spacing_ms: hour_in_ms,
@@ -404,7 +403,8 @@ mod tests {
             15,
             &mut None,
             &mut None,
-        );
+        )
+        .await;
         assert_eq!(outcome.masternode_identity_balances.len(), 100);
         let nodes_with_no_balance = outcome
             .masternode_identity_balances
@@ -460,15 +460,15 @@ mod tests {
         assert_eq!(epoch_infos.epoch_infos.len(), 5)
     }
 
-    #[test]
-    fn run_chain_query_epoch_info_latest() {
+    #[tokio::test]
+    async fn run_chain_query_epoch_info_latest() {
         let strategy = NetworkStrategy {
             strategy: Strategy {
                 start_contracts: vec![],
                 operations: vec![],
                 start_identities: StartIdentities::default(),
+                start_addresses: StartAddresses::default(),
                 identity_inserts: IdentityInsertInfo::default(),
-
                 identity_contract_nonce_gaps: None,
                 signer: None,
             },
@@ -495,7 +495,6 @@ mod tests {
             instant_lock: InstantLockConfig::default_100_67(),
             execution: ExecutionConfig {
                 verify_sum_trees: true,
-
                 ..Default::default()
             },
             block_spacing_ms: hour_in_ms,
@@ -515,7 +514,8 @@ mod tests {
             15,
             &mut None,
             &mut None,
-        );
+        )
+        .await;
         assert_eq!(outcome.masternode_identity_balances.len(), 100);
         let all_have_balances = outcome
             .masternode_identity_balances
@@ -567,15 +567,15 @@ mod tests {
         assert_eq!(epoch_infos.epoch_infos.first().unwrap().number, 4);
     }
 
-    #[test]
-    fn run_chain_prove_epoch_info() {
+    #[tokio::test]
+    async fn run_chain_prove_epoch_info() {
         let strategy = NetworkStrategy {
             strategy: Strategy {
                 start_contracts: vec![],
                 operations: vec![],
                 start_identities: StartIdentities::default(),
+                start_addresses: StartAddresses::default(),
                 identity_inserts: IdentityInsertInfo::default(),
-
                 identity_contract_nonce_gaps: None,
                 signer: None,
             },
@@ -602,7 +602,6 @@ mod tests {
             instant_lock: InstantLockConfig::default_100_67(),
             execution: ExecutionConfig {
                 verify_sum_trees: true,
-
                 ..Default::default()
             },
             block_spacing_ms: hour_in_ms,
@@ -622,7 +621,8 @@ mod tests {
             15,
             &mut None,
             &mut None,
-        );
+        )
+        .await;
         assert_eq!(outcome.masternode_identity_balances.len(), 100);
         let all_have_balances = outcome
             .masternode_identity_balances
@@ -730,15 +730,15 @@ mod tests {
         assert_eq!(epoch_infos.first().unwrap().index(), 4);
     }
 
-    #[test]
-    fn run_chain_prove_finalized_epoch_infos() {
+    #[tokio::test]
+    async fn run_chain_prove_finalized_epoch_infos() {
         let strategy = NetworkStrategy {
             strategy: Strategy {
                 start_contracts: vec![],
                 operations: vec![],
                 start_identities: StartIdentities::default(),
+                start_addresses: StartAddresses::default(),
                 identity_inserts: IdentityInsertInfo::default(),
-
                 identity_contract_nonce_gaps: None,
                 signer: None,
             },
@@ -765,7 +765,6 @@ mod tests {
             instant_lock: InstantLockConfig::default_100_67(),
             execution: ExecutionConfig {
                 verify_sum_trees: true,
-
                 ..Default::default()
             },
             block_spacing_ms: hour_in_ms,
@@ -785,7 +784,8 @@ mod tests {
             15,
             &mut None,
             &mut None,
-        );
+        )
+        .await;
         assert_eq!(outcome.masternode_identity_balances.len(), 100);
         let all_have_balances = outcome
             .masternode_identity_balances
@@ -833,7 +833,7 @@ mod tests {
                         assert!(!proof.signature.is_empty());
 
                         // Verify the proof
-                        let (root_hash, finalized_epoch_infos) =
+                        let (_root_hash, finalized_epoch_infos) =
                             Drive::verify_finalized_epoch_infos(
                                 &proof.grovedb_proof,
                                 0,

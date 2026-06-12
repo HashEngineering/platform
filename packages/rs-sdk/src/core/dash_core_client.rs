@@ -4,6 +4,7 @@
 //! into dash-platform-sdk.
 
 use crate::error::Error;
+use dash_context_provider::ContextProviderError;
 use dashcore_rpc::{
     dashcore::{hashes::Hash, Amount, QuorumHash},
     dashcore_rpc_json as json,
@@ -11,8 +12,8 @@ use dashcore_rpc::{
     Auth, Client, RpcApi,
 };
 use dpp::dashcore::ProTxHash;
+use dpp::dashcore_rpc;
 use dpp::prelude::CoreBlockHeight;
-use drive_proof_verifier::error::ContextProviderError;
 use std::{fmt::Debug, sync::Mutex};
 use zeroize::Zeroizing;
 
@@ -111,7 +112,7 @@ impl LowLevelDashCoreClient {
             .map_err(Error::CoreClientError)
     }
 
-    /// Return address to which change of transaction can be sent.
+    /// Return the wallet balance.
     #[allow(dead_code)]
     #[deprecated(note = "This function is marked as unused.")]
     pub fn get_balance(&self) -> Result<Amount, Error> {
@@ -163,7 +164,7 @@ impl LowLevelDashCoreClient {
             ))
     }
 
-    /// Require list of validators from Core.
+    /// Request list of Platform validators from Core.
     ///
     /// See also [Dash Core documentation](https://docs.dash.org/projects/core/en/stable/docs/api/remote-procedure-calls-evo.html#protx-list)
     #[allow(unused)]

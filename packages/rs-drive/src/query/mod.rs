@@ -2,14 +2,57 @@ use std::sync::Arc;
 
 #[cfg(any(feature = "server", feature = "verify"))]
 pub use {
-    conditions::{WhereClause, WhereOperator},
+    conditions::{ValueClause, WhereClause, WhereOperator},
+    // Average-query verifier-shareable types — same split as sum:
+    // `AverageEntry` is the per-key `(count, sum)` pair the verifier
+    // returns; `AverageMode` is the SQL-shape input the verifier needs
+    // to rebuild the path query.
+    drive_document_average_query::{AverageEntry, AverageMode},
+    // `CountMode` is the SQL-shape contract (Aggregate /
+    // GroupByIn / GroupByRange / GroupByCompound) the prover
+    // dispatches on; the verifier needs the same enum to route
+    // proof verification to the matching primitive
+    // (`DocumentCountMode`). Available under either `server`
+    // (executor input) or `verify` (proof-decode input).
+    drive_document_count_query::{
+        CountMode, DocumentCountMode, DriveDocumentCountQuery, SplitCountEntry,
+    },
+    // Sum-query verifier-shareable types: `SumEntry` is the per-key
+    // entry type the verifier returns, `SumMode` / `DriveDocumentSumQuery`
+    // are shape inputs the verifier needs to rebuild the path query.
+    // Parallels the count-side exports above.
+    drive_document_sum_query::{DriveDocumentSumQuery, SumEntry, SumMode},
     grovedb::{PathQuery, Query, QueryItem, SizedQuery},
+    having::{
+        HavingAggregate, HavingAggregateFunction, HavingClause, HavingOperator, HavingRanking,
+        HavingRankingKind, HavingRightOperand,
+    },
     ordering::OrderClause,
+    projection::{SelectFunction, SelectProjection},
     single_document_drive_query::SingleDocumentDriveQuery,
     single_document_drive_query::SingleDocumentDriveQueryContestedStatus,
     vote_polls_by_end_date_query::VotePollsByEndDateDriveQuery,
     vote_query::IdentityBasedVoteDriveQuery,
 };
+
+// `DocumentCountRequest` / `RangeCountOptions` are the
+// server-side executor inputs and stay `server`-only.
+#[cfg(feature = "server")]
+pub use drive_document_count_query::{
+    DocumentCountRequest, DocumentCountResponse, RangeCountOptions, MAX_LIMIT_AS_FAILSAFE,
+};
+
+// `DocumentSumRequest` / `DocumentSumResponse` / `RangeSumOptions` are
+// the server-side executor inputs and stay `server`-only (parallels
+// the count-side `DocumentCountRequest` etc. above).
+#[cfg(feature = "server")]
+pub use drive_document_sum_query::{DocumentSumRequest, DocumentSumResponse, RangeSumOptions};
+
+// `DocumentAverageRequest` / `DocumentAverageResponse` are the
+// server-side executor inputs for the average surface and stay
+// `server`-only (parallels the sum-side server-only exports above).
+#[cfg(feature = "server")]
+pub use drive_document_average_query::{DocumentAverageRequest, DocumentAverageResponse};
 // Imports available when either "server" or "verify" features are enabled
 #[cfg(any(feature = "server", feature = "verify"))]
 use {
@@ -24,10 +67,7 @@ use {
             document_type::{DocumentTypeRef, Index, IndexProperty},
             DataContract,
         },
-        document::{
-            document_methods::DocumentMethodsV0,
-            serialization_traits::DocumentPlatformConversionMethodsV0, Document, DocumentV0Getters,
-        },
+        document::{document_methods::DocumentMethodsV0, Document, DocumentV0Getters},
         platform_value::{btreemap_extensions::BTreeValueRemoveFromMapHelper, Value},
         version::PlatformVersion,
         ProtocolError,
@@ -41,9 +81,11 @@ use {
     std::{collections::BTreeMap, ops::BitXor},
 };
 
-#[cfg(feature = "verify")]
+#[cfg(all(feature = "server", feature = "verify"))]
 use crate::verify::RootHash;
 
+#[cfg(feature = "server")]
+use dpp::document::serialization_traits::DocumentPlatformConversionMethodsV0;
 #[cfg(feature = "server")]
 pub use grovedb::{
     query_result_type::{QueryResultElements, QueryResultType},
@@ -52,6 +94,7 @@ pub use grovedb::{
 
 use dpp::document;
 use dpp::prelude::Identifier;
+use dpp::validation::{SimpleValidationResult, ValidationResult};
 #[cfg(feature = "server")]
 use {
     crate::{drive::Drive, fees::op::LowLevelDriveOperation},
@@ -70,7 +113,11 @@ pub mod conditions;
 #[cfg(any(feature = "server", feature = "verify"))]
 mod defaults;
 #[cfg(any(feature = "server", feature = "verify"))]
+pub mod having;
+#[cfg(any(feature = "server", feature = "verify"))]
 pub mod ordering;
+#[cfg(any(feature = "server", feature = "verify"))]
+pub mod projection;
 #[cfg(any(feature = "server", feature = "verify"))]
 mod single_document_drive_query;
 
@@ -103,8 +150,8 @@ pub mod vote_polls_by_document_type_query;
 /// It should be implemented by the caller in order to provide data
 /// contract required for operations like proof verification.
 #[cfg(any(feature = "server", feature = "verify"))]
-pub type ContractLookupFn<'a> = dyn Fn(&dpp::identifier::Identifier) -> Result<Option<Arc<DataContract>>, crate::error::Error>
-    + 'a;
+pub type ContractLookupFn<'a> =
+    dyn Fn(&Identifier) -> Result<Option<Arc<DataContract>>, Error> + 'a;
 
 /// Creates a [ContractLookupFn] function that returns provided data contract when requested.
 ///
@@ -120,13 +167,12 @@ pub type ContractLookupFn<'a> = dyn Fn(&dpp::identifier::Identifier) -> Result<O
 pub fn contract_lookup_fn_for_contract<'a>(
     data_contract: Arc<DataContract>,
 ) -> Box<ContractLookupFn<'a>> {
-    let func = move
-        |id: &dpp::identifier::Identifier| -> Result<Option<Arc<DataContract>>, crate::error::Error> {
-            if data_contract.id().ne(id) {
-                return Ok(None);
-            }
-            Ok(Some(Arc::clone(&data_contract)))
-        };
+    let func = move |id: &Identifier| -> Result<Option<Arc<DataContract>>, Error> {
+        if data_contract.id().ne(id) {
+            return Ok(None);
+        }
+        Ok(Some(Arc::clone(&data_contract)))
+    };
     Box::new(func)
 }
 
@@ -148,9 +194,46 @@ pub mod identity_token_balance_drive_query;
 #[cfg(any(feature = "server", feature = "verify"))]
 pub mod identity_token_info_drive_query;
 
+/// Document subscription filtering
+#[cfg(any(feature = "server", feature = "verify"))]
+pub mod filter;
 /// A query to get the token's status
 #[cfg(any(feature = "server", feature = "verify"))]
 pub mod token_status_drive_query;
+
+/// A query to count documents using CountTree elements
+#[cfg(any(feature = "server", feature = "verify"))]
+pub mod drive_document_count_query;
+
+/// A query to sum an integer property across documents using SumTree
+/// elements. Parallels [`drive_document_count_query`] for the sum
+/// surface — see `book/src/drive/document-sum-trees.md` for the
+/// design and `book/src/drive/sum-index-examples.md` for the worked
+/// example contract.
+#[cfg(any(feature = "server", feature = "verify"))]
+pub mod drive_document_sum_query;
+
+/// A query to compute the average of an integer property across
+/// documents using `CountSumTree` / `ProvableCountProvableSumTree`
+/// (PCPS) elements. Averages are NOT computed server-side; the
+/// response carries a `(count, sum)` pair (atomic per group) and the
+/// client divides. See `book/src/drive/average-index-examples.md` for
+/// the worked example contract.
+#[cfg(any(feature = "server", feature = "verify"))]
+pub mod drive_document_average_query;
+
+/// Joint count-and-sum no-prove executor surface — backs the AVG
+/// no-prove path's unified single-walk dispatch. See its module
+/// docstring for the perf / atomicity contract. Server-only because
+/// the surface only fires on the no-prove (server-materialized) path.
+#[cfg(feature = "server")]
+pub mod drive_document_count_and_sum_query;
+
+/// A Query Syntax Validation Result that contains data
+pub type QuerySyntaxValidationResult<TData> = ValidationResult<TData, QuerySyntaxError>;
+
+/// A Query Syntax Validation Result
+pub type QuerySyntaxSimpleValidationResult = SimpleValidationResult<QuerySyntaxError>;
 
 #[cfg(any(feature = "server", feature = "verify"))]
 /// Represents a starting point for a query based on a specific document.
@@ -172,8 +255,9 @@ pub struct StartAtDocument<'a> {
     /// - `false`: The document is excluded, and the query starts from the next matching document.
     pub included: bool,
 }
-#[cfg(any(feature = "server", feature = "verify"))]
+
 /// Internal clauses struct
+#[cfg(any(feature = "server", feature = "verify"))]
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct InternalClauses {
     /// Primary key in clause
@@ -295,6 +379,114 @@ impl InternalClauses {
                 QuerySyntaxError::InvalidWhereClauseComponents("Query has invalid where clauses"),
             )),
         }
+    }
+
+    /// Validate this collection of InternalClauses against the document schema
+    #[cfg(any(feature = "server", feature = "verify"))]
+    pub fn validate_against_schema(
+        &self,
+        document_type: DocumentTypeRef,
+    ) -> QuerySyntaxSimpleValidationResult {
+        // Basic composition
+        if !self.verify() {
+            return QuerySyntaxSimpleValidationResult::new_with_error(
+                QuerySyntaxError::InvalidWhereClauseComponents(
+                    "invalid composition of where clauses",
+                ),
+            );
+        }
+
+        // Validate in_clause against schema
+        if let Some(in_clause) = &self.in_clause {
+            // Forbid $id in non-primary-key clauses
+            if in_clause.field == "$id" {
+                return QuerySyntaxSimpleValidationResult::new_with_error(
+                    QuerySyntaxError::InvalidWhereClauseComponents(
+                        "use primary_key_* clauses for $id",
+                    ),
+                );
+            }
+            let result = in_clause.validate_against_schema(document_type);
+            if !result.is_valid() {
+                return result;
+            }
+        }
+
+        // Validate range_clause against schema
+        if let Some(range_clause) = &self.range_clause {
+            // Forbid $id in non-primary-key clauses
+            if range_clause.field == "$id" {
+                return QuerySyntaxSimpleValidationResult::new_with_error(
+                    QuerySyntaxError::InvalidWhereClauseComponents(
+                        "use primary_key_* clauses for $id",
+                    ),
+                );
+            }
+            let result = range_clause.validate_against_schema(document_type);
+            if !result.is_valid() {
+                return result;
+            }
+        }
+
+        // Validate equal_clauses against schema
+        for (field, eq_clause) in &self.equal_clauses {
+            // Forbid $id in non-primary-key clauses
+            if field.as_str() == "$id" {
+                return QuerySyntaxSimpleValidationResult::new_with_error(
+                    QuerySyntaxError::InvalidWhereClauseComponents(
+                        "use primary_key_* clauses for $id",
+                    ),
+                );
+            }
+            let result = eq_clause.validate_against_schema(document_type);
+            if !result.is_valid() {
+                return result;
+            }
+        }
+
+        // Validate primary key clauses typing
+        if let Some(pk_eq) = &self.primary_key_equal_clause {
+            if pk_eq.operator != WhereOperator::Equal
+                || !matches!(pk_eq.value, Value::Identifier(_))
+            {
+                return QuerySyntaxSimpleValidationResult::new_with_error(
+                    QuerySyntaxError::InvalidWhereClauseComponents(
+                        "primary key equality must compare an identifier",
+                    ),
+                );
+            }
+        }
+        if let Some(pk_in) = &self.primary_key_in_clause {
+            if pk_in.operator != WhereOperator::In {
+                return QuerySyntaxSimpleValidationResult::new_with_error(
+                    QuerySyntaxError::InvalidWhereClauseComponents(
+                        "primary key IN must use IN operator",
+                    ),
+                );
+            }
+            // enforce array shape and no duplicates/size
+            let result = pk_in.in_values();
+            if !result.is_valid() {
+                return QuerySyntaxSimpleValidationResult::new_with_errors(result.errors);
+            }
+            if let Value::Array(arr) = &pk_in.value {
+                if !arr.iter().all(|v| matches!(v, Value::Identifier(_))) {
+                    return QuerySyntaxSimpleValidationResult::new_with_error(
+                        QuerySyntaxError::InvalidWhereClauseComponents(
+                            "primary key IN must contain identifiers",
+                        ),
+                    );
+                }
+            } else {
+                return QuerySyntaxSimpleValidationResult::new_with_error(
+                    QuerySyntaxError::InvalidWhereClauseComponents(
+                        "primary key IN must contain an array of identifiers",
+                    ),
+                );
+            }
+        }
+
+        QuerySyntaxSimpleValidationResult::default()
     }
 }
 
@@ -465,7 +657,7 @@ impl<'a> DriveDocumentQuery<'a> {
     ) -> Result<Self, Error> {
         if let Some(contract_id) = query_document
             .remove_optional_identifier("contract_id")
-            .map_err(|e| Error::Protocol(ProtocolError::ValueError(e)))?
+            .map_err(|e| Error::Protocol(Box::new(ProtocolError::ValueError(e))))?
         {
             if contract.id() != contract_id {
                 return Err(ProtocolError::IdentifierError(format!(
@@ -479,7 +671,7 @@ impl<'a> DriveDocumentQuery<'a> {
 
         if let Some(document_type_name) = query_document
             .remove_optional_string("document_type_name")
-            .map_err(|e| Error::Protocol(ProtocolError::ValueError(e)))?
+            .map_err(|e| Error::Protocol(Box::new(ProtocolError::ValueError(e))))?
         {
             if document_type.name() != &document_type_name {
                 return Err(ProtocolError::IdentifierError(format!(
@@ -493,7 +685,7 @@ impl<'a> DriveDocumentQuery<'a> {
 
         let maybe_limit: Option<u16> = query_document
             .remove_optional_integer("limit")
-            .map_err(|e| Error::Protocol(ProtocolError::ValueError(e)))?;
+            .map_err(|e| Error::Protocol(Box::new(ProtocolError::ValueError(e))))?;
 
         let limit = maybe_limit
             .map_or(Some(config.default_query_limit), |limit_value| {
@@ -510,11 +702,11 @@ impl<'a> DriveDocumentQuery<'a> {
 
         let offset: Option<u16> = query_document
             .remove_optional_integer("offset")
-            .map_err(|e| Error::Protocol(ProtocolError::ValueError(e)))?;
+            .map_err(|e| Error::Protocol(Box::new(ProtocolError::ValueError(e))))?;
 
         let block_time_ms: Option<u64> = query_document
             .remove_optional_integer("blockTime")
-            .map_err(|e| Error::Protocol(ProtocolError::ValueError(e)))?;
+            .map_err(|e| Error::Protocol(Box::new(ProtocolError::ValueError(e))))?;
 
         let all_where_clauses: Vec<WhereClause> =
             query_document
@@ -528,14 +720,14 @@ impl<'a> DriveDocumentQuery<'a> {
                                     WhereClause::from_components(clauses_components)
                                 } else {
                                     Err(Error::Query(QuerySyntaxError::InvalidFormatWhereClause(
-                                        "where clause must be an array",
+                                        "where clause must be an array".to_string(),
                                     )))
                                 }
                             })
                             .collect::<Result<Vec<WhereClause>, Error>>()
                     } else {
                         Err(Error::Query(QuerySyntaxError::InvalidFormatWhereClause(
-                            "where clause must be an array",
+                            "where clause must be an array".to_string(),
                         )))
                     }
                 })?;
@@ -565,7 +757,7 @@ impl<'a> DriveDocumentQuery<'a> {
         let start_at: Option<[u8; 32]> = start_option
             .map(|v| {
                 v.into_identifier()
-                    .map_err(|e| Error::Protocol(ProtocolError::ValueError(e)))
+                    .map_err(|e| Error::Protocol(Box::new(ProtocolError::ValueError(e))))
                     .map(|identifier| identifier.into_buffer())
             })
             .transpose()?;
@@ -581,7 +773,7 @@ impl<'a> DriveDocumentQuery<'a> {
                                 if let Value::Array(clauses_components) = order_clause {
                                     let order_clause =
                                         OrderClause::from_components(&clauses_components)
-                                            .map_err(Error::GroveDB);
+                                            .map_err(Error::from);
                                     match order_clause {
                                         Ok(order_clause) => {
                                             Some(Ok((order_clause.field.clone(), order_clause)))
@@ -634,6 +826,101 @@ impl<'a> DriveDocumentQuery<'a> {
         document_type: DocumentTypeRef<'a>,
         config: &DriveConfig,
     ) -> Result<Self, Error> {
+        let all_where_clauses: Vec<WhereClause> = match where_clause {
+            Value::Null => Ok(vec![]),
+            Value::Array(clauses) => clauses
+                .iter()
+                .map(|where_clause| {
+                    if let Value::Array(clauses_components) = where_clause {
+                        WhereClause::from_components(clauses_components)
+                    } else {
+                        Err(Error::Query(QuerySyntaxError::InvalidFormatWhereClause(
+                            "where clause must be an array".to_string(),
+                        )))
+                    }
+                })
+                .collect::<Result<Vec<WhereClause>, Error>>(),
+            _ => Err(Error::Query(QuerySyntaxError::InvalidFormatWhereClause(
+                "where clause must be an array".to_string(),
+            ))),
+        }?;
+
+        // Malformed `order_by` payloads reject the request — the
+        // pre-existing `filter_map(... .ok())` here silently dropped
+        // bad clauses (or the whole field for non-array shapes),
+        // which could mutate result ordering and (on the prove
+        // path) proof bytes without telling the caller. Tighten the
+        // contract: every clause must parse, and the top-level
+        // shape must be `Value::Null` or `Value::Array`.
+        let order_by_clauses: Vec<OrderClause> = match order_by {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(clauses)) => clauses
+                .iter()
+                .map(|order_clause| match order_clause {
+                    Value::Array(components) => {
+                        OrderClause::from_components(components).map_err(|_| {
+                            Error::Query(QuerySyntaxError::InvalidOrderByProperties(
+                                "invalid order_by clause components",
+                            ))
+                        })
+                    }
+                    _ => Err(Error::Query(QuerySyntaxError::InvalidOrderByProperties(
+                        "order_by clause must be an array",
+                    ))),
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            Some(_) => {
+                return Err(Error::Query(QuerySyntaxError::InvalidOrderByProperties(
+                    "order_by must be an array",
+                )));
+            }
+        };
+
+        Self::from_typed_clauses(
+            all_where_clauses,
+            order_by_clauses,
+            maybe_limit,
+            start_at,
+            start_at_included,
+            block_time_ms,
+            contract,
+            document_type,
+            config,
+        )
+    }
+
+    /// Build a `DriveDocumentQuery` from already-structured where /
+    /// order_by clauses. This is the typed-input twin of
+    /// [`Self::from_decomposed_values`] — same downstream shape, just
+    /// without the `Value::Array(...)` parse step.
+    ///
+    /// Used by the v1 `getDocuments` ABCI handler whose wire format
+    /// carries `repeated WhereClause` / `repeated OrderClause`
+    /// natively (no CBOR envelope). The v0 path keeps using
+    /// `from_decomposed_values` so its CBOR-decoded inputs flow
+    /// through the existing `WhereClause::from_components` parser
+    /// for shape validation; the typed path expects that validation
+    /// (or the equivalent proto→drive conversion) to have run
+    /// upstream.
+    ///
+    /// Limit semantics mirror `from_decomposed_values`:
+    /// `maybe_limit = None` or `Some(0)` falls back to
+    /// `config.default_query_limit`; `Some(N)` with `N >
+    /// config.default_query_limit` is rejected as
+    /// `QuerySyntaxError::InvalidLimit`.
+    #[cfg(any(feature = "server", feature = "verify"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_typed_clauses(
+        where_clauses: Vec<WhereClause>,
+        order_by_clauses: Vec<OrderClause>,
+        maybe_limit: Option<u16>,
+        start_at: Option<[u8; 32]>,
+        start_at_included: bool,
+        block_time_ms: Option<u64>,
+        contract: &'a DataContract,
+        document_type: DocumentTypeRef<'a>,
+        config: &DriveConfig,
+    ) -> Result<Self, Error> {
         let limit = maybe_limit
             .map_or(Some(config.default_query_limit), |limit_value| {
                 if limit_value == 0 || limit_value > config.default_query_limit {
@@ -647,47 +934,12 @@ impl<'a> DriveDocumentQuery<'a> {
                 config.max_query_limit
             ))))?;
 
-        let all_where_clauses: Vec<WhereClause> = match where_clause {
-            Value::Null => Ok(vec![]),
-            Value::Array(clauses) => clauses
-                .iter()
-                .map(|where_clause| {
-                    if let Value::Array(clauses_components) = where_clause {
-                        WhereClause::from_components(clauses_components)
-                    } else {
-                        Err(Error::Query(QuerySyntaxError::InvalidFormatWhereClause(
-                            "where clause must be an array",
-                        )))
-                    }
-                })
-                .collect::<Result<Vec<WhereClause>, Error>>(),
-            _ => Err(Error::Query(QuerySyntaxError::InvalidFormatWhereClause(
-                "where clause must be an array",
-            ))),
-        }?;
+        let internal_clauses = InternalClauses::extract_from_clauses(where_clauses)?;
 
-        let internal_clauses = InternalClauses::extract_from_clauses(all_where_clauses)?;
-
-        let order_by: IndexMap<String, OrderClause> = order_by
-            .map_or(vec![], |id_cbor| {
-                if let Value::Array(clauses) = id_cbor {
-                    clauses
-                        .iter()
-                        .filter_map(|order_clause| {
-                            if let Value::Array(clauses_components) = order_clause {
-                                OrderClause::from_components(clauses_components).ok()
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                } else {
-                    vec![]
-                }
-            })
-            .iter()
-            .map(|order_clause| Ok((order_clause.field.clone(), order_clause.to_owned())))
-            .collect::<Result<IndexMap<String, OrderClause>, Error>>()?;
+        let order_by: IndexMap<String, OrderClause> = order_by_clauses
+            .into_iter()
+            .map(|c| (c.field.clone(), c))
+            .collect();
 
         Ok(DriveDocumentQuery {
             contract,
@@ -846,7 +1098,7 @@ impl<'a> DriveDocumentQuery<'a> {
         let start_at: Option<[u8; 32]> = start_option
             .map(|v| {
                 v.into_identifier()
-                    .map_err(|e| Error::Protocol(ProtocolError::ValueError(e)))
+                    .map_err(|e| Error::Protocol(Box::new(ProtocolError::ValueError(e))))
                     .map(|identifier| identifier.into_buffer())
             })
             .transpose()?;
@@ -945,9 +1197,14 @@ impl<'a> DriveDocumentQuery<'a> {
                         drive_version,
                     )
                     .map_err(|e| match e {
-                        Error::GroveDB(GroveError::PathKeyNotFound(_))
-                        | Error::GroveDB(GroveError::PathNotFound(_))
-                        | Error::GroveDB(GroveError::PathParentLayerNotFound(_)) => {
+                        Error::GroveDB(e)
+                            if matches!(
+                                e.as_ref(),
+                                GroveError::PathKeyNotFound(_)
+                                    | GroveError::PathNotFound(_)
+                                    | GroveError::PathParentLayerNotFound(_)
+                            ) =>
+                        {
                             let error_message = if self.start_at_included {
                                 "startAt document not found"
                             } else {
@@ -1002,7 +1259,7 @@ impl<'a> DriveDocumentQuery<'a> {
                 vec![&start_at_path_query, &main_path_query],
                 &platform_version.drive.grove_version,
             )
-            .map_err(Error::GroveDB)?;
+            .map_err(Error::from)?;
             merged.query.limit = limit.map(|a| a.saturating_add(1));
             Ok(merged)
         } else {
@@ -1111,7 +1368,7 @@ impl<'a> DriveDocumentQuery<'a> {
             };
 
             if let Some(primary_key_in_clause) = &self.internal_clauses.primary_key_in_clause {
-                let in_values = primary_key_in_clause.in_values()?;
+                let in_values = primary_key_in_clause.in_values().into_data_with_error()??;
 
                 match starts_at_key_option {
                     None => {
@@ -1804,17 +2061,42 @@ impl<'a> DriveDocumentQuery<'a> {
             .iter()
             .filter_map(|field| self.internal_clauses.equal_clauses.get(field.name.as_str()))
             .collect();
-        let (last_clause, last_clause_is_range, subquery_clause) =
-            match &self.internal_clauses.in_clause {
-                None => match &self.internal_clauses.range_clause {
-                    None => (ordered_clauses.last().copied(), false, None),
-                    Some(where_clause) => (Some(where_clause), true, None),
-                },
-                Some(in_clause) => match &self.internal_clauses.range_clause {
-                    None => (Some(in_clause), true, None),
-                    Some(range_clause) => (Some(in_clause), true, Some(range_clause)),
-                },
-            };
+        let (last_clause, last_clause_is_range, subquery_clause) = match &self
+            .internal_clauses
+            .in_clause
+        {
+            None => match &self.internal_clauses.range_clause {
+                None => (ordered_clauses.last().copied(), false, None),
+                Some(where_clause) => (Some(where_clause), true, None),
+            },
+            Some(in_clause) => match &self.internal_clauses.range_clause {
+                None => (Some(in_clause), true, None),
+                Some(range_clause) => {
+                    // Both an `in` clause and a range clause are present.
+                    // The outer path query must operate on the field that
+                    // appears *earlier* (closer to the index root) in the
+                    // chosen index, and the other clause becomes the leaf
+                    // subquery. Without this ordering, a query like
+                    // `status > 0 AND transactionIndex in [..]` on an index
+                    // `[status, transactionIndex]` builds a path that
+                    // terminates at the `status` subtree while the primary
+                    // query iterates `transactionIndex` keys, silently
+                    // returning []. See issue #2409.
+                    let position_of = |field: &str| -> Option<usize> {
+                        index
+                            .properties
+                            .iter()
+                            .position(|p| p.name.as_str() == field)
+                    };
+                    let in_pos = position_of(in_clause.field.as_str());
+                    let range_pos = position_of(range_clause.field.as_str());
+                    match (in_pos, range_pos) {
+                        (Some(i), Some(r)) if i > r => (Some(range_clause), true, Some(in_clause)),
+                        _ => (Some(in_clause), true, Some(range_clause)),
+                    }
+                }
+            },
+        };
 
         // We need to get the terminal indexes unused by clauses.
         let left_over_index_properties = index
@@ -1854,7 +2136,7 @@ impl<'a> DriveDocumentQuery<'a> {
                 }
             })
             .collect::<Result<Vec<Vec<u8>>, ProtocolError>>()
-            .map_err(Error::Protocol)?;
+            .map_err(Error::from)?;
 
         let final_query = match last_clause {
             None => {
@@ -1874,7 +2156,7 @@ impl<'a> DriveDocumentQuery<'a> {
                         })
                         .as_ref(),
                     first_index,
-                    None,
+                    Some(&self.order_by),
                     platform_version,
                 )?
                 .expect("Index must have left over properties if no last clause")
@@ -2162,9 +2444,16 @@ impl<'a> DriveDocumentQuery<'a> {
             &platform_version.drive,
         );
         match query_result {
-            Err(Error::GroveDB(GroveError::PathKeyNotFound(_)))
-            | Err(Error::GroveDB(GroveError::PathNotFound(_)))
-            | Err(Error::GroveDB(GroveError::PathParentLayerNotFound(_))) => Ok((Vec::new(), 0)),
+            Err(Error::GroveDB(e))
+                if matches!(
+                    e.as_ref(),
+                    GroveError::PathKeyNotFound(_)
+                        | GroveError::PathNotFound(_)
+                        | GroveError::PathParentLayerNotFound(_)
+                ) =>
+            {
+                Ok((Vec::new(), 0))
+            }
             _ => {
                 let (data, skipped) = query_result?;
                 {
@@ -2199,9 +2488,14 @@ impl<'a> DriveDocumentQuery<'a> {
             &platform_version.drive,
         );
         match query_result {
-            Err(Error::GroveDB(GroveError::PathKeyNotFound(_)))
-            | Err(Error::GroveDB(GroveError::PathNotFound(_)))
-            | Err(Error::GroveDB(GroveError::PathParentLayerNotFound(_))) => {
+            Err(Error::GroveDB(e))
+                if matches!(
+                    e.as_ref(),
+                    GroveError::PathKeyNotFound(_)
+                        | GroveError::PathNotFound(_)
+                        | GroveError::PathParentLayerNotFound(_)
+                ) =>
+            {
                 Ok((QueryResultElements::new(), 0))
             }
             _ => {
@@ -2647,7 +2941,7 @@ mod tests {
             .construct_path_query(None, platform_version)
             .expect("expected to create path query");
 
-        assert_eq!(path_query.to_string(), "PathQuery { path: [@, 0x1da29f488023e306ff9a680bc9837153fb0778c8ee9c934a87dc0de1d69abd3c, 0x01, domain, 0x7265636f7264732e6964656e74697479], query: SizedQuery { query: Query {\n  items: [\n    RangeTo(.. 8dc201fd7ad7905f8a84d66218e2b387daea7fe4739ae0e21e8c3ee755e6a2c0),\n  ],\n  default_subquery_branch: SubqueryBranch { subquery_path: [00], subquery: Query {\n  items: [\n    RangeFull,\n  ],\n  default_subquery_branch: SubqueryBranch { subquery_path: None subquery: None },\n  left_to_right: false,\n} },\n  conditional_subquery_branches: {\n    Key(): SubqueryBranch { subquery_path: [00], subquery: Query {\n  items: [\n    RangeFull,\n  ],\n  default_subquery_branch: SubqueryBranch { subquery_path: None subquery: None },\n  left_to_right: false,\n} },\n  },\n  left_to_right: false,\n}, limit: 6 } }");
+        assert_eq!(path_query.to_string(), "PathQuery { path: [@, 0x1da29f488023e306ff9a680bc9837153fb0778c8ee9c934a87dc0de1d69abd3c, 0x01, domain, 0x7265636f7264732e6964656e74697479], query: SizedQuery { query: Query {\n  items: [\n    RangeTo(.. 0x8dc201fd7ad7905f8a84d66218e2b387daea7fe4739ae0e21e8c3ee755e6a2c0),\n  ],\n  default_subquery_branch: SubqueryBranch { subquery_path: [0x00], subquery: Query {\n  items: [\n    RangeFull,\n  ],\n  default_subquery_branch: SubqueryBranch { subquery_path: None subquery: None },\n  left_to_right: false,\n  add_parent_tree_on_subquery: false,\n} },\n  conditional_subquery_branches: {\n    Key(): SubqueryBranch { subquery_path: [0x00], subquery: Query {\n  items: [\n    RangeFull,\n  ],\n  default_subquery_branch: SubqueryBranch { subquery_path: None subquery: None },\n  left_to_right: false,\n  add_parent_tree_on_subquery: false,\n} },\n  },\n  left_to_right: false,\n  add_parent_tree_on_subquery: false,\n}, limit: 6 } }");
 
         // Serialize the PathQuery to a Vec<u8>
         let encoded = bincode::encode_to_vec(&path_query, bincode::config::standard())
@@ -2656,7 +2950,10 @@ mod tests {
         // Convert the encoded bytes to a hex string
         let hex_string = hex::encode(encoded);
 
-        assert_eq!(hex_string, "050140201da29f488023e306ff9a680bc9837153fb0778c8ee9c934a87dc0de1d69abd3c010106646f6d61696e107265636f7264732e6964656e746974790105208dc201fd7ad7905f8a84d66218e2b387daea7fe4739ae0e21e8c3ee755e6a2c0010101000101030000000001010000010101000101030000000000010600");
+        // Note: The expected encoding changed due to an upstream GroveDB
+        // serialization update. Keep this value in sync with the current
+        // GroveDB revision pinned in Cargo.toml.
+        assert_eq!(hex_string, "050140201da29f488023e306ff9a680bc9837153fb0778c8ee9c934a87dc0de1d69abd3c010106646f6d61696e107265636f7264732e6964656e74697479010105208dc201fd7ad7905f8a84d66218e2b387daea7fe4739ae0e21e8c3ee755e6a2c00101010001010103000000000001010000010101000101010300000000000000010600");
     }
 
     #[test]
@@ -3083,6 +3380,7 @@ mod tests {
             created_at_core_block_height: None,
             updated_at_core_block_height: None,
             transferred_at_core_block_height: None,
+            creator_id: None,
         }
         .into();
 

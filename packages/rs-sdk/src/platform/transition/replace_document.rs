@@ -23,7 +23,7 @@ use crate::platform::transition::waitable::Waitable;
 
 #[async_trait::async_trait]
 /// A trait for replacing a document on platform
-pub trait ReplaceDocument<S: Signer>: Waitable {
+pub trait ReplaceDocument<S: Signer<IdentityPublicKey>>: Waitable {
     /// Replaces a document on platform
     /// setting settings to `None` sets default connection behavior
     async fn replace_on_platform(
@@ -48,7 +48,7 @@ pub trait ReplaceDocument<S: Signer>: Waitable {
 }
 
 #[async_trait::async_trait]
-impl<S: Signer> ReplaceDocument<S> for Document {
+impl<S: Signer<IdentityPublicKey>> ReplaceDocument<S> for Document {
     async fn replace_on_platform(
         &self,
         sdk: &Sdk,
@@ -78,7 +78,7 @@ impl<S: Signer> ReplaceDocument<S> for Document {
             signer,
             sdk.version(),
             None
-        )?;
+        ).await?;
 
         // response is empty for a broadcast, result comes from the stream wait for state transition result
         transition.broadcast(sdk, Some(settings)).await?;

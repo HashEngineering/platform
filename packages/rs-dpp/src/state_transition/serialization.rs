@@ -13,8 +13,13 @@ impl StateTransition {
 
 #[cfg(test)]
 mod tests {
+    use hex::ToHex;
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    use platform_value::string_encoding::Encoding;
     use crate::bls::native_bls::NativeBlsModule;
     use crate::data_contract::accessors::v0::DataContractV0Getters;
+    use crate::identity::state_transition::AssetLockProved;
     use crate::identity::accessors::IdentityGettersV0;
     use crate::identity::core_script::CoreScript;
     use crate::identity::identity_public_key::accessors::v0::IdentityPublicKeyGettersV0;
@@ -31,6 +36,7 @@ mod tests {
     use crate::state_transition::batch_transition::{
         BatchTransition, BatchTransitionV1,
     };
+    use crate::state_transition::identity_create_transition::accessors::IdentityCreateTransitionAccessorsV0;
     use crate::state_transition::identity_create_transition::v0::IdentityCreateTransitionV0;
     use crate::state_transition::identity_create_transition::IdentityCreateTransition;
     use crate::state_transition::identity_credit_withdrawal_transition::v0::IdentityCreditWithdrawalTransitionV0;
@@ -51,6 +57,54 @@ mod tests {
     use rand::rngs::StdRng;
     use rand::SeedableRng;
     use std::collections::BTreeMap;
+
+    #[test]
+    /// Given mainnet transaction 6CDCC15AC4EC68DBB414EE0DA692DFE363A996A0F285423BEFC3A29F87948A0D,
+    /// when deserialized, it should be identity create transition.
+    fn should_build_identity_create_transition_from_mainnet_asset_lock_transaction() {
+        const EXPECTED_STATE_TRANSITION_HASH: &str =
+            "6CDCC15AC4EC68DBB414EE0DA692DFE363A996A0F285423BEFC3A29F87948A0D";
+        const RAW_TRANSACTION_BASE64: &str = "AwADAAAAAAAAACEDeLqSkwVyfHvYThgegiZUvPu0+dU4kyd3PJKigGLC1spBH+wrzjjA/ZGZdQmUzpQyOiC3GyP2eBp8ga9cNlnIOkptMzAtfXPA2daH3xTqt25JQ+fZ6UKB3ypzTK3fOXaAATgAAQAAAgAAIQPoVeBC6iyS0jFV0Dly5WV0SEl6uDciQqqi4EATeUJutEEfAd6+/HbUM4FLS6+lNc6AH8vaD9lViiYny4GPsl/AlBxdr0WjJxxU/B0cNVH8kRMo+W6a+1iSN+NZS7MTyzmTHwACAAEDAAAhA6S0TKbm1a/xyrYMG+Y2odspJ1roL1TcoK9h552yE1VCQSA+KpHiQ8lDBseXI/1ZCMxEvu0qopdjDojaQ4FzaZMgUGfPBeXSfMbQGksLMNseKRBLob/g0DHJWqZAxSDOuAwZAfwAIQxGIDIHY9cjWxS0tJupeJuKMZwzFKmLxkU3NmqFTcFscilVAABBH9R3vwbfA3q5XJG4m4z87OAA1uG8wup915wGGKAxdEObXPSqIvPBWrHlGTf/Uymanc2cDH1uKdsniJyoORwauPBIqlz61/Kf9HDnubX4GoHRYdnb4WzE+Tdh+L39a2dN2A==";
+        const EXPECTED_IDENTITY_ADDRESS: &str = "5tf2QotaJw8kRNpQEa8TXtRQ6FLxwUrY4Mtee2JF2nco";
+        const EXPECTED_CORE_TRANSACTION_HASH: &str =
+            "5529726cc14d856a363745c68ba914339c318a9b78a99bb4b4145b23d7630732";
+        let raw_transaction = STANDARD
+            .decode(RAW_TRANSACTION_BASE64)
+            .expect("base64 transaction should decode");
+        let state_transition = StateTransition::deserialize_from_bytes(&raw_transaction)
+            .expect("State transition deserializes correctly");
+
+        assert_eq!(
+            &state_transition
+                .transaction_id()
+                .expect("expected transaction id")
+                .encode_hex_upper::<String>(),
+            EXPECTED_STATE_TRANSITION_HASH
+        );
+
+        let StateTransition::IdentityCreate(identity_create_transition) = state_transition else {
+            panic!("expected identity create transition");
+        };
+
+        // This mainnet transaction uses a ChainAssetLockProof (not InstantAssetLockProof)
+        // ChainAssetLockProof doesn't embed the full transaction, just the out_point reference
+        let asset_lock_proof = identity_create_transition.asset_lock_proof();
+        let AssetLockProof::Chain(chain_proof) = asset_lock_proof else {
+            panic!("expected chain asset lock proof for this mainnet transaction");
+        };
+
+        // Verify the out_point references the expected transaction
+        assert_eq!(
+            &chain_proof.out_point.txid.to_string().to_lowercase(),
+            EXPECTED_CORE_TRANSACTION_HASH
+        );
+
+        let identity_address = identity_create_transition
+            .identity_id()
+            .to_string(Encoding::Base58);
+
+        assert_eq!(identity_address, EXPECTED_IDENTITY_ADDRESS);
+    }
 
     #[test]
     #[cfg(feature = "random-identities")]
@@ -356,5 +410,228 @@ mod tests {
         let recovered_state_transition = StateTransition::deserialize_from_bytes(&bytes)
             .expect("expected to deserialize state transition");
         assert_eq!(state_transition, recovered_state_transition);
+    }
+
+    #[test]
+    fn deserialize_empty_bytes_should_fail() {
+        let result = StateTransition::deserialize_from_bytes(&[]);
+        assert!(
+            result.is_err(),
+            "deserialization of empty bytes should fail"
+        );
+    }
+
+    #[test]
+    fn deserialize_single_byte_should_fail() {
+        let result = StateTransition::deserialize_from_bytes(&[0xFF]);
+        assert!(
+            result.is_err(),
+            "deserialization of a single 0xFF byte should fail"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "random-identities")]
+    fn deserialize_truncated_bytes_should_fail() {
+        let platform_version = PlatformVersion::latest();
+        let identity = Identity::random_identity(5, Some(5), platform_version)
+            .expect("expected a random identity");
+        let transition = IdentityCreditWithdrawalTransitionV0 {
+            identity_id: identity.id(),
+            amount: 5000000,
+            core_fee_per_byte: 34,
+            pooling: Pooling::Standard,
+            output_script: CoreScript::from_bytes((0..23).collect::<Vec<u8>>()),
+            nonce: 1,
+            user_fee_increase: 0,
+            signature_public_key_id: 0,
+            signature: [1u8; 65].to_vec().into(),
+        };
+        let state_transition: StateTransition = transition.into();
+        let bytes = state_transition
+            .serialize_to_bytes()
+            .expect("expected to serialize");
+
+        // Truncate to half
+        let half = &bytes[..bytes.len() / 2];
+        assert!(
+            StateTransition::deserialize_from_bytes(half).is_err(),
+            "deserialization of truncated-to-half bytes should fail"
+        );
+
+        // Truncate by removing last byte
+        let minus_one = &bytes[..bytes.len() - 1];
+        assert!(
+            StateTransition::deserialize_from_bytes(minus_one).is_err(),
+            "deserialization of bytes missing last byte should fail"
+        );
+
+        // Keep only first byte
+        let first_only = &bytes[..1];
+        assert!(
+            StateTransition::deserialize_from_bytes(first_only).is_err(),
+            "deserialization of only the first byte should fail"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "random-identities")]
+    fn deserialize_corrupted_bytes_should_not_panic() {
+        let platform_version = PlatformVersion::latest();
+        let identity = Identity::random_identity(5, Some(5), platform_version)
+            .expect("expected a random identity");
+        let transition = IdentityCreditWithdrawalTransitionV0 {
+            identity_id: identity.id(),
+            amount: 5000000,
+            core_fee_per_byte: 34,
+            pooling: Pooling::Standard,
+            output_script: CoreScript::from_bytes((0..23).collect::<Vec<u8>>()),
+            nonce: 1,
+            user_fee_increase: 0,
+            signature_public_key_id: 0,
+            signature: [1u8; 65].to_vec().into(),
+        };
+        let state_transition: StateTransition = transition.into();
+        let mut bytes = state_transition
+            .serialize_to_bytes()
+            .expect("expected to serialize");
+
+        // Flip bits in the middle of the payload
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xFF;
+
+        // Should either fail or return a different value - must not panic
+        let result = StateTransition::deserialize_from_bytes(&bytes);
+        if let Ok(recovered) = result {
+            assert_ne!(
+                state_transition, recovered,
+                "corrupted bytes should not deserialize to the original value"
+            );
+        }
+    }
+
+    /// Crafts a minimal payload that looks like a StateTransition variant
+    /// (IdentityCreditWithdrawal = discriminant 5) followed by a version byte
+    /// and then a Vec<u8> field with a varint-encoded length that claims to
+    /// contain `fake_len` bytes. The total payload is small but the decoded
+    /// length would trigger a huge allocation without the limit guard.
+    fn craft_oversized_vec_payload(fake_len: u64) -> Vec<u8> {
+        let config = bincode::config::standard()
+            .with_big_endian()
+            .with_no_limit();
+        // Build the payload: variant discriminant + version + bogus vec length + filler
+        let mut buf = Vec::new();
+        // StateTransition enum discriminant for IdentityCreditWithdrawal (index 5)
+        buf.extend_from_slice(&bincode::encode_to_vec(5u32, config).unwrap());
+        // Version byte (0 = V0)
+        buf.push(0);
+        // identity_id: 32 bytes (Identifier)
+        buf.extend_from_slice(&[0u8; 32]);
+        // amount: u64
+        buf.extend_from_slice(&bincode::encode_to_vec(1000u64, config).unwrap());
+        // core_fee_per_byte: u32
+        buf.extend_from_slice(&bincode::encode_to_vec(1u32, config).unwrap());
+        // pooling: enum variant 0
+        buf.extend_from_slice(&bincode::encode_to_vec(0u32, config).unwrap());
+        // output_script (CoreScript = BinaryData = Vec<u8>): encode the malicious length
+        buf.extend_from_slice(&bincode::encode_to_vec(fake_len, config).unwrap());
+        // Don't provide the actual bytes — the limit check should fire before allocation
+        buf
+    }
+
+    #[test]
+    fn deserialize_crafted_huge_vec_length_does_not_oom() {
+        // Craft a small payload (~80 bytes) with a Vec<u8> field claiming 8 GB.
+        // Without the limit fix this would attempt `vec![0u8; 8_000_000_000]` and abort.
+        let payload = craft_oversized_vec_payload(8_000_000_000);
+        let result = StateTransition::deserialize_from_bytes(&payload);
+        // Must return an error, not OOM-abort the process
+        assert!(
+            result.is_err(),
+            "crafted payload with 8GB vec length must be rejected, not cause OOM"
+        );
+    }
+
+    #[test]
+    fn deserialize_crafted_vec_exceeding_limit_is_rejected() {
+        // Craft a payload with a Vec<u8> claiming 200,000 bytes — exceeds the
+        // 100,000 byte budget configured on StateTransition.
+        // The limit causes bincode to reject the read (either as Io/LimitExceeded
+        // or UnexpectedEnd depending on the exact code path). Either way, the
+        // deserialization must fail safely without OOM.
+        let payload = craft_oversized_vec_payload(200_000);
+        let result = StateTransition::deserialize_from_bytes(&payload);
+        assert!(
+            result.is_err(),
+            "Vec length exceeding byte budget must be rejected"
+        );
+    }
+
+    #[test]
+    fn deserialize_no_limit_does_not_enforce_byte_budget() {
+        // Same crafted payload with 200,000-byte Vec — the no_limit variant
+        // should NOT reject it for byte budget reasons (it will still fail
+        // because the data doesn't actually contain 200,000 bytes).
+        let payload = craft_oversized_vec_payload(200_000);
+        let result = StateTransition::deserialize_from_bytes_no_limit(&payload);
+        assert!(result.is_err());
+        // any other error is fine — the data is garbage
+        if let ProtocolError::MaxEncodedBytesReachedError { .. } = result.unwrap_err() {
+            panic!("deserialize_from_bytes_no_limit should NOT enforce byte budget");
+        }
+    }
+
+    #[test]
+    fn deserialize_many_empty_list() {
+        let result = StateTransition::deserialize_many(&[]);
+        assert_eq!(result.unwrap(), vec![]);
+    }
+
+    #[test]
+    fn deserialize_many_with_invalid_entry() {
+        let result = StateTransition::deserialize_many(&[vec![0xFF]]);
+        assert!(
+            result.is_err(),
+            "deserialize_many with invalid entry should fail"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "random-identities")]
+    fn deserialize_many_with_valid_entries() {
+        let platform_version = PlatformVersion::latest();
+        let identity = Identity::random_identity(5, Some(5), platform_version)
+            .expect("expected a random identity");
+
+        let make_transition = |amount: u64, nonce: u64| -> StateTransition {
+            let t = IdentityCreditWithdrawalTransitionV0 {
+                identity_id: identity.id(),
+                amount,
+                core_fee_per_byte: 34,
+                pooling: Pooling::Standard,
+                output_script: CoreScript::from_bytes((0..23).collect::<Vec<u8>>()),
+                nonce,
+                user_fee_increase: 0,
+                signature_public_key_id: 0,
+                signature: [1u8; 65].to_vec().into(),
+            };
+            t.into()
+        };
+
+        let st1 = make_transition(1000000, 1);
+        let st2 = make_transition(2000000, 2);
+        let st3 = make_transition(3000000, 3);
+
+        let raw: Vec<Vec<u8>> = vec![
+            st1.serialize_to_bytes().unwrap(),
+            st2.serialize_to_bytes().unwrap(),
+            st3.serialize_to_bytes().unwrap(),
+        ];
+
+        let recovered = StateTransition::deserialize_many(&raw).expect("should deserialize all");
+        assert_eq!(recovered.len(), 3);
+        assert_eq!(recovered[0], st1);
+        assert_eq!(recovered[1], st2);
+        assert_eq!(recovered[2], st3);
     }
 }

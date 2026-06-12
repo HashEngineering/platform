@@ -1,10 +1,12 @@
+mod address_funds;
 mod contract;
 mod document;
 mod drive_methods;
-mod finalize_task;
+pub(crate) mod finalize_task;
 mod group;
 mod identity;
 mod prefunded_specialized_balance;
+mod shielded;
 mod system;
 mod token;
 mod withdrawals;
@@ -16,6 +18,7 @@ use crate::error::Error;
 use crate::fees::op::LowLevelDriveOperation;
 use dpp::block::block_info::BlockInfo;
 
+pub use address_funds::AddressFundsOperationType;
 pub use contract::DataContractOperationType;
 pub use document::DocumentOperation;
 pub use document::DocumentOperationType;
@@ -24,6 +27,7 @@ pub use document::UpdateOperationInfo;
 pub use group::GroupOperationType;
 pub use identity::IdentityOperationType;
 pub use prefunded_specialized_balance::PrefundedSpecializedBalanceOperationType;
+pub use shielded::ShieldedPoolOperationType;
 pub use system::SystemOperationType;
 pub use token::TokenOperationType;
 pub use withdrawals::WithdrawalOperationType;
@@ -67,6 +71,7 @@ pub struct DriveOperationContext {
 }
 
 /// All types of Drive Operations
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum DriveOperation<'a> {
     /// A contract operation
@@ -85,10 +90,16 @@ pub enum DriveOperation<'a> {
     SystemOperation(SystemOperationType),
     /// A group operation
     GroupOperation(GroupOperationType),
+    /// An address funds operation
+    AddressFundsOperation(AddressFundsOperationType),
+    /// A shielded pool operation
+    ShieldedPoolOperation(ShieldedPoolOperationType),
     /// A single low level groveDB operation
     GroveDBOperation(QualifiedGroveDbOp),
     /// Multiple low level groveDB operations
     GroveDBOpBatch(GroveDbOpBatch),
+    /// An operation that only produces finalization tasks (no low-level ops)
+    FinalizeOperation(DriveOperationFinalizeTask),
 }
 
 impl DriveLowLevelOperationConverter for DriveOperation<'_> {
@@ -154,6 +165,15 @@ impl DriveLowLevelOperationConverter for DriveOperation<'_> {
                     transaction,
                     platform_version,
                 ),
+            DriveOperation::ShieldedPoolOperation(shielded_pool_operation_type) => {
+                shielded_pool_operation_type.into_low_level_drive_operations(
+                    drive,
+                    estimated_costs_only_with_layer_info,
+                    block_info,
+                    transaction,
+                    platform_version,
+                )
+            }
             DriveOperation::GroveDBOperation(op) => Ok(vec![GroveOperation(op)]),
             DriveOperation::GroveDBOpBatch(operations) => Ok(operations
                 .operations
@@ -176,6 +196,16 @@ impl DriveLowLevelOperationConverter for DriveOperation<'_> {
                     transaction,
                     platform_version,
                 ),
+            DriveOperation::AddressFundsOperation(address_funds_operation_type) => {
+                address_funds_operation_type.into_low_level_drive_operations(
+                    drive,
+                    estimated_costs_only_with_layer_info,
+                    block_info,
+                    transaction,
+                    platform_version,
+                )
+            }
+            DriveOperation::FinalizeOperation(_) => Ok(vec![]),
         }
     }
 }
@@ -209,6 +239,7 @@ impl DriveOperation<'_> {
     ) -> Result<Option<Vec<DriveOperationFinalizeTask>>, Error> {
         match self {
             DriveOperation::DataContractOperation(o) => o.finalization_tasks(platform_version),
+            DriveOperation::FinalizeOperation(task) => Ok(Some(vec![task.clone()])),
             _ => Ok(None),
         }
     }

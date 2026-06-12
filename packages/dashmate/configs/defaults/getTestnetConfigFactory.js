@@ -1,8 +1,8 @@
 import lodash from 'lodash';
+import Config from '../../src/config/Config.js';
 import {
   NETWORK_TESTNET,
 } from '../../src/constants.js';
-import Config from '../../src/config/Config.js';
 
 const { merge: lodashMerge } = lodash;
 /**
@@ -24,26 +24,64 @@ export default function getTestnetConfigFactory(homeDir, getBaseConfig) {
         },
       },
       core: {
+        insight: {
+          port: 13001,
+        },
         p2p: {
           port: 19999,
         },
         rpc: {
           port: 19998,
         },
+        zmq: {
+          port: 39998,
+        },
         spork: {
           address: 'yjPtiKh2uwk3bDutTEA2q9mCtXyiZRWn55',
         },
       },
+      dashmate: {
+        helper: {
+          api: {
+            port: 19100,
+          },
+        },
+      },
       platform: {
+        quorumList: {
+          api: {
+            port: 12444,
+          },
+        },
         gateway: {
+          metrics: {
+            port: 19090,
+          },
+          admin: {
+            port: 19901,
+          },
           listeners: {
             dapiAndDrive: {
               port: 1443,
             },
           },
+          rateLimiter: {
+            metrics: {
+              port: 19102,
+            },
+          },
         },
         drive: {
           abci: {
+            tokioConsole: {
+              port: 16669,
+            },
+            metrics: {
+              port: 39090,
+            },
+            grovedbVisualizer: {
+              port: 18083,
+            },
             epochTime: 3600,
             validatorSet: {
               quorum: {
@@ -116,10 +154,47 @@ export default function getTestnetConfigFactory(homeDir, getBaseConfig) {
               chain_id: 'dash-testnet-51',
               validator_quorum_type: 6,
               consensus_params: {
+                block: {
+                  max_bytes: '2097152',
+                  max_gas: '57631392000',
+                },
+                evidence: {
+                  max_age_num_blocks: '100000',
+                  max_age_duration: '172800000000000',
+                  max_bytes: '512000',
+                },
+                validator: {
+                  pub_key_types: [
+                    'bls12381',
+                  ],
+                },
                 version: {
                   app_version: '1',
+                  consensus: '0',
+                },
+                synchrony: {
+                  precision: '500000000',
+                  message_delay: '32000000000',
+                },
+                timeout: {
+                  propose: '30000000000',
+                  propose_delta: '1000000000',
+                  vote: '2000000000',
+                  vote_delta: '500000000',
+                  commit: '0',
+                  bypass_commit_timeout: false,
+                },
+                abci: {
+                  recheck_tx: true,
                 },
               },
+            },
+          },
+        },
+        dapi: {
+          rsDapi: {
+            metrics: {
+              port: 19091,
             },
           },
         },

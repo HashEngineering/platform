@@ -2,6 +2,7 @@ use crate::error::query::QueryError;
 use crate::error::Error;
 use crate::platform_types::platform::Platform;
 use crate::platform_types::platform_state::PlatformState;
+use crate::query::response_metadata::CheckpointUsed;
 use crate::query::QueryValidationResult;
 use dapi_grpc::platform::v0::get_documents_request::get_documents_request_v0::Start;
 use dapi_grpc::platform::v0::get_documents_request::GetDocumentsRequestV0;
@@ -15,7 +16,8 @@ use dpp::platform_value::Value;
 use dpp::validation::ValidationResult;
 use dpp::version::PlatformVersion;
 use drive::error::query::QuerySyntaxError;
-use drive::query::DriveDocumentQuery;
+use drive::query::{DriveDocumentQuery, OrderClause, WhereClause};
+use drive::util::grove_operations::GroveDBToUse;
 
 impl<C> Platform<C> {
     pub(super) fn query_documents_v0(
@@ -29,6 +31,136 @@ impl<C> Platform<C> {
             prove,
             start,
         }: GetDocumentsRequestV0,
+        platform_state: &PlatformState,
+        platform_version: &PlatformVersion,
+    ) -> Result<QueryValidationResult<GetDocumentsResponseV0>, Error> {
+        // CBOR-decode the v0 wire fields into `Value` shells. The
+        // typed-clauses path picks up after this and is shared with
+        // the v1 handler — see `query_documents_typed` below.
+        let where_value = if r#where.is_empty() {
+            Value::Null
+        } else {
+            check_validation_result_with_data!(ciborium::de::from_reader(r#where.as_slice())
+                .map_err(|_| {
+                    QueryError::Query(QuerySyntaxError::DeserializationError(
+                        "unable to decode 'where' query from cbor".to_string(),
+                    ))
+                }))
+        };
+
+        let order_by_value: Option<Value> = if !order_by.is_empty() {
+            check_validation_result_with_data!(ciborium::de::from_reader(order_by.as_slice())
+                .map_err(|_| {
+                    QueryError::Query(QuerySyntaxError::DeserializationError(
+                        "unable to decode 'order_by' query from cbor".to_string(),
+                    ))
+                }))
+        } else {
+            None
+        };
+
+        // Parse the decoded `Value` shells into structured clauses.
+        // `DriveDocumentQuery::from_decomposed_values` historically
+        // did this internally; lifting the parse into the abci layer
+        // lets v0 and v1 (whose wire is already typed) share the
+        // same execution helper without re-encoding bytes.
+        let where_clauses: Vec<WhereClause> = match where_value {
+            Value::Null => Vec::new(),
+            Value::Array(clauses) => {
+                let parsed: Result<Vec<WhereClause>, _> = clauses
+                    .iter()
+                    .map(|wc| match wc {
+                        Value::Array(components) => WhereClause::from_components(components),
+                        _ => Err(drive::error::Error::Query(
+                            QuerySyntaxError::InvalidFormatWhereClause(
+                                "where clause must be an array".to_string(),
+                            ),
+                        )),
+                    })
+                    .collect();
+                check_validation_result_with_data!(parsed.map_err(|e| QueryError::Query(
+                    QuerySyntaxError::InvalidFormatWhereClause(format!(
+                        "invalid where clause components: {e}"
+                    ))
+                )))
+            }
+            _ => {
+                return Ok(QueryValidationResult::new_with_error(QueryError::Query(
+                    QuerySyntaxError::InvalidFormatWhereClause(
+                        "where clause must be an array".to_string(),
+                    ),
+                )));
+            }
+        };
+
+        let order_by_clauses: Vec<OrderClause> = match order_by_value {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(clauses)) => {
+                let parsed: Result<Vec<OrderClause>, _> = clauses
+                    .iter()
+                    .map(|oc| match oc {
+                        Value::Array(components) => OrderClause::from_components(components)
+                            .map_err(|_| {
+                                QueryError::Query(QuerySyntaxError::InvalidOrderByProperties(
+                                    "invalid order_by clause components",
+                                ))
+                            }),
+                        _ => Err(QueryError::Query(
+                            QuerySyntaxError::InvalidOrderByProperties(
+                                "order_by clause must be an array",
+                            ),
+                        )),
+                    })
+                    .collect();
+                check_validation_result_with_data!(parsed)
+            }
+            _ => {
+                return Ok(QueryValidationResult::new_with_error(QueryError::Query(
+                    QuerySyntaxError::InvalidOrderByProperties("order_by must be an array"),
+                )));
+            }
+        };
+
+        self.query_documents_typed(
+            data_contract_id,
+            document_type_name,
+            where_clauses,
+            order_by_clauses,
+            // v0 wire's `uint32` limit: `0` is the sentinel for
+            // "use server default"; `> u16::MAX` is rejected.
+            Some(limit),
+            prove,
+            start,
+            platform_state,
+            platform_version,
+        )
+    }
+
+    /// Shared execution pipeline for `getDocuments` — consumes
+    /// already-structured `where_clauses` / `order_by_clauses` and
+    /// reuses the same drive `DriveDocumentQuery` build + execute
+    /// path under both v0 (CBOR-decoded into typed) and v1 (proto-
+    /// converted into typed) wire envelopes.
+    ///
+    /// `limit_u32` semantics mirror the v0 wire field:
+    /// - `None` (v1's `optional uint32 = None`) → use the server
+    ///   default (`drive_config.default_query_limit`).
+    /// - `Some(0)` (v0's "unset" sentinel) → same as `None`.
+    /// - `Some(N > 0)` → explicit cap; rejected if `N > u16::MAX`.
+    ///
+    /// v1 callers map their `Option<u32>` directly (None → None,
+    /// Some(0) is pre-rejected upstream by `validate_and_route` so
+    /// can't reach this helper).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn query_documents_typed(
+        &self,
+        data_contract_id: Vec<u8>,
+        document_type_name: String,
+        where_clauses: Vec<WhereClause>,
+        order_by_clauses: Vec<OrderClause>,
+        limit_u32: Option<u32>,
+        prove: bool,
+        start: Option<Start>,
         platform_state: &PlatformState,
         platform_version: &PlatformVersion,
     ) -> Result<QueryValidationResult<GetDocumentsResponseV0>, Error> {
@@ -61,28 +193,6 @@ impl<C> Platform<C> {
                 document_type_name, contract_id
             ))));
 
-        let where_clause = if r#where.is_empty() {
-            Value::Null
-        } else {
-            check_validation_result_with_data!(ciborium::de::from_reader(r#where.as_slice())
-                .map_err(|_| {
-                    QueryError::Query(QuerySyntaxError::DeserializationError(
-                        "unable to decode 'where' query from cbor".to_string(),
-                    ))
-                }))
-        };
-
-        let order_by = if !order_by.is_empty() {
-            check_validation_result_with_data!(ciborium::de::from_reader(order_by.as_slice())
-                .map_err(|_| {
-                    QueryError::Query(QuerySyntaxError::DeserializationError(
-                        "unable to decode 'order_by' query from cbor".to_string(),
-                    ))
-                }))
-        } else {
-            None
-        };
-
         let (start_at_included, start_at) = if let Some(start) = start {
             match start {
                 Start::StartAfter(after) => (
@@ -108,21 +218,26 @@ impl<C> Platform<C> {
             (true, None)
         };
 
-        if limit > u16::MAX as u32 {
-            return Ok(QueryValidationResult::new_with_error(QueryError::Query(
-                QuerySyntaxError::InvalidLimit(format!("limit {} out of bounds", limit)),
-            )));
-        }
+        // Translate the wire-level `Option<u32>` to the `Option<u16>`
+        // `DriveDocumentQuery::from_typed_clauses` expects. Both
+        // `None` and `Some(0)` map to `Some(default_query_limit)`
+        // (server default applies); values exceeding `u16::MAX` are
+        // rejected here so the cast below is safe.
+        let limit_u16 = match limit_u32 {
+            Some(n) if n > u16::MAX as u32 => {
+                return Ok(QueryValidationResult::new_with_error(QueryError::Query(
+                    QuerySyntaxError::InvalidLimit(format!("limit {} out of bounds", n)),
+                )));
+            }
+            None | Some(0) => Some(self.config.drive.default_query_limit),
+            Some(n) => Some(n as u16),
+        };
 
         let drive_query =
-            check_validation_result_with_data!(DriveDocumentQuery::from_decomposed_values(
-                where_clause,
-                order_by,
-                Some(if limit == 0 {
-                    self.config.drive.default_query_limit
-                } else {
-                    limit as u16
-                }),
+            check_validation_result_with_data!(DriveDocumentQuery::from_typed_clauses(
+                where_clauses,
+                order_by_clauses,
+                limit_u16,
                 start_at,
                 start_at_included,
                 None,
@@ -143,11 +258,12 @@ impl<C> Platform<C> {
                     Err(e) => return Err(e.into()),
                 };
 
+            let (grovedb_used, proof) =
+                self.response_proof_v0(platform_state, proof, GroveDBToUse::Current)?;
+
             GetDocumentsResponseV0 {
-                result: Some(get_documents_response_v0::Result::Proof(
-                    self.response_proof_v0(platform_state, proof),
-                )),
-                metadata: Some(self.response_metadata_v0(platform_state)),
+                result: Some(get_documents_response_v0::Result::Proof(proof)),
+                metadata: Some(self.response_metadata_v0(platform_state, grovedb_used)),
             }
         } else {
             let results = match drive_query.execute_raw_results_no_proof(
@@ -169,7 +285,7 @@ impl<C> Platform<C> {
                 result: Some(get_documents_response_v0::Result::Documents(
                     get_documents_response_v0::Documents { documents: results },
                 )),
-                metadata: Some(self.response_metadata_v0(platform_state)),
+                metadata: Some(self.response_metadata_v0(platform_state, CheckpointUsed::Current)),
             }
         };
 
@@ -772,10 +888,10 @@ mod tests {
                 owner_id: Identifier::random_with_rng(&mut std_rng),
                 properties: {
                     let mut properties = BTreeMap::new();
-                    properties.insert("status".to_string(), Value::U8(0)); // Always queued
-                    properties.insert("pooling".to_string(), Value::U8(0)); // Always 0
-                    properties.insert("coreFeePerByte".to_string(), Value::U32(1)); // Always 1
-                    properties.insert("amount".to_string(), Value::U64(1000)); // Set a minimum amount of 1000
+                    properties.insert("status".to_string(), Value::I64(0)); // Always queued
+                    properties.insert("pooling".to_string(), Value::I64(0)); // Always 0
+                    properties.insert("coreFeePerByte".to_string(), Value::I64(1)); // Always 1
+                    properties.insert("amount".to_string(), Value::I64(1000)); // Set a minimum amount of 1000
                     properties.insert("outputScript".to_string(), Value::Bytes(vec![])); // Set an empty output script
                     properties
                 },
@@ -789,6 +905,7 @@ mod tests {
                 created_at_core_block_height: None,
                 updated_at_core_block_height: None,
                 transferred_at_core_block_height: None,
+                creator_id: None,
             }
             .into();
             store_document(
@@ -936,10 +1053,10 @@ mod tests {
                 owner_id: Identifier::random_with_rng(&mut std_rng),
                 properties: {
                     let mut properties = BTreeMap::new();
-                    properties.insert("status".to_string(), Value::U8(i as u8 % 4)); // Always queued
-                    properties.insert("pooling".to_string(), Value::U8(0)); // Always 0
-                    properties.insert("coreFeePerByte".to_string(), Value::U32(1)); // Always 1
-                    properties.insert("amount".to_string(), Value::U64(1000)); // Set a minimum amount of 1000
+                    properties.insert("status".to_string(), Value::I64(i as i64 % 4)); // Always queued
+                    properties.insert("pooling".to_string(), Value::I64(0)); // Always 0
+                    properties.insert("coreFeePerByte".to_string(), Value::I64(1)); // Always 1
+                    properties.insert("amount".to_string(), Value::I64(1000)); // Set a minimum amount of 1000
                     properties.insert("outputScript".to_string(), Value::Bytes(vec![])); // Set an empty output script
                     properties
                 },
@@ -953,6 +1070,7 @@ mod tests {
                 created_at_core_block_height: None,
                 updated_at_core_block_height: None,
                 transferred_at_core_block_height: None,
+                creator_id: None,
             }
             .into();
             store_document(
@@ -1100,10 +1218,10 @@ mod tests {
                 owner_id: Identifier::random_with_rng(&mut std_rng),
                 properties: {
                     let mut properties = BTreeMap::new();
-                    properties.insert("status".to_string(), Value::U8(i as u8 % 4)); // Always queued
-                    properties.insert("pooling".to_string(), Value::U8(0)); // Always 0
-                    properties.insert("coreFeePerByte".to_string(), Value::U32(1)); // Always 1
-                    properties.insert("amount".to_string(), Value::U64(1000)); // Set a minimum amount of 1000
+                    properties.insert("status".to_string(), Value::I64(i as i64 % 4)); // Always queued
+                    properties.insert("pooling".to_string(), Value::I64(0)); // Always 0
+                    properties.insert("coreFeePerByte".to_string(), Value::I64(1)); // Always 1
+                    properties.insert("amount".to_string(), Value::I64(1000)); // Set a minimum amount of 1000
                     properties.insert("outputScript".to_string(), Value::Bytes(vec![])); // Set an empty output script
                     properties
                 },
@@ -1117,6 +1235,7 @@ mod tests {
                 created_at_core_block_height: None,
                 updated_at_core_block_height: None,
                 transferred_at_core_block_height: None,
+                creator_id: None,
             }
             .into();
             store_document(
@@ -1256,10 +1375,10 @@ mod tests {
                 owner_id: Identifier::random_with_rng(&mut std_rng),
                 properties: {
                     let mut properties = BTreeMap::new();
-                    properties.insert("status".to_string(), Value::U8(i as u8 % 4)); // Always queued
-                    properties.insert("pooling".to_string(), Value::U8(0)); // Always 0
-                    properties.insert("coreFeePerByte".to_string(), Value::U32(1)); // Always 1
-                    properties.insert("amount".to_string(), Value::U64(1000)); // Set a minimum amount of 1000
+                    properties.insert("status".to_string(), Value::I64(i as i64 % 4)); // Always queued
+                    properties.insert("pooling".to_string(), Value::I64(0)); // Always 0
+                    properties.insert("coreFeePerByte".to_string(), Value::I64(1)); // Always 1
+                    properties.insert("amount".to_string(), Value::I64(1000)); // Set a minimum amount of 1000
                     properties.insert("outputScript".to_string(), Value::Bytes(vec![])); // Set an empty output script
                     properties
                 },
@@ -1273,6 +1392,7 @@ mod tests {
                 created_at_core_block_height: None,
                 updated_at_core_block_height: None,
                 transferred_at_core_block_height: None,
+                creator_id: None,
             }
             .into();
             store_document(
@@ -1301,11 +1421,11 @@ mod tests {
                     field: "status".to_string(),
                     operator: WhereOperator::In,
                     value: Value::Array(vec![
-                        Value::U8(0),
-                        Value::U8(1),
-                        Value::U8(2),
-                        Value::U8(3),
-                        Value::U8(4),
+                        Value::I64(0),
+                        Value::I64(1),
+                        Value::I64(2),
+                        Value::I64(3),
+                        Value::I64(4),
                     ]),
                 }),
                 range_clause: None,
@@ -1427,10 +1547,10 @@ mod tests {
                 owner_id: Identifier::random_with_rng(&mut std_rng),
                 properties: {
                     let mut properties = BTreeMap::new();
-                    properties.insert("status".to_string(), Value::U8(i as u8 % 4)); // Always queued
-                    properties.insert("pooling".to_string(), Value::U8(0)); // Always 0
-                    properties.insert("coreFeePerByte".to_string(), Value::U32(1)); // Always 1
-                    properties.insert("amount".to_string(), Value::U64(1000)); // Set a minimum amount of 1000
+                    properties.insert("status".to_string(), Value::I64(i as i64 % 4)); // Always queued
+                    properties.insert("pooling".to_string(), Value::I64(0)); // Always 0
+                    properties.insert("coreFeePerByte".to_string(), Value::I64(1)); // Always 1
+                    properties.insert("amount".to_string(), Value::I64(1000)); // Set a minimum amount of 1000
                     properties.insert("outputScript".to_string(), Value::Bytes(vec![])); // Set an empty output script
                     properties
                 },
@@ -1444,6 +1564,7 @@ mod tests {
                 created_at_core_block_height: None,
                 updated_at_core_block_height: None,
                 transferred_at_core_block_height: None,
+                creator_id: None,
             }
             .into();
             store_document(
@@ -1472,11 +1593,11 @@ mod tests {
                     field: "status".to_string(),
                     operator: WhereOperator::In,
                     value: Value::Array(vec![
-                        Value::U8(0),
-                        Value::U8(1),
-                        Value::U8(2),
-                        Value::U8(3),
-                        Value::U8(4),
+                        Value::I64(0),
+                        Value::I64(1),
+                        Value::I64(2),
+                        Value::I64(3),
+                        Value::I64(4),
                     ]),
                 }),
                 range_clause: None,
@@ -1486,7 +1607,7 @@ mod tests {
                         WhereClause {
                             field: "pooling".to_string(),
                             operator: WhereOperator::Equal,
-                            value: Value::U8(0),
+                            value: Value::I64(0),
                         },
                     ),
                     (
@@ -1494,7 +1615,7 @@ mod tests {
                         WhereClause {
                             field: "coreFeePerByte".to_string(),
                             operator: WhereOperator::Equal,
-                            value: Value::U32(1),
+                            value: Value::I64(1),
                         },
                     ),
                 ]),
@@ -1570,6 +1691,310 @@ mod tests {
                 .values()
                 .nth(16)
                 .expect("expected to get 2nd document")
+        );
+    }
+
+    /// When `prove: true` is set but the contract cannot be found, we must still
+    /// return a query-error validation result (not an Err). This pins the early-return
+    /// validation-ordering: contract lookup happens before prove-vs-no-prove branching.
+    #[test]
+    fn test_data_contract_not_found_with_prove_true() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        let data_contract_id = vec![7u8; 32];
+
+        let request = GetDocumentsRequestV0 {
+            data_contract_id: data_contract_id.clone(),
+            document_type: "niceDocument".to_string(),
+            r#where: vec![],
+            limit: 0,
+            order_by: vec![],
+            prove: true, // proof path
+            start: None,
+        };
+
+        let result = platform
+            .query_documents_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.errors.as_slice(),
+            [QueryError::Query(QuerySyntaxError::DataContractNotFound(_))]
+        ));
+    }
+
+    /// Invalid identifier must error out before the prove branch is reached.
+    #[test]
+    fn test_invalid_document_id_with_prove_true() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        let request = GetDocumentsRequestV0 {
+            data_contract_id: vec![0; 7], // wrong length
+            document_type: "niceDocument".to_string(),
+            r#where: vec![],
+            limit: 0,
+            order_by: vec![],
+            prove: true,
+            start: None,
+        };
+
+        let result = platform
+            .query_documents_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert_invalid_identifier(result);
+    }
+
+    /// Invalid where clause must short-circuit even when proof is requested.
+    /// This exercises the where-clause CBOR decoder error branch ahead of
+    /// any prove-mode logic.
+    #[test]
+    fn test_invalid_where_clause_with_prove_true() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        let created_data_contract = get_data_contract_fixture(None, 0, version.protocol_version);
+        store_data_contract(&platform, created_data_contract.data_contract(), version);
+
+        let request = GetDocumentsRequestV0 {
+            data_contract_id: created_data_contract.data_contract().id().to_vec(),
+            document_type: "niceDocument".to_string(),
+            r#where: vec![0x9F], // malformed CBOR
+            limit: 0,
+            order_by: vec![],
+            prove: true,
+            start: None,
+        };
+
+        let result = platform
+            .query_documents_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.errors.as_slice(),
+            [QueryError::Query(QuerySyntaxError::DeserializationError(msg))]
+                if msg == "unable to decode 'where' query from cbor"
+        ));
+    }
+
+    /// When the limit is exactly u16::MAX + 1 (one past the bound) the InvalidLimit
+    /// error path fires. This pins the boundary.
+    #[test]
+    fn test_limit_just_over_bound_is_rejected() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        let created_data_contract = get_data_contract_fixture(None, 0, version.protocol_version);
+        store_data_contract(&platform, created_data_contract.data_contract(), version);
+
+        let limit = u16::MAX as u32 + 1;
+
+        let request = GetDocumentsRequestV0 {
+            data_contract_id: created_data_contract.data_contract().id().to_vec(),
+            document_type: "niceDocument".to_string(),
+            r#where: vec![],
+            limit,
+            order_by: vec![],
+            prove: false,
+            start: None,
+        };
+
+        let result = platform
+            .query_documents_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.errors.as_slice(),
+            [QueryError::Query(QuerySyntaxError::InvalidLimit(msg))]
+                if msg == &format!("limit {} out of bounds", limit)
+        ));
+    }
+
+    /// Returns documents (not proof) when prove is false and at least one document
+    /// exists; the raw-results execution branch is exercised with actual data.
+    #[test]
+    fn test_documents_returned_without_proof_when_present() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        let platform_version = PlatformVersion::latest();
+        let created_data_contract = get_data_contract_fixture(None, 0, version.protocol_version);
+        store_data_contract(&platform, created_data_contract.data_contract(), version);
+
+        let data_contract_id = created_data_contract.data_contract().id();
+        let document_type_name = "niceDocument";
+        let document_type = created_data_contract
+            .data_contract()
+            .document_type_for_name(document_type_name)
+            .expect("expected document type");
+
+        let document = document_type
+            .random_document(Some(11), platform_version)
+            .expect("expected a random doc");
+
+        store_document(
+            &platform,
+            created_data_contract.data_contract(),
+            document_type,
+            &document,
+            platform_version,
+        );
+
+        let request = GetDocumentsRequestV0 {
+            data_contract_id: data_contract_id.to_vec(),
+            document_type: document_type_name.to_string(),
+            r#where: vec![],
+            limit: 10,
+            order_by: vec![],
+            prove: false,
+            start: None,
+        };
+
+        let result = platform
+            .query_documents_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        let Some(GetDocumentsResponseV0 {
+            result: Some(get_documents_response_v0::Result::Documents(documents)),
+            metadata: Some(_),
+        }) = result.data
+        else {
+            panic!("expected documents, not a proof")
+        };
+        assert_eq!(documents.documents.len(), 1);
+    }
+
+    /// Absent document type should fail even when prove is true (error path is
+    /// reached before the proof branch).
+    #[test]
+    fn test_absent_document_type_with_prove_true() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        let created_data_contract = get_data_contract_fixture(None, 0, version.protocol_version);
+        store_data_contract(&platform, created_data_contract.data_contract(), version);
+
+        let request = GetDocumentsRequestV0 {
+            data_contract_id: created_data_contract.data_contract().id().to_vec(),
+            document_type: "noSuchTypeInContract".to_string(),
+            r#where: vec![],
+            limit: 0,
+            order_by: vec![],
+            prove: true,
+            start: None,
+        };
+
+        let result = platform
+            .query_documents_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.errors.as_slice(),
+            [QueryError::InvalidArgument(msg)] if msg.contains("document type noSuchTypeInContract not found for contract")
+        ));
+    }
+
+    /// Invalid start_at (too short) with prove: true must still surface the
+    /// InvalidStartsWithClause error rather than short-circuiting to a proof.
+    #[test]
+    fn test_invalid_start_at_clause_with_prove_true() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        let created_data_contract = get_data_contract_fixture(None, 0, version.protocol_version);
+        store_data_contract(&platform, created_data_contract.data_contract(), version);
+
+        let request = GetDocumentsRequestV0 {
+            data_contract_id: created_data_contract.data_contract().id().to_vec(),
+            document_type: "niceDocument".to_string(),
+            r#where: vec![],
+            limit: 0,
+            order_by: vec![],
+            prove: true,
+            start: Some(Start::StartAt(vec![0; 4])), // wrong length
+        };
+
+        let result = platform
+            .query_documents_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.errors.as_slice(),
+            [QueryError::Query(QuerySyntaxError::InvalidStartsWithClause(msg))]
+                if msg == &"start at should be a 32 byte identifier"
+        ));
+    }
+
+    /// Malformed order_by CBOR must fail even when prove is true.
+    #[test]
+    fn test_invalid_order_by_with_prove_true() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        let created_data_contract = get_data_contract_fixture(None, 0, version.protocol_version);
+        store_data_contract(&platform, created_data_contract.data_contract(), version);
+
+        let request = GetDocumentsRequestV0 {
+            data_contract_id: created_data_contract.data_contract().id().to_vec(),
+            document_type: "niceDocument".to_string(),
+            r#where: vec![],
+            limit: 0,
+            order_by: vec![0x9F], // malformed CBOR
+            prove: true,
+            start: None,
+        };
+
+        let result = platform
+            .query_documents_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        assert!(matches!(
+            result.errors.as_slice(),
+            [QueryError::Query(QuerySyntaxError::DeserializationError(msg))]
+                if msg == "unable to decode 'order_by' query from cbor"
+        ));
+    }
+
+    /// A where clause that deserializes as valid CBOR but references a field that is
+    /// not on any index should be rejected by the drive document-query constructor.
+    /// This ensures the `DriveDocumentQuery::from_decomposed_values` error path is
+    /// surfaced as a validation error rather than an Err Result.
+    #[test]
+    fn test_where_clause_on_non_indexed_field_is_rejected() {
+        let (platform, state, version) = setup_platform(None, Network::Testnet, None);
+
+        let created_data_contract = get_data_contract_fixture(None, 0, version.protocol_version);
+        store_data_contract(&platform, created_data_contract.data_contract(), version);
+
+        let bogus_clause = drive::query::WhereClause {
+            field: "thisFieldIsNotIndexed".to_string(),
+            operator: drive::query::WhereOperator::Equal,
+            value: Value::Text("value".to_string()),
+        };
+
+        let where_cbor =
+            serialize_vec_to_cbor(vec![bogus_clause]).expect("should serialize clause to cbor");
+
+        let request = GetDocumentsRequestV0 {
+            data_contract_id: created_data_contract.data_contract().id().to_vec(),
+            document_type: "niceDocument".to_string(),
+            r#where: where_cbor,
+            limit: 0,
+            order_by: vec![],
+            prove: false,
+            start: None,
+        };
+
+        let result = platform
+            .query_documents_v0(request, &state, version)
+            .expect("expected query to succeed");
+
+        // Should produce a Query error (validation error, not Err).
+        assert!(
+            !result.errors.is_empty(),
+            "expected an error for invalid where clause"
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e, QueryError::Query(_))),
+            "expected a QueryError::Query variant, got: {:?}",
+            result.errors
         );
     }
 }

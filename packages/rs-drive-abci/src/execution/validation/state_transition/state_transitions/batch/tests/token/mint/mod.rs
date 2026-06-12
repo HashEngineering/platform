@@ -5,8 +5,8 @@ mod token_mint_tests {
     mod token_mint_tests_normal_scenarios {
         use super::*;
 
-        #[test]
-        fn test_token_mint_by_owner_allowed_sending_to_self() {
+        #[tokio::test]
+        async fn test_token_mint_by_owner_allowed_sending_to_self() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -46,6 +46,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -69,7 +70,7 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -91,8 +92,8 @@ mod token_mint_tests {
             assert_eq!(token_balance, Some(101337));
         }
 
-        #[test]
-        fn test_token_mint_with_public_note() {
+        #[tokio::test]
+        async fn test_token_mint_with_public_note() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -132,6 +133,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -155,7 +157,7 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -177,8 +179,8 @@ mod token_mint_tests {
             assert_eq!(token_balance, Some(101337));
         }
 
-        #[test]
-        fn test_token_mint_by_owner_can_not_mint_past_max_supply() {
+        #[tokio::test]
+        async fn test_token_mint_by_owner_can_not_mint_past_max_supply() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -220,6 +222,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -243,10 +246,10 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [PaidConsensusError(
-                    ConsensusError::StateError(StateError::TokenMintPastMaxSupplyError(_)),
-                    _
-                )]
+                [PaidConsensusError {
+                    error: ConsensusError::StateError(StateError::TokenMintPastMaxSupplyError(_)),
+                    ..
+                }]
             );
 
             platform
@@ -268,8 +271,8 @@ mod token_mint_tests {
             assert_eq!(token_balance, Some(100000));
         }
 
-        #[test]
-        fn test_token_mint_by_owner_allowed_sending_to_other() {
+        #[tokio::test]
+        async fn test_token_mint_by_owner_allowed_sending_to_other() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -311,6 +314,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -334,7 +338,7 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -356,8 +360,8 @@ mod token_mint_tests {
             assert_eq!(token_balance, Some(1337));
         }
 
-        #[test]
-        fn test_token_mint_sending_to_non_existing_identity_causes_error() {
+        #[tokio::test]
+        async fn test_token_mint_sending_to_non_existing_identity_causes_error() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -399,6 +403,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -422,10 +427,12 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [PaidConsensusError(
-                    ConsensusError::StateError(StateError::RecipientIdentityDoesNotExistError(_)),
-                    _
-                )]
+                [PaidConsensusError {
+                    error: ConsensusError::StateError(
+                        StateError::RecipientIdentityDoesNotExistError(_)
+                    ),
+                    ..
+                }]
             );
 
             platform
@@ -447,8 +454,8 @@ mod token_mint_tests {
             assert_eq!(token_balance, None);
         }
 
-        #[test]
-        fn test_token_mint_by_owner_no_destination_causes_error() {
+        #[tokio::test]
+        async fn test_token_mint_by_owner_no_destination_causes_error() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -488,6 +495,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -511,12 +519,12 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [PaidConsensusError(
-                    ConsensusError::BasicError(
+                [PaidConsensusError {
+                    error: ConsensusError::BasicError(
                         BasicError::DestinationIdentityForTokenMintingNotSetError(_)
                     ),
-                    _
-                )]
+                    ..
+                }]
             );
 
             platform
@@ -531,8 +539,8 @@ mod token_mint_tests {
     mod token_mint_tests_no_recipient_minting {
         use super::*;
 
-        #[test]
-        fn test_token_mint_by_owned_id_allowed_sending_to_self() {
+        #[tokio::test]
+        async fn test_token_mint_by_owned_id_allowed_sending_to_self() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -576,6 +584,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -599,12 +608,12 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [PaidConsensusError(
-                    ConsensusError::BasicError(
+                [PaidConsensusError {
+                    error: ConsensusError::BasicError(
                         BasicError::ChoosingTokenMintRecipientNotAllowedError(_)
                     ),
-                    _
-                )]
+                    ..
+                }]
             );
 
             platform
@@ -626,8 +635,8 @@ mod token_mint_tests {
             assert_eq!(token_balance, Some(100000));
         }
 
-        #[test]
-        fn test_token_mint_by_owned_id_allowed_sending_to_other() {
+        #[tokio::test]
+        async fn test_token_mint_by_owned_id_allowed_sending_to_other() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -673,6 +682,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -696,12 +706,12 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [PaidConsensusError(
-                    ConsensusError::BasicError(
+                [PaidConsensusError {
+                    error: ConsensusError::BasicError(
                         BasicError::ChoosingTokenMintRecipientNotAllowedError(_)
                     ),
-                    _
-                )]
+                    ..
+                }]
             );
 
             platform
@@ -723,8 +733,8 @@ mod token_mint_tests {
             assert_eq!(token_balance, None);
         }
 
-        #[test]
-        fn test_token_mint_by_owned_id_no_destination_causes_error() {
+        #[tokio::test]
+        async fn test_token_mint_by_owned_id_no_destination_causes_error() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -768,6 +778,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -791,12 +802,12 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [PaidConsensusError(
-                    ConsensusError::BasicError(
+                [PaidConsensusError {
+                    error: ConsensusError::BasicError(
                         BasicError::DestinationIdentityForTokenMintingNotSetError(_)
                     ),
-                    _
-                )]
+                    ..
+                }]
             );
 
             platform
@@ -811,8 +822,8 @@ mod token_mint_tests {
     mod token_mint_tests_contract_has_recipient {
         use super::*;
 
-        #[test]
-        fn test_token_mint_by_owned_id_allowed_sending_to_self() {
+        #[tokio::test]
+        async fn test_token_mint_by_owned_id_allowed_sending_to_self() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -859,6 +870,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -882,12 +894,12 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [PaidConsensusError(
-                    ConsensusError::BasicError(
+                [PaidConsensusError {
+                    error: ConsensusError::BasicError(
                         BasicError::ChoosingTokenMintRecipientNotAllowedError(_)
                     ),
-                    _
-                )]
+                    ..
+                }]
             );
 
             platform
@@ -909,8 +921,8 @@ mod token_mint_tests {
             assert_eq!(token_balance, Some(100000));
         }
 
-        #[test]
-        fn test_token_mint_by_owned_id_allowed_sending_to_other() {
+        #[tokio::test]
+        async fn test_token_mint_by_owned_id_allowed_sending_to_other() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -959,6 +971,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -982,12 +995,12 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [PaidConsensusError(
-                    ConsensusError::BasicError(
+                [PaidConsensusError {
+                    error: ConsensusError::BasicError(
                         BasicError::ChoosingTokenMintRecipientNotAllowedError(_)
                     ),
-                    _
-                )]
+                    ..
+                }]
             );
 
             platform
@@ -1009,8 +1022,8 @@ mod token_mint_tests {
             assert_eq!(token_balance, None);
         }
 
-        #[test]
-        fn test_token_mint_by_owned_id_no_set_destination_should_use_contracts() {
+        #[tokio::test]
+        async fn test_token_mint_by_owned_id_no_set_destination_should_use_contracts() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -1057,6 +1070,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -1080,7 +1094,7 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -1119,8 +1133,8 @@ mod token_mint_tests {
         use dpp::state_transition::proof_result::StateTransitionProofResult;
         use drive::drive::Drive;
 
-        #[test]
-        fn test_token_mint_by_owner_sending_to_self_minting_not_allowed() {
+        #[tokio::test]
+        async fn test_token_mint_by_owner_sending_to_self_minting_not_allowed() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -1170,6 +1184,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -1193,10 +1208,10 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [PaidConsensusError(
-                    ConsensusError::StateError(StateError::UnauthorizedTokenActionError(_)),
-                    _
-                )]
+                [PaidConsensusError {
+                    error: ConsensusError::StateError(StateError::UnauthorizedTokenActionError(_)),
+                    ..
+                }]
             );
 
             platform
@@ -1218,8 +1233,8 @@ mod token_mint_tests {
             assert_eq!(token_balance, Some(100000));
         }
 
-        #[test]
-        fn test_token_mint_by_owner_sending_to_self_minting_only_allowed_by_group() {
+        #[tokio::test]
+        async fn test_token_mint_by_owner_sending_to_self_minting_only_allowed_by_group() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .with_latest_protocol_version()
@@ -1281,6 +1296,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -1304,10 +1320,10 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [PaidConsensusError(
-                    ConsensusError::StateError(StateError::UnauthorizedTokenActionError(_)),
-                    _
-                )]
+                [PaidConsensusError {
+                    error: ConsensusError::StateError(StateError::UnauthorizedTokenActionError(_)),
+                    ..
+                }]
             );
 
             platform
@@ -1329,8 +1345,8 @@ mod token_mint_tests {
             assert_eq!(token_balance, Some(100000));
         }
 
-        #[test]
-        fn test_token_mint_by_owner_sending_to_self_minting_only_allowed_by_group_enough_member_power(
+        #[tokio::test]
+        async fn test_token_mint_by_owner_sending_to_self_minting_only_allowed_by_group_enough_member_power(
         ) {
             // We are using a group, but our member alone has enough power in the group to do the action
             let platform_version = PlatformVersion::latest();
@@ -1394,6 +1410,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let documents_batch_create_serialized_transition = documents_batch_create_transition
@@ -1417,7 +1434,7 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -1439,17 +1456,17 @@ mod token_mint_tests {
             assert_eq!(token_balance, Some(101337));
         }
 
-        #[test]
-        fn test_token_mint_by_owner_requires_group_other_member_with_history() {
-            test_token_mint_by_owner_requires_group_other_member(true);
+        #[tokio::test]
+        async fn test_token_mint_by_owner_requires_group_other_member_with_history() {
+            test_token_mint_by_owner_requires_group_other_member(true).await;
         }
 
-        #[test]
-        fn test_token_mint_by_owner_requires_group_other_member_no_history() {
-            test_token_mint_by_owner_requires_group_other_member(false);
+        #[tokio::test]
+        async fn test_token_mint_by_owner_requires_group_other_member_no_history() {
+            test_token_mint_by_owner_requires_group_other_member(false).await;
         }
 
-        fn test_token_mint_by_owner_requires_group_other_member(keeps_minting_history: bool) {
+        async fn test_token_mint_by_owner_requires_group_other_member(keeps_minting_history: bool) {
             // We are using a group, and two members need to sign for the event to happen
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
@@ -1515,6 +1532,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let token_mint_serialized_transition = token_mint_transition
@@ -1538,7 +1556,7 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -1630,6 +1648,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let confirm_token_mint_serialized_transition = confirm_token_mint_transition
@@ -1653,7 +1672,7 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -1726,8 +1745,8 @@ mod token_mint_tests {
             assert_eq!(token_balance, None);
         }
 
-        #[test]
-        fn test_token_mint_by_owner_requires_group_other_member_keeps_history_with_note() {
+        #[tokio::test]
+        async fn test_token_mint_by_owner_requires_group_other_member_keeps_history_with_note() {
             // We are using a group, and two members need to sign for the event to happen
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
@@ -1793,6 +1812,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let token_mint_serialized_transition = token_mint_transition
@@ -1816,7 +1836,7 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -1899,6 +1919,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let confirm_token_mint_serialized_transition = confirm_token_mint_transition
@@ -1962,6 +1983,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let confirm_token_mint_serialized_transition = confirm_token_mint_transition
@@ -1985,7 +2007,7 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -2049,8 +2071,8 @@ mod token_mint_tests {
             assert_eq!(token_balance, None);
         }
 
-        #[test]
-        fn test_token_mint_by_owner_requires_group_other_member_changes_minting_amount() {
+        #[tokio::test]
+        async fn test_token_mint_by_owner_requires_group_other_member_changes_minting_amount() {
             // We are using a group, and two members need to sign for the event to happen
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
@@ -2116,6 +2138,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let token_mint_serialized_transition = token_mint_transition
@@ -2139,7 +2162,7 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -2220,6 +2243,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let confirm_token_mint_serialized_transition = confirm_token_mint_transition
@@ -2243,12 +2267,12 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::PaidConsensusError(
-                    ConsensusError::StateError(
+                [StateTransitionExecutionResult::PaidConsensusError {
+                    error: ConsensusError::StateError(
                         StateError::ModificationOfGroupActionMainParametersNotPermittedError(_)
                     ),
-                    _
-                )]
+                    ..
+                }]
             );
 
             platform
@@ -2281,8 +2305,8 @@ mod token_mint_tests {
             assert_eq!(token_balance, None);
         }
 
-        #[test]
-        fn test_token_mint_by_owner_requires_group_resubmitting_causes_error() {
+        #[tokio::test]
+        async fn test_token_mint_by_owner_requires_group_resubmitting_causes_error() {
             // We are using a group, and two members need to sign for the event to happen
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
@@ -2345,6 +2369,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let token_mint_serialized_transition = token_mint_transition
@@ -2386,7 +2411,7 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -2439,6 +2464,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let confirm_token_mint_serialized_transition = confirm_token_mint_transition
@@ -2473,12 +2499,12 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [PaidConsensusError(
-                    ConsensusError::StateError(
+                [PaidConsensusError {
+                    error: ConsensusError::StateError(
                         StateError::GroupActionAlreadySignedByIdentityError(_)
                     ),
-                    _
-                )]
+                    ..
+                }]
             );
 
             platform
@@ -2511,8 +2537,8 @@ mod token_mint_tests {
             assert_eq!(token_balance, None);
         }
 
-        #[test]
-        fn test_token_mint_by_owner_requires_group_other_member_resubmitting_causes_error() {
+        #[tokio::test]
+        async fn test_token_mint_by_owner_requires_group_other_member_resubmitting_causes_error() {
             // We are using a group, and two members need to sign for the event to happen
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
@@ -2583,6 +2609,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let token_mint_serialized_transition = token_mint_transition
@@ -2606,7 +2633,7 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -2658,6 +2685,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let confirm_token_mint_serialized_transition = confirm_token_mint_transition
@@ -2681,7 +2709,7 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -2738,6 +2766,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let confirm_token_mint_serialized_transition = confirm_token_mint_transition
@@ -2761,12 +2790,12 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [PaidConsensusError(
-                    ConsensusError::StateError(
+                [PaidConsensusError {
+                    error: ConsensusError::StateError(
                         StateError::GroupActionAlreadySignedByIdentityError(_)
                     ),
-                    _
-                )]
+                    ..
+                }]
             );
 
             platform
@@ -2799,8 +2828,8 @@ mod token_mint_tests {
             assert_eq!(token_balance, None);
         }
 
-        #[test]
-        fn test_token_mint_by_owner_requires_group_other_member_submitting_after_completion_causes_error(
+        #[tokio::test]
+        async fn test_token_mint_by_owner_requires_group_other_member_submitting_after_completion_causes_error(
         ) {
             // We are using a group, and two members need to sign for the event to happen
             let platform_version = PlatformVersion::latest();
@@ -2872,6 +2901,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let token_mint_serialized_transition = token_mint_transition
@@ -2895,7 +2925,7 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -2947,6 +2977,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let confirm_token_mint_serialized_transition = confirm_token_mint_transition
@@ -2970,7 +3001,7 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -3027,6 +3058,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let confirm_token_mint_serialized_transition = confirm_token_mint_transition
@@ -3068,10 +3100,12 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [PaidConsensusError(
-                    ConsensusError::StateError(StateError::GroupActionAlreadyCompletedError(_)),
-                    _
-                )]
+                [PaidConsensusError {
+                    error: ConsensusError::StateError(
+                        StateError::GroupActionAlreadyCompletedError(_)
+                    ),
+                    ..
+                }]
             );
 
             platform
@@ -3104,8 +3138,8 @@ mod token_mint_tests {
             assert_eq!(token_balance, None);
         }
 
-        #[test]
-        fn test_token_mint_by_owner_requires_group_proposer_not_in_group() {
+        #[tokio::test]
+        async fn test_token_mint_by_owner_requires_group_proposer_not_in_group() {
             // We are using a group, and two members need to sign for the event to happen
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
@@ -3171,6 +3205,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let token_mint_serialized_transition = token_mint_transition
@@ -3194,10 +3229,10 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [PaidConsensusError(
-                    ConsensusError::StateError(StateError::IdentityNotMemberOfGroupError(_)),
-                    _
-                )]
+                [PaidConsensusError {
+                    error: ConsensusError::StateError(StateError::IdentityNotMemberOfGroupError(_)),
+                    ..
+                }]
             );
 
             platform
@@ -3219,8 +3254,8 @@ mod token_mint_tests {
             assert_eq!(token_balance, Some(100000));
         }
 
-        #[test]
-        fn test_token_mint_by_owner_requires_group_other_signer_not_part_of_group() {
+        #[tokio::test]
+        async fn test_token_mint_by_owner_requires_group_other_signer_not_part_of_group() {
             // We are using a group, and two members need to sign for the event to happen
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
@@ -3286,6 +3321,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let token_mint_serialized_transition = token_mint_transition
@@ -3309,7 +3345,7 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             platform
@@ -3361,6 +3397,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let confirm_token_mint_serialized_transition = confirm_token_mint_transition
@@ -3384,10 +3421,10 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [PaidConsensusError(
-                    ConsensusError::StateError(StateError::IdentityNotMemberOfGroupError(_)),
-                    _
-                )]
+                [PaidConsensusError {
+                    error: ConsensusError::StateError(StateError::IdentityNotMemberOfGroupError(_)),
+                    ..
+                }]
             );
 
             platform
@@ -3420,8 +3457,8 @@ mod token_mint_tests {
             assert_eq!(token_balance, None);
         }
 
-        #[test]
-        fn test_token_mint_other_signer_going_first_causes_error() {
+        #[tokio::test]
+        async fn test_token_mint_other_signer_going_first_causes_error() {
             // We are using a group, and the second member gets a bit hasty and signs first
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
@@ -3498,6 +3535,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let confirm_token_mint_serialized_transition = confirm_token_mint_transition
@@ -3521,10 +3559,10 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [PaidConsensusError(
-                    ConsensusError::StateError(StateError::GroupActionDoesNotExistError(_)),
-                    _
-                )]
+                [PaidConsensusError {
+                    error: ConsensusError::StateError(StateError::GroupActionDoesNotExistError(_)),
+                    ..
+                }]
             );
 
             platform
@@ -3557,8 +3595,8 @@ mod token_mint_tests {
             assert_eq!(token_balance, None);
         }
 
-        #[test]
-        fn test_token_mint_by_owner_does_not_require_group_but_sends_group_info() {
+        #[tokio::test]
+        async fn test_token_mint_by_owner_does_not_require_group_but_sends_group_info() {
             // We are using a group, and two members need to sign for the event to happen
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
@@ -3624,6 +3662,7 @@ mod token_mint_tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expect to create documents batch transition");
 
             let token_mint_serialized_transition = token_mint_transition
@@ -3647,10 +3686,10 @@ mod token_mint_tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [PaidConsensusError(
-                    ConsensusError::StateError(StateError::UnauthorizedTokenActionError(_)),
-                    _
-                )]
+                [PaidConsensusError {
+                    error: ConsensusError::StateError(StateError::UnauthorizedTokenActionError(_)),
+                    ..
+                }]
             );
 
             platform

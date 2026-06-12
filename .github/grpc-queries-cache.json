@@ -1,9 +1,5 @@
 {
   "known_queries": {
-    "broadcastStateTransition": {
-      "status": "excluded",
-      "reason": "Explicitly excluded as per requirement"
-    },
     "getIdentity": {
       "status": "implemented"
     },
@@ -116,10 +112,7 @@
       "status": "implemented"
     },
     "getTokenContractInfo": {
-      "status": "not_implemented"
-    },
-    "getTokenPreProgrammedDistributions": {
-      "status": "not_implemented"
+      "status": "implemented"
     },
     "getTokenPerpetualDistributionLastClaim": {
       "status": "implemented"
@@ -139,9 +132,47 @@
     "getGroupActionSigners": {
       "status": "implemented"
     },
-    "getConsensusParams": {
-      "status": "not_implemented"
+    "getAddressInfo": {
+      "status": "implemented"
+    },
+    "getAddressesBranchState": {
+      "status": "implemented"
+    },
+    "getAddressesInfos": {
+      "status": "implemented"
+    },
+    "getAddressesTrunkState": {
+      "status": "implemented"
+    },
+    "getRecentAddressBalanceChanges": {
+      "status": "implemented"
+    },
+    "getRecentCompactedAddressBalanceChanges": {
+      "status": "implemented"
+    },
+    "getShieldedEncryptedNotes": {
+      "status": "implemented"
+    },
+    "getShieldedAnchors": {
+      "status": "implemented"
+    },
+    "getMostRecentShieldedAnchor": {
+      "status": "implemented"
+    },
+    "getShieldedPoolState": {
+      "status": "implemented"
+    },
+    "getShieldedNullifiers": {
+      "status": "implemented"
+    },
+    "getDocumentHistory": {
+      "status": "implemented"
+    },
+    "getTokenPreProgrammedDistributions": {
+      "status": "implemented"
+    },
+    "getShieldedNotesCount": {
+      "status": "implemented"
     }
-  },
-  "last_updated": "2025-01-06T00:00:00Z"
+  }
 }

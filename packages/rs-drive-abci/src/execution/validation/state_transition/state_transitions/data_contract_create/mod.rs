@@ -5,13 +5,17 @@ mod state;
 
 use advanced_structure::v1::DataContractCreatedStateTransitionAdvancedStructureValidationV1;
 use basic_structure::v0::DataContractCreateStateTransitionBasicStructureValidationV0;
+use basic_structure::v1::DataContractCreateStateTransitionBasicStructureValidationV1;
+use dpp::address_funds::PlatformAddress;
 use dpp::block::block_info::BlockInfo;
 use dpp::dashcore::Network;
+use dpp::fee::Credits;
 use dpp::identity::PartialIdentity;
-use dpp::prelude::ConsensusValidationResult;
+use dpp::prelude::{AddressNonce, ConsensusValidationResult};
 use dpp::state_transition::data_contract_create_transition::DataContractCreateTransition;
 use dpp::validation::SimpleConsensusValidationResult;
 use dpp::version::PlatformVersion;
+use std::collections::BTreeMap;
 
 use drive::grovedb::TransactionArg;
 use drive::state_transition_action::StateTransitionAction;
@@ -22,16 +26,14 @@ use crate::execution::types::state_transition_execution_context::StateTransition
 
 use crate::execution::validation::state_transition::data_contract_create::advanced_structure::v0::DataContractCreatedStateTransitionAdvancedStructureValidationV0;
 use crate::execution::validation::state_transition::data_contract_create::state::v0::DataContractCreateStateTransitionStateValidationV0;
-use crate::platform_types::platform::PlatformRef;
-use crate::rpc::core::CoreRPCLike;
-
-use crate::execution::validation::state_transition::processor::v0::{
-    StateTransitionAdvancedStructureValidationV0, StateTransitionBasicStructureValidationV0,
-    StateTransitionStateValidationV0,
-};
-use crate::execution::validation::state_transition::transformer::StateTransitionActionTransformerV0;
+use crate::execution::validation::state_transition::processor::advanced_structure_without_state::StateTransitionAdvancedStructureValidationV0;
+use crate::execution::validation::state_transition::processor::basic_structure::StateTransitionBasicStructureValidationV0;
+use crate::execution::validation::state_transition::processor::state::StateTransitionStateValidation;
+use crate::execution::validation::state_transition::transformer::StateTransitionActionTransformer;
 use crate::execution::validation::state_transition::ValidationMode;
-use crate::platform_types::platform_state::v0::PlatformStateV0Methods;
+use crate::platform_types::platform::PlatformRef;
+use crate::platform_types::platform_state::PlatformStateV0Methods;
+use crate::rpc::core::CoreRPCLike;
 
 impl ValidationMode {
     /// Returns if we should validate the contract when we transform it from its serialized form
@@ -45,11 +47,14 @@ impl ValidationMode {
     }
 }
 
-impl StateTransitionActionTransformerV0 for DataContractCreateTransition {
+impl StateTransitionActionTransformer for DataContractCreateTransition {
     fn transform_into_action<C: CoreRPCLike>(
         &self,
         platform: &PlatformRef<C>,
         block_info: &BlockInfo,
+        _remaining_address_input_balances: &Option<
+            BTreeMap<PlatformAddress, (AddressNonce, Credits)>,
+        >,
         validation_mode: ValidationMode,
         execution_context: &mut StateTransitionExecutionContext,
         _tx: TransactionArg,
@@ -92,14 +97,15 @@ impl StateTransitionBasicStructureValidationV0 for DataContractCreateTransition 
             .basic_structure
         {
             Some(0) => self.validate_basic_structure_v0(network_type, platform_version),
+            Some(1) => self.validate_basic_structure_v1(network_type, platform_version),
             Some(version) => Err(Error::Execution(ExecutionError::UnknownVersionMismatch {
                 method: "data contract create transition: validate_basic_structure".to_string(),
-                known_versions: vec![0],
+                known_versions: vec![0, 1],
                 received: version,
             })),
             None => Err(Error::Execution(ExecutionError::VersionNotActive {
                 method: "data contract create transition: validate_basic_structure".to_string(),
-                known_versions: vec![0],
+                known_versions: vec![0, 1],
             })),
         }
     }
@@ -138,7 +144,7 @@ impl StateTransitionAdvancedStructureValidationV0 for DataContractCreateTransiti
     }
 }
 
-impl StateTransitionStateValidationV0 for DataContractCreateTransition {
+impl StateTransitionStateValidation for DataContractCreateTransition {
     fn validate_state<C: CoreRPCLike>(
         &self,
         _action: Option<StateTransitionAction>,
@@ -186,12 +192,13 @@ mod tests {
     use dpp::consensus::basic::BasicError;
     use dpp::consensus::ConsensusError;
     use dpp::dash_to_credits;
-    use dpp::data_contract::accessors::v0::DataContractV0Getters;
+    use dpp::data_contract::accessors::v0::{DataContractV0Getters, DataContractV0Setters};
     use dpp::data_contract::accessors::v1::DataContractV1Getters;
     use dpp::data_contract::associated_token::token_configuration::accessors::v0::TokenConfigurationV0Setters;
     use dpp::data_contract::change_control_rules::authorized_action_takers::AuthorizedActionTakers;
     use dpp::data_contract::change_control_rules::v0::ChangeControlRulesV0;
     use dpp::data_contract::change_control_rules::ChangeControlRules;
+    use dpp::data_contract::config::DataContractConfig;
     use dpp::data_contract::document_type::accessors::{
         DocumentTypeV0MutGetters, DocumentTypeV1Setters,
     };
@@ -207,6 +214,7 @@ mod tests {
     use dpp::serialization::PlatformSerializable;
     use dpp::state_transition::data_contract_create_transition::methods::DataContractCreateTransitionMethodsV0;
     use dpp::state_transition::data_contract_create_transition::DataContractCreateTransition;
+    use dpp::state_transition::StateTransition;
     use dpp::tests::json_document::json_document_to_contract_with_ids;
     use dpp::tokens::calculate_token_id;
     use dpp::tokens::gas_fees_paid_by::GasFeesPaidBy;
@@ -216,8 +224,8 @@ mod tests {
     use platform_version::version::PlatformVersion;
     use std::collections::BTreeMap;
 
-    #[test]
-    fn test_data_contract_creation_with_contested_unique_index() {
+    #[tokio::test]
+    async fn test_data_contract_creation_with_contested_unique_index() {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .build_with_mock_rpc()
@@ -227,7 +235,7 @@ mod tests {
 
         let (identity, signer, key) = setup_identity(&mut platform, 958, dash_to_credits!(2.0));
 
-        let data_contract = json_document_to_contract_with_ids(
+        let mut data_contract = json_document_to_contract_with_ids(
             "tests/supporting_files/contract/dpns/dpns-contract-contested-unique-index.json",
             None,
             None,
@@ -235,6 +243,10 @@ mod tests {
             platform_version,
         )
         .expect("expected to get json based contract");
+
+        // Upgrade config to V1 (required since protocol version 12)
+        data_contract
+            .set_config(DataContractConfig::default_for_version(platform_version).unwrap());
 
         let data_contract_create_transition = DataContractCreateTransition::new_from_data_contract(
             data_contract,
@@ -245,6 +257,7 @@ mod tests {
             platform_version,
             None,
         )
+        .await
         .expect("expect to create documents batch transition");
 
         let data_contract_create_serialized_transition = data_contract_create_transition
@@ -268,7 +281,7 @@ mod tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
         );
 
         platform
@@ -279,8 +292,153 @@ mod tests {
             .expect("expected to commit transaction");
     }
 
-    #[test]
-    fn test_data_contract_creation_with_contested_unique_index_old_version_has_low_fees() {
+    /// End-to-end regression test for the nested-property `position` chain-halt.
+    ///
+    /// A `DataContractCreate` whose document schema has a nested object property with a
+    /// zero-fraction float `position` used to panic in `insert_values_nested` during block
+    /// execution (`ValidationMode::Validator`), which would shut the node down. Driving the exact
+    /// bytes a validator processes through `process_raw_state_transitions` must now complete and
+    /// return a deterministic result without panicking.
+    #[tokio::test]
+    async fn nested_float_position_does_not_halt_block_execution() {
+        let platform_version = PlatformVersion::latest();
+        let mut platform = TestPlatformBuilder::new()
+            .build_with_mock_rpc()
+            .set_genesis_state();
+        let platform_state = platform.state.load();
+
+        let (identity, signer, key) = setup_identity(&mut platform, 9001, dash_to_credits!(2.0));
+
+        // Start from a valid contract, then overwrite its serialized document schemas with one
+        // whose nested `inner_a.position` is a float `0.0` (the float can only live in the
+        // serialized form), and re-sign so the malformed bytes are what a validator verifies and
+        // parses.
+        let mut data_contract = json_document_to_contract_with_ids(
+            "tests/supporting_files/contract/dpns/dpns-contract-contested-unique-index.json",
+            None,
+            None,
+            false,
+            platform_version,
+        )
+        .expect("expected to get json based contract");
+        data_contract
+            .set_config(DataContractConfig::default_for_version(platform_version).unwrap());
+
+        let mut state_transition = DataContractCreateTransition::new_from_data_contract(
+            data_contract,
+            1,
+            &identity.into_partial_identity_info(),
+            key.id(),
+            &signer,
+            platform_version,
+            None,
+        )
+        .await
+        .expect("expected to create data contract create transition");
+
+        let string_prop = |position: Value| {
+            Value::Map(vec![
+                (Value::Text("type".into()), Value::Text("string".into())),
+                (Value::Text("position".into()), position),
+                (Value::Text("maxLength".into()), Value::U64(10)),
+            ])
+        };
+        // outer(object, pos 0) -> { inner_a(string, position 0.0), inner_b(string, position 1) }
+        let malicious_schema = Value::Map(vec![
+            (Value::Text("type".into()), Value::Text("object".into())),
+            (
+                Value::Text("properties".into()),
+                Value::Map(vec![(
+                    Value::Text("outer".into()),
+                    Value::Map(vec![
+                        (Value::Text("type".into()), Value::Text("object".into())),
+                        (Value::Text("position".into()), Value::U64(0)),
+                        (
+                            Value::Text("properties".into()),
+                            Value::Map(vec![
+                                (
+                                    Value::Text("inner_a".into()),
+                                    string_prop(Value::Float(0.0)),
+                                ),
+                                (Value::Text("inner_b".into()), string_prop(Value::U64(1))),
+                            ]),
+                        ),
+                        (
+                            Value::Text("additionalProperties".into()),
+                            Value::Bool(false),
+                        ),
+                    ]),
+                )]),
+            ),
+            (
+                Value::Text("additionalProperties".into()),
+                Value::Bool(false),
+            ),
+        ]);
+
+        match &mut state_transition {
+            StateTransition::DataContractCreate(DataContractCreateTransition::V0(v0)) => {
+                let schemas = v0.data_contract.document_schemas_mut();
+                schemas.clear();
+                schemas.insert("note".to_string(), malicious_schema);
+            }
+            _ => panic!("expected a V0 DataContractCreate"),
+        }
+
+        state_transition
+            .sign_external(
+                &key,
+                &signer,
+                None::<
+                    fn(
+                        Identifier,
+                        String,
+                    )
+                        -> Result<dpp::identity::SecurityLevel, dpp::ProtocolError>,
+                >,
+            )
+            .await
+            .expect("expected to re-sign");
+
+        let serialized = state_transition
+            .serialize_to_bytes()
+            .expect("expected to serialize state transition");
+
+        let transaction = platform.drive.grove.start_transaction();
+
+        // This is the exact call a validator runs while executing a block. Before the fix it
+        // panicked here (node shutdown via the panic hook); it must now return without panicking.
+        let processing_result = platform
+            .platform
+            .process_raw_state_transitions(
+                &[serialized],
+                &platform_state,
+                &BlockInfo::default(),
+                &transaction,
+                platform_version,
+                false,
+                None,
+            )
+            .expect("block execution must not panic/error on a nested float position");
+
+        // The contract is accepted deterministically (the float `0.0` is a valid integer per the
+        // meta-schema and nested positions are not consensus-relevant). The point of the test is
+        // that block execution completed without the node-killing panic the old `.expect()` raised.
+        assert_matches!(
+            processing_result.execution_results().as_slice(),
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
+        );
+
+        platform
+            .drive
+            .grove
+            .commit_transaction(transaction)
+            .unwrap()
+            .expect("expected to commit transaction");
+    }
+
+    #[tokio::test]
+    async fn test_data_contract_creation_with_contested_unique_index_old_version_has_low_fees() {
         let platform_version = PlatformVersion::get(8).unwrap();
         let mut platform = TestPlatformBuilder::new()
             .with_initial_protocol_version(8)
@@ -291,7 +449,7 @@ mod tests {
 
         let (identity, signer, key) = setup_identity(&mut platform, 958, dash_to_credits!(0.1));
 
-        let data_contract = json_document_to_contract_with_ids(
+        let mut data_contract = json_document_to_contract_with_ids(
             "tests/supporting_files/contract/dpns/dpns-contract-contested-unique-index.json",
             None,
             None,
@@ -300,6 +458,10 @@ mod tests {
         )
         .expect("expected to get json based contract");
 
+        // Upgrade config to V1 (required since protocol version 12)
+        data_contract
+            .set_config(DataContractConfig::default_for_version(platform_version).unwrap());
+
         let data_contract_create_transition = DataContractCreateTransition::new_from_data_contract(
             data_contract,
             1,
@@ -309,6 +471,7 @@ mod tests {
             platform_version,
             None,
         )
+        .await
         .expect("expect to create documents batch transition");
 
         let data_contract_create_serialized_transition = data_contract_create_transition
@@ -332,7 +495,7 @@ mod tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
         );
 
         platform
@@ -343,8 +506,8 @@ mod tests {
             .expect("expected to commit transaction");
     }
 
-    #[test]
-    fn test_dpns_contract_creation_with_contract_id_non_contested() {
+    #[tokio::test]
+    async fn test_dpns_contract_creation_with_contract_id_non_contested() {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .build_with_mock_rpc()
@@ -354,7 +517,7 @@ mod tests {
 
         let (identity, signer, key) = setup_identity(&mut platform, 958, dash_to_credits!(2.0));
 
-        let data_contract = json_document_to_contract_with_ids(
+        let mut data_contract = json_document_to_contract_with_ids(
             "tests/supporting_files/contract/dpns/dpns-contract-contested-unique-index-with-contract-id.json",
             None,
             None,
@@ -363,6 +526,10 @@ mod tests {
         )
             .expect("expected to get json based contract");
 
+        // Upgrade config to V1 (required since protocol version 12)
+        data_contract
+            .set_config(DataContractConfig::default_for_version(platform_version).unwrap());
+
         let data_contract_create_transition = DataContractCreateTransition::new_from_data_contract(
             data_contract,
             1,
@@ -372,6 +539,7 @@ mod tests {
             platform_version,
             None,
         )
+        .await
         .expect("expect to create documents batch transition");
 
         let data_contract_create_serialized_transition = data_contract_create_transition
@@ -395,7 +563,7 @@ mod tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
         );
 
         platform
@@ -406,8 +574,9 @@ mod tests {
             .expect("expected to commit transaction");
     }
 
-    #[test]
-    fn test_data_contract_creation_with_contested_unique_index_and_unique_index_should_fail() {
+    #[tokio::test]
+    async fn test_data_contract_creation_with_contested_unique_index_and_unique_index_should_fail()
+    {
         let platform_version = PlatformVersion::latest();
         let mut platform = TestPlatformBuilder::new()
             .build_with_mock_rpc()
@@ -417,7 +586,7 @@ mod tests {
 
         let (identity, signer, key) = setup_identity(&mut platform, 958, dash_to_credits!(2.0));
 
-        let data_contract = json_document_to_contract_with_ids(
+        let mut data_contract = json_document_to_contract_with_ids(
             "tests/supporting_files/contract/dpns/dpns-contract-contested-unique-index-and-other-unique-index.json",
             None,
             None,
@@ -425,6 +594,10 @@ mod tests {
             platform_version,
         )
             .expect("expected to get json based contract");
+
+        // Upgrade config to V1 (required since protocol version 12)
+        data_contract
+            .set_config(DataContractConfig::default_for_version(platform_version).unwrap());
 
         let data_contract_create_transition = DataContractCreateTransition::new_from_data_contract(
             data_contract,
@@ -435,6 +608,7 @@ mod tests {
             platform_version,
             None,
         )
+        .await
         .expect("expect to create documents batch transition");
 
         let data_contract_create_serialized_transition = data_contract_create_transition
@@ -458,10 +632,12 @@ mod tests {
 
         assert_matches!(
             processing_result.execution_results().as_slice(),
-            [StateTransitionExecutionResult::PaidConsensusError(
-                ConsensusError::BasicError(BasicError::ContestedUniqueIndexWithUniqueIndexError(_)),
-                _
-            )]
+            [StateTransitionExecutionResult::PaidConsensusError {
+                error: ConsensusError::BasicError(
+                    BasicError::ContestedUniqueIndexWithUniqueIndexError(_)
+                ),
+                ..
+            }]
         );
 
         platform
@@ -484,8 +660,8 @@ mod tests {
             use dpp::data_contract::associated_token::token_perpetual_distribution::TokenPerpetualDistribution;
             use dpp::data_contract::associated_token::token_perpetual_distribution::v0::TokenPerpetualDistributionV0;
             use super::*;
-            #[test]
-            fn test_data_contract_creation_with_single_token() {
+            #[tokio::test]
+            async fn test_data_contract_creation_with_single_token() {
                 let platform_version = PlatformVersion::latest();
                 let mut platform = TestPlatformBuilder::new()
                     .build_with_mock_rpc()
@@ -532,6 +708,7 @@ mod tests {
                         platform_version,
                         None,
                     )
+                    .await
                     .expect("expect to create documents batch transition");
 
                 let data_contract_create_serialized_transition = data_contract_create_transition
@@ -555,7 +732,7 @@ mod tests {
 
                 assert_matches!(
                     processing_result.execution_results().as_slice(),
-                    [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                    [StateTransitionExecutionResult::SuccessfulExecution { .. }]
                 );
 
                 platform
@@ -577,8 +754,8 @@ mod tests {
                 assert_eq!(token_balance, None);
             }
 
-            #[test]
-            fn test_data_contract_creation_with_single_token_and_group() {
+            #[tokio::test]
+            async fn test_data_contract_creation_with_single_token_and_group() {
                 let platform_version = PlatformVersion::latest();
                 let mut platform = TestPlatformBuilder::new()
                     .build_with_mock_rpc()
@@ -660,6 +837,7 @@ mod tests {
                         platform_version,
                         None,
                     )
+                    .await
                     .expect("expect to create documents batch transition");
 
                 let data_contract_create_serialized_transition = data_contract_create_transition
@@ -683,7 +861,7 @@ mod tests {
 
                 assert_matches!(
                     processing_result.execution_results().as_slice(),
-                    [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                    [StateTransitionExecutionResult::SuccessfulExecution { .. }]
                 );
 
                 platform
@@ -705,8 +883,8 @@ mod tests {
                 assert_eq!(token_balance, None);
             }
 
-            #[test]
-            fn test_data_contract_creation_with_single_token_with_starting_balance() {
+            #[tokio::test]
+            async fn test_data_contract_creation_with_single_token_with_starting_balance() {
                 let platform_version = PlatformVersion::latest();
                 let mut platform = TestPlatformBuilder::new()
                     .build_with_mock_rpc()
@@ -751,6 +929,7 @@ mod tests {
                         platform_version,
                         None,
                     )
+                    .await
                     .expect("expect to create documents batch transition");
 
                 let token_id = calculate_token_id(data_contract_id.as_bytes(), 0);
@@ -776,7 +955,7 @@ mod tests {
 
                 assert_matches!(
                     processing_result.execution_results().as_slice(),
-                    [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                    [StateTransitionExecutionResult::SuccessfulExecution { .. }]
                 );
 
                 platform
@@ -798,8 +977,8 @@ mod tests {
                 assert_eq!(token_balance, Some(base_supply_start_amount));
             }
 
-            #[test]
-            fn test_data_contract_creation_with_single_token_setting_burn_of_internal_token_on_nft_purchase_should_be_allowed(
+            #[tokio::test]
+            async fn test_data_contract_creation_with_single_token_setting_burn_of_internal_token_on_nft_purchase_should_be_allowed(
             ) {
                 let platform_version = PlatformVersion::latest();
                 let mut platform = TestPlatformBuilder::new()
@@ -869,6 +1048,7 @@ mod tests {
                         platform_version,
                         None,
                     )
+                    .await
                     .expect("expect to create data contract create batch transition");
 
                 let data_contract_create_serialized_transition = data_contract_create_transition
@@ -892,7 +1072,7 @@ mod tests {
 
                 assert_matches!(
                     processing_result.execution_results().as_slice(),
-                    [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                    [StateTransitionExecutionResult::SuccessfulExecution { .. }]
                 );
 
                 platform
@@ -903,8 +1083,8 @@ mod tests {
                     .expect("expected to commit transaction");
             }
 
-            #[test]
-            fn test_data_contract_creation_with_single_token_setting_transfer_on_nft_purchase_with_internal_token_should_be_allowed(
+            #[tokio::test]
+            async fn test_data_contract_creation_with_single_token_setting_transfer_on_nft_purchase_with_internal_token_should_be_allowed(
             ) {
                 let platform_version = PlatformVersion::latest();
                 let mut platform = TestPlatformBuilder::new()
@@ -976,6 +1156,7 @@ mod tests {
                         platform_version,
                         None,
                     )
+                    .await
                     .expect("expect to create data contract create batch transition");
 
                 let data_contract_create_serialized_transition = data_contract_create_transition
@@ -999,7 +1180,7 @@ mod tests {
 
                 assert_matches!(
                     processing_result.execution_results().as_slice(),
-                    [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                    [StateTransitionExecutionResult::SuccessfulExecution { .. }]
                 );
 
                 platform
@@ -1010,8 +1191,9 @@ mod tests {
                     .expect("expected to commit transaction");
             }
 
-            #[test]
-            fn test_data_contract_creation_with_single_token_setting_identifier_that_does_exist() {
+            #[tokio::test]
+            async fn test_data_contract_creation_with_single_token_setting_identifier_that_does_exist(
+            ) {
                 let platform_version = PlatformVersion::latest();
                 let mut platform = TestPlatformBuilder::new()
                     .build_with_mock_rpc()
@@ -1070,6 +1252,7 @@ mod tests {
                         platform_version,
                         None,
                     )
+                    .await
                     .expect("expect to create documents batch transition");
 
                 let data_contract_create_serialized_transition = data_contract_create_transition
@@ -1093,7 +1276,7 @@ mod tests {
 
                 assert_matches!(
                     processing_result.execution_results().as_slice(),
-                    [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                    [StateTransitionExecutionResult::SuccessfulExecution { .. }]
                 );
 
                 platform
@@ -1115,8 +1298,8 @@ mod tests {
                 assert_eq!(token_balance, Some(100_000));
             }
 
-            #[test]
-            fn test_data_contract_creation_with_single_token_setting_transfer_on_nft_purchase_with_external_token_should_be_allowed(
+            #[tokio::test]
+            async fn test_data_contract_creation_with_single_token_setting_transfer_on_nft_purchase_with_external_token_should_be_allowed(
             ) {
                 let platform_version = PlatformVersion::latest();
                 let mut platform = TestPlatformBuilder::new()
@@ -1206,6 +1389,7 @@ mod tests {
                         platform_version,
                         None,
                     )
+                    .await
                     .expect("expect to create data contract create batch transition");
 
                 let data_contract_create_serialized_transition = data_contract_create_transition
@@ -1229,7 +1413,7 @@ mod tests {
 
                 assert_matches!(
                     processing_result.execution_results().as_slice(),
-                    [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                    [StateTransitionExecutionResult::SuccessfulExecution { .. }]
                 );
 
                 platform
@@ -1240,8 +1424,9 @@ mod tests {
                     .expect("expected to commit transaction");
             }
 
-            #[test]
-            fn test_data_contract_creation_with_single_token_with_valid_perpetual_distribution() {
+            #[tokio::test]
+            async fn test_data_contract_creation_with_single_token_with_valid_perpetual_distribution(
+            ) {
                 let platform_version = PlatformVersion::latest();
                 let mut platform = TestPlatformBuilder::new()
                     .build_with_mock_rpc()
@@ -1307,6 +1492,7 @@ mod tests {
                         platform_version,
                         None,
                     )
+                    .await
                     .expect("expect to create documents batch transition");
 
                 let token_id = calculate_token_id(data_contract_id.as_bytes(), 0);
@@ -1331,7 +1517,7 @@ mod tests {
                     .expect("expected to process state transition");
                 assert_matches!(
                     processing_result.execution_results().as_slice(),
-                    [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                    [StateTransitionExecutionResult::SuccessfulExecution { .. }]
                 );
 
                 platform
@@ -1360,8 +1546,8 @@ mod tests {
             use dpp::data_contract::associated_token::token_pre_programmed_distribution::TokenPreProgrammedDistribution;
             use drive::drive::Drive;
 
-            #[test]
-            fn test_data_contract_pre_programmed_distribution() {
+            #[tokio::test]
+            async fn test_data_contract_pre_programmed_distribution() {
                 let platform_version = PlatformVersion::latest();
                 let mut platform = TestPlatformBuilder::new()
                     .build_with_mock_rpc()
@@ -1446,6 +1632,7 @@ mod tests {
                         platform_version,
                         None,
                     )
+                    .await
                     .expect("expect to create documents batch transition");
 
                 let data_contract_create_serialized_transition = data_contract_create_transition
@@ -1469,7 +1656,7 @@ mod tests {
 
                 assert_matches!(
                     processing_result.execution_results().as_slice(),
-                    [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                    [StateTransitionExecutionResult::SuccessfulExecution { .. }]
                 );
 
                 platform
@@ -1543,8 +1730,8 @@ mod tests {
             use dpp::data_contract::associated_token::token_pre_programmed_distribution::TokenPreProgrammedDistribution;
             use dpp::data_contract::associated_token::token_pre_programmed_distribution::v0::TokenPreProgrammedDistributionV0;
 
-            #[test]
-            fn test_data_contract_creation_with_single_token_with_starting_balance_over_limit_should_cause_error(
+            #[tokio::test]
+            async fn test_data_contract_creation_with_single_token_with_starting_balance_over_limit_should_cause_error(
             ) {
                 let platform_version = PlatformVersion::latest();
                 let mut platform = TestPlatformBuilder::new()
@@ -1590,6 +1777,7 @@ mod tests {
                         platform_version,
                         None,
                     )
+                    .await
                     .expect("expect to create documents batch transition");
 
                 let token_id = calculate_token_id(data_contract_id.as_bytes(), 0);
@@ -1638,8 +1826,9 @@ mod tests {
                 assert_eq!(token_balance, None);
             }
 
-            #[test]
-            fn test_data_contract_creation_with_single_token_needing_group_that_does_not_exist() {
+            #[tokio::test]
+            async fn test_data_contract_creation_with_single_token_needing_group_that_does_not_exist(
+            ) {
                 let platform_version = PlatformVersion::latest();
                 let mut platform = TestPlatformBuilder::new()
                     .build_with_mock_rpc()
@@ -1703,6 +1892,7 @@ mod tests {
                         platform_version,
                         None,
                     )
+                    .await
                     .expect("expect to create documents batch transition");
 
                 let data_contract_create_serialized_transition = data_contract_create_transition
@@ -1750,8 +1940,8 @@ mod tests {
                 assert_eq!(token_balance, None);
             }
 
-            #[test]
-            fn test_data_contract_creation_with_single_token_setting_main_group_that_does_not_exist(
+            #[tokio::test]
+            async fn test_data_contract_creation_with_single_token_setting_main_group_that_does_not_exist(
             ) {
                 let platform_version = PlatformVersion::latest();
                 let mut platform = TestPlatformBuilder::new()
@@ -1817,6 +2007,7 @@ mod tests {
                         platform_version,
                         None,
                     )
+                    .await
                     .expect("expect to create documents batch transition");
 
                 let data_contract_create_serialized_transition = data_contract_create_transition
@@ -1864,8 +2055,8 @@ mod tests {
                 assert_eq!(token_balance, None);
             }
 
-            #[test]
-            fn test_data_contract_creation_with_single_token_setting_authorization_to_non_defined_main_group(
+            #[tokio::test]
+            async fn test_data_contract_creation_with_single_token_setting_authorization_to_non_defined_main_group(
             ) {
                 let platform_version = PlatformVersion::latest();
                 let mut platform = TestPlatformBuilder::new()
@@ -1930,6 +2121,7 @@ mod tests {
                         platform_version,
                         None,
                     )
+                    .await
                     .expect("expect to create documents batch transition");
 
                 let data_contract_create_serialized_transition = data_contract_create_transition
@@ -1977,8 +2169,8 @@ mod tests {
                 assert_eq!(token_balance, None);
             }
 
-            #[test]
-            fn test_data_contract_creation_with_single_token_setting_identifier_that_does_not_exist(
+            #[tokio::test]
+            async fn test_data_contract_creation_with_single_token_setting_identifier_that_does_not_exist(
             ) {
                 let platform_version = PlatformVersion::latest();
                 let mut platform = TestPlatformBuilder::new()
@@ -2035,6 +2227,7 @@ mod tests {
                         platform_version,
                         None,
                     )
+                    .await
                     .expect("expect to create documents batch transition");
 
                 let data_contract_create_serialized_transition = data_contract_create_transition
@@ -2058,12 +2251,12 @@ mod tests {
 
                 assert_matches!(
                     processing_result.execution_results().as_slice(),
-                    [StateTransitionExecutionResult::PaidConsensusError(
-                        ConsensusError::StateError(
+                    [StateTransitionExecutionResult::PaidConsensusError {
+                        error: ConsensusError::StateError(
                             StateError::IdentityInTokenConfigurationNotFoundError(_)
                         ),
-                        _
-                    )]
+                        ..
+                    }]
                 );
 
                 platform
@@ -2085,8 +2278,8 @@ mod tests {
                 assert_eq!(token_balance, None);
             }
 
-            #[test]
-            fn test_data_contract_creation_with_single_token_setting_minting_recipient_to_identity_that_does_not_exist(
+            #[tokio::test]
+            async fn test_data_contract_creation_with_single_token_setting_minting_recipient_to_identity_that_does_not_exist(
             ) {
                 let platform_version = PlatformVersion::latest();
                 let mut platform = TestPlatformBuilder::new()
@@ -2134,6 +2327,7 @@ mod tests {
                         platform_version,
                         None,
                     )
+                    .await
                     .expect("expect to create documents batch transition");
 
                 let data_contract_create_serialized_transition = data_contract_create_transition
@@ -2157,12 +2351,12 @@ mod tests {
 
                 assert_matches!(
                     processing_result.execution_results().as_slice(),
-                    [StateTransitionExecutionResult::PaidConsensusError(
-                        ConsensusError::StateError(
+                    [StateTransitionExecutionResult::PaidConsensusError {
+                        error: ConsensusError::StateError(
                             StateError::IdentityInTokenConfigurationNotFoundError(_)
                         ),
-                        _
-                    )]
+                        ..
+                    }]
                 );
 
                 platform
@@ -2184,8 +2378,8 @@ mod tests {
                 assert_eq!(token_balance, None);
             }
 
-            #[test]
-            fn test_data_contract_creation_with_single_token_setting_pre_programmed_distribution_to_identity_that_does_not_exist(
+            #[tokio::test]
+            async fn test_data_contract_creation_with_single_token_setting_pre_programmed_distribution_to_identity_that_does_not_exist(
             ) {
                 let platform_version = PlatformVersion::latest();
                 let mut platform = TestPlatformBuilder::new()
@@ -2269,6 +2463,7 @@ mod tests {
                         platform_version,
                         None,
                     )
+                    .await
                     .expect("expect to create documents batch transition");
 
                 let data_contract_create_serialized_transition = data_contract_create_transition
@@ -2292,12 +2487,12 @@ mod tests {
 
                 assert_matches!(
                     processing_result.execution_results().as_slice(),
-                    [StateTransitionExecutionResult::PaidConsensusError(
-                        ConsensusError::StateError(
+                    [StateTransitionExecutionResult::PaidConsensusError {
+                        error: ConsensusError::StateError(
                             StateError::IdentityInTokenConfigurationNotFoundError(_)
                         ),
-                        _
-                    )]
+                        ..
+                    }]
                 );
 
                 platform
@@ -2319,8 +2514,8 @@ mod tests {
                 assert_eq!(token_balance, None);
             }
 
-            #[test]
-            fn test_data_contract_creation_with_single_token_setting_burn_of_external_token_not_allowed(
+            #[tokio::test]
+            async fn test_data_contract_creation_with_single_token_setting_burn_of_external_token_not_allowed(
             ) {
                 let platform_version = PlatformVersion::latest();
                 let mut platform = TestPlatformBuilder::new()
@@ -2408,6 +2603,7 @@ mod tests {
                         platform_version,
                         None,
                     )
+                    .await
                     .expect("expect to create data contract create batch transition");
 
                 let data_contract_create_serialized_transition = data_contract_create_transition
@@ -2431,12 +2627,12 @@ mod tests {
 
                 assert_matches!(
                     processing_result.execution_results().as_slice(),
-                    [StateTransitionExecutionResult::PaidConsensusError(
-                        ConsensusError::BasicError(
+                    [StateTransitionExecutionResult::PaidConsensusError {
+                        error: ConsensusError::BasicError(
                             BasicError::TokenPaymentByBurningOnlyAllowedOnInternalTokenError(_)
                         ),
-                        _
-                    )]
+                        ..
+                    }]
                 );
 
                 platform
@@ -2447,8 +2643,8 @@ mod tests {
                     .expect("expected to commit transaction");
             }
 
-            #[test]
-            fn test_data_contract_creation_with_single_token_setting_transfer_of_external_token_that_does_not_exist(
+            #[tokio::test]
+            async fn test_data_contract_creation_with_single_token_setting_transfer_of_external_token_that_does_not_exist(
             ) {
                 let platform_version = PlatformVersion::latest();
                 let mut platform = TestPlatformBuilder::new()
@@ -2523,6 +2719,7 @@ mod tests {
                         platform_version,
                         None,
                     )
+                    .await
                     .expect("expect to create data contract create batch transition");
 
                 let data_contract_create_serialized_transition = data_contract_create_transition
@@ -2546,10 +2743,10 @@ mod tests {
 
                 assert_matches!(
                     processing_result.execution_results().as_slice(),
-                    [StateTransitionExecutionResult::PaidConsensusError(
-                        ConsensusError::StateError(StateError::DataContractNotFoundError(_)),
-                        _
-                    )]
+                    [StateTransitionExecutionResult::PaidConsensusError {
+                        error: ConsensusError::StateError(StateError::DataContractNotFoundError(_)),
+                        ..
+                    }]
                 );
 
                 platform
@@ -2560,8 +2757,8 @@ mod tests {
                     .expect("expected to commit transaction");
             }
 
-            #[test]
-            fn test_data_contract_creation_with_single_token_setting_transfer_of_external_token_that_does_not_exist_in_contract_that_does_exist(
+            #[tokio::test]
+            async fn test_data_contract_creation_with_single_token_setting_transfer_of_external_token_that_does_not_exist_in_contract_that_does_exist(
             ) {
                 let platform_version = PlatformVersion::latest();
                 let mut platform = TestPlatformBuilder::new()
@@ -2651,6 +2848,7 @@ mod tests {
                         platform_version,
                         None,
                     )
+                    .await
                     .expect("expect to create data contract create batch transition");
 
                 let data_contract_create_serialized_transition = data_contract_create_transition
@@ -2674,10 +2872,12 @@ mod tests {
 
                 assert_matches!(
                     processing_result.execution_results().as_slice(),
-                    [StateTransitionExecutionResult::PaidConsensusError(
-                        ConsensusError::StateError(StateError::InvalidTokenPositionStateError(_)),
-                        _
-                    )]
+                    [StateTransitionExecutionResult::PaidConsensusError {
+                        error: ConsensusError::StateError(
+                            StateError::InvalidTokenPositionStateError(_)
+                        ),
+                        ..
+                    }]
                 );
 
                 platform
@@ -2688,8 +2888,8 @@ mod tests {
                     .expect("expected to commit transaction");
             }
 
-            #[test]
-            fn test_data_contract_creation_with_single_token_with_invalid_perpetual_distribution_should_cause_error(
+            #[tokio::test]
+            async fn test_data_contract_creation_with_single_token_with_invalid_perpetual_distribution_should_cause_error(
             ) {
                 let platform_version = PlatformVersion::latest();
                 let mut platform = TestPlatformBuilder::new()
@@ -2756,6 +2956,7 @@ mod tests {
                         platform_version,
                         None,
                     )
+                    .await
                     .expect("expect to create documents batch transition");
 
                 let token_id = calculate_token_id(data_contract_id.as_bytes(), 0);
@@ -2806,8 +3007,8 @@ mod tests {
                 assert_eq!(token_balance, None);
             }
 
-            #[test]
-            fn test_data_contract_creation_with_single_token_with_random_perpetual_distribution_should_cause_error(
+            #[tokio::test]
+            async fn test_data_contract_creation_with_single_token_with_random_perpetual_distribution_should_cause_error(
             ) {
                 let platform_version = PlatformVersion::latest();
                 let mut platform = TestPlatformBuilder::new()
@@ -2864,6 +3065,7 @@ mod tests {
                         platform_version,
                         None,
                     )
+                    .await
                     .expect("expect to create documents batch transition");
 
                 let token_id = calculate_token_id(data_contract_id.as_bytes(), 0);
@@ -2916,8 +3118,8 @@ mod tests {
 
     mod group_errors {
         use super::*;
-        #[test]
-        fn test_data_contract_creation_with_non_contiguous_groups_should_error() {
+        #[tokio::test]
+        async fn test_data_contract_creation_with_non_contiguous_groups_should_error() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .build_with_mock_rpc()
@@ -2998,6 +3200,7 @@ mod tests {
                     platform_version,
                     None,
                 )
+                .await
                 .expect("expect to create documents batch transition");
 
             let data_contract_create_serialized_transition = data_contract_create_transition
@@ -3047,8 +3250,8 @@ mod tests {
             assert_eq!(token_balance, None);
         }
 
-        #[test]
-        fn test_data_contract_creation_with_group_with_member_with_zero_power_should_error() {
+        #[tokio::test]
+        async fn test_data_contract_creation_with_group_with_member_with_zero_power_should_error() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .build_with_mock_rpc()
@@ -3128,6 +3331,7 @@ mod tests {
                     platform_version,
                     None,
                 )
+                .await
                 .expect("expect to create documents batch transition");
 
             let data_contract_create_serialized_transition = data_contract_create_transition
@@ -3175,8 +3379,8 @@ mod tests {
             assert_eq!(token_balance, None);
         }
 
-        #[test]
-        fn test_data_contract_creation_with_group_with_single_member_should_error() {
+        #[tokio::test]
+        async fn test_data_contract_creation_with_group_with_single_member_should_error() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .build_with_mock_rpc()
@@ -3240,6 +3444,7 @@ mod tests {
                     platform_version,
                     None,
                 )
+                .await
                 .expect("expect to create documents batch transition");
 
             let data_contract_create_serialized_transition = data_contract_create_transition
@@ -3287,8 +3492,9 @@ mod tests {
             assert_eq!(token_balance, None);
         }
 
-        #[test]
-        fn test_data_contract_creation_with_group_with_member_with_too_big_power_should_error() {
+        #[tokio::test]
+        async fn test_data_contract_creation_with_group_with_member_with_too_big_power_should_error(
+        ) {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .build_with_mock_rpc()
@@ -3368,6 +3574,7 @@ mod tests {
                     platform_version,
                     None,
                 )
+                .await
                 .expect("expect to create documents batch transition");
 
             let data_contract_create_serialized_transition = data_contract_create_transition
@@ -3415,8 +3622,8 @@ mod tests {
             assert_eq!(token_balance, None);
         }
 
-        #[test]
-        fn test_data_contract_creation_with_group_with_member_with_power_over_required_should_error(
+        #[tokio::test]
+        async fn test_data_contract_creation_with_group_with_member_with_power_over_required_should_error(
         ) {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
@@ -3497,6 +3704,7 @@ mod tests {
                     platform_version,
                     None,
                 )
+                .await
                 .expect("expect to create documents batch transition");
 
             let data_contract_create_serialized_transition = data_contract_create_transition
@@ -3544,8 +3752,8 @@ mod tests {
             assert_eq!(token_balance, None);
         }
 
-        #[test]
-        fn test_dcc_group_with_member_power_not_reaching_threshold() {
+        #[tokio::test]
+        async fn test_dcc_group_with_member_power_not_reaching_threshold() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .build_with_mock_rpc()
@@ -3625,6 +3833,7 @@ mod tests {
                     platform_version,
                     None,
                 )
+                .await
                 .expect("expect to create documents batch transition");
 
             let data_contract_create_serialized_transition = data_contract_create_transition
@@ -3672,8 +3881,8 @@ mod tests {
             assert_eq!(token_balance, None);
         }
 
-        #[test]
-        fn test_dcc_group_with_non_unilateral_member_power_not_reaching_threshold() {
+        #[tokio::test]
+        async fn test_dcc_group_with_non_unilateral_member_power_not_reaching_threshold() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .build_with_mock_rpc()
@@ -3753,6 +3962,7 @@ mod tests {
                     platform_version,
                     None,
                 )
+                .await
                 .expect("expect to create documents batch transition");
 
             let data_contract_create_serialized_transition = data_contract_create_transition
@@ -3815,8 +4025,8 @@ mod tests {
             drive::document::query::QueryDocumentsOutcomeV0Methods, query::DriveDocumentQuery,
         };
 
-        #[test]
-        fn test_data_contract_creation_fails_with_more_than_fifty_keywords() {
+        #[tokio::test]
+        async fn test_data_contract_creation_fails_with_more_than_fifty_keywords() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .build_with_mock_rpc()
@@ -3865,6 +4075,7 @@ mod tests {
                     platform_version,
                     None,
                 )
+                .await
                 .expect("expect to create data contract transition");
 
             // Serialize the transition
@@ -3897,8 +4108,8 @@ mod tests {
             );
         }
 
-        #[test]
-        fn test_data_contract_creation_fails_with_duplicate_keywords() {
+        #[tokio::test]
+        async fn test_data_contract_creation_fails_with_duplicate_keywords() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .build_with_mock_rpc()
@@ -3949,6 +4160,7 @@ mod tests {
                     platform_version,
                     None,
                 )
+                .await
                 .expect("expect to create data contract transition");
 
             // Serialize the transition
@@ -3981,8 +4193,8 @@ mod tests {
             );
         }
 
-        #[test]
-        fn test_data_contract_creation_fails_with_keyword_too_short() {
+        #[tokio::test]
+        async fn test_data_contract_creation_fails_with_keyword_too_short() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .build_with_mock_rpc()
@@ -4027,6 +4239,7 @@ mod tests {
                     platform_version,
                     None,
                 )
+                .await
                 .expect("expect to create transition");
 
             // Process
@@ -4057,8 +4270,8 @@ mod tests {
             );
         }
 
-        #[test]
-        fn test_data_contract_creation_fails_with_keyword_too_long() {
+        #[tokio::test]
+        async fn test_data_contract_creation_fails_with_keyword_too_long() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .build_with_mock_rpc()
@@ -4098,6 +4311,7 @@ mod tests {
                     platform_version,
                     None,
                 )
+                .await
                 .expect("expect to create transition");
 
             let data_contract_create_serialized_transition = data_contract_create_transition
@@ -4126,8 +4340,8 @@ mod tests {
             );
         }
 
-        #[test]
-        fn test_data_contract_creation_succeeds_with_valid_keywords() {
+        #[tokio::test]
+        async fn test_data_contract_creation_succeeds_with_valid_keywords() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .build_with_mock_rpc()
@@ -4178,6 +4392,7 @@ mod tests {
                     platform_version,
                     None,
                 )
+                .await
                 .expect("expect to create data contract transition");
 
             // Serialize the transition
@@ -4204,7 +4419,7 @@ mod tests {
             // This time we expect success
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             // Commit the transaction since it's valid
@@ -4288,6 +4503,93 @@ mod tests {
                 valid_keywords_for_verification.retain(|&x| x != keyword);
             }
         }
+
+        #[test]
+        fn test_document_type_keywords_rejected_by_v1_meta_schema() {
+            use dpp::ProtocolError;
+
+            // `keywords` is a contract-level field only. The v1 document-type
+            // meta schema (active as of protocol v12) must reject it on any
+            // document type via its root-level `additionalProperties: false`.
+            // Pinned to v12 because this is the specific version that introduced
+            // v1 meta schema enforcement.
+            //
+            // No platform/identity setup: this test exercises meta-schema
+            // validation inside `DataContract::from_value`, which is a pure DPP
+            // call and never reaches Drive or the state-transition pipeline.
+            let platform_version = PlatformVersion::get(12).expect("expected v12");
+
+            let data_contract = json_document_to_contract_with_ids(
+                "tests/supporting_files/contract/keyword_test/keyword_base_contract.json",
+                None,
+                None,
+                false,
+                platform_version,
+            )
+            .expect("expected to load contract");
+
+            let mut contract_value = data_contract
+                .to_value(platform_version)
+                .expect("to_value failed");
+
+            // Inject `keywords` onto the `preorder` document type schema — the
+            // wrong place for it. This should be rejected by the v1 meta
+            // schema during `DataContract::from_value` full validation.
+            contract_value["documentSchemas"]["preorder"]["keywords"] =
+                Value::Array(vec![Value::Text("invalid".to_string())]);
+
+            let err = DataContract::from_value(contract_value, true, platform_version)
+                .expect_err("meta schema validation must reject document-type keywords");
+
+            // Assert the failure is specifically a JSON schema validation error
+            // (i.e. the meta schema rejected the unknown `keywords` property),
+            // not an unrelated error such as a serialization or structural issue.
+            match err {
+                ProtocolError::ConsensusError(consensus_err) => match *consensus_err {
+                    ConsensusError::BasicError(BasicError::JsonSchemaError(js_err)) => {
+                        // The rejection must be driven by `additionalProperties`
+                        // / `unevaluatedProperties`, and the offending property
+                        // name must be `keywords` — not just any schema error
+                        // whose summary happens to mention the string.
+                        let keyword = js_err.keyword();
+                        assert!(
+                            matches!(
+                                keyword,
+                                "additionalProperties" | "unevaluatedProperties"
+                            ),
+                            "expected additionalProperties/unevaluatedProperties rejection, got keyword={keyword:?}, summary={}",
+                            js_err.error_summary()
+                        );
+
+                        let param_key = if keyword == "additionalProperties" {
+                            "additionalProperties"
+                        } else {
+                            "unexpected"
+                        };
+                        let unexpected = js_err
+                            .params()
+                            .get(param_key)
+                            .ok()
+                            .flatten()
+                            .and_then(|v| v.as_array())
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "expected params[{param_key:?}] array, got params={:?}",
+                                    js_err.params()
+                                )
+                            });
+                        assert!(
+                            unexpected.iter().any(|v| v.as_str() == Some("keywords")),
+                            "expected `keywords` in rejected properties, got {unexpected:?}"
+                        );
+                    }
+                    other => panic!(
+                        "expected BasicError::JsonSchemaError, got ConsensusError: {other:?}"
+                    ),
+                },
+                other => panic!("expected ProtocolError::ConsensusError, got: {other:?}"),
+            }
+        }
     }
 
     mod descriptions {
@@ -4327,8 +4629,8 @@ mod tests {
             contract_value
         }
 
-        #[test]
-        fn test_data_contract_creation_fails_with_description_too_short() {
+        #[tokio::test]
+        async fn test_data_contract_creation_fails_with_description_too_short() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .build_with_mock_rpc()
@@ -4354,6 +4656,7 @@ mod tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expected to create transition");
 
             let serialized = transition
@@ -4382,8 +4685,8 @@ mod tests {
             );
         }
 
-        #[test]
-        fn test_data_contract_creation_fails_with_description_too_long() {
+        #[tokio::test]
+        async fn test_data_contract_creation_fails_with_description_too_long() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .build_with_mock_rpc()
@@ -4411,6 +4714,7 @@ mod tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expected to create transition");
 
             let serialized = transition
@@ -4439,8 +4743,8 @@ mod tests {
             );
         }
 
-        #[test]
-        fn test_data_contract_creation_succeeds_with_valid_description() {
+        #[tokio::test]
+        async fn test_data_contract_creation_succeeds_with_valid_description() {
             let platform_version = PlatformVersion::latest();
             let mut platform = TestPlatformBuilder::new()
                 .build_with_mock_rpc()
@@ -4466,6 +4770,7 @@ mod tests {
                 platform_version,
                 None,
             )
+            .await
             .expect("expected to create transition");
 
             let serialized = transition
@@ -4488,7 +4793,7 @@ mod tests {
 
             assert_matches!(
                 processing_result.execution_results().as_slice(),
-                [StateTransitionExecutionResult::SuccessfulExecution(_, _)]
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
             );
 
             // Commit so we can query the state afterward
@@ -4606,5 +4911,214 @@ mod tests {
                 data_contract_id_str
             );
         }
+    }
+
+    #[cfg(test)]
+    mod creator_id {
+        use super::*;
+        use crate::execution::validation::state_transition::tests::setup_identity;
+        use crate::test::helpers::setup::TestPlatformBuilder;
+        use assert_matches::assert_matches;
+        use dpp::block::block_info::BlockInfo;
+        use dpp::dash_to_credits;
+        use dpp::state_transition::data_contract_create_transition::DataContractCreateTransition;
+        use dpp::tests::json_document::json_document_to_contract_with_ids;
+        use platform_version::version::PlatformVersion;
+
+        #[tokio::test]
+        async fn test_data_contract_creation_with_creator_id_index() {
+            let platform_version = PlatformVersion::latest();
+            let mut platform = TestPlatformBuilder::new()
+                .build_with_mock_rpc()
+                .set_genesis_state();
+
+            let platform_state = platform.state.load();
+
+            let (identity, signer, key) = setup_identity(&mut platform, 958, dash_to_credits!(2.0));
+
+            let data_contract = json_document_to_contract_with_ids(
+                "tests/supporting_files/contract/crypto-card-game/crypto-card-game-all-transferable.json",
+                None,
+                None,
+                false, //no need to validate the data contracts in tests for drive
+                platform_version,
+            )
+                .expect("expected to get json based contract");
+
+            let data_contract_create_transition =
+                DataContractCreateTransition::new_from_data_contract(
+                    data_contract,
+                    1,
+                    &identity.into_partial_identity_info(),
+                    key.id(),
+                    &signer,
+                    platform_version,
+                    None,
+                )
+                .await
+                .expect("expect to create documents batch transition");
+
+            let data_contract_create_serialized_transition = data_contract_create_transition
+                .serialize_to_bytes()
+                .expect("expected documents batch serialized state transition");
+
+            let transaction = platform.drive.grove.start_transaction();
+
+            let processing_result = platform
+                .platform
+                .process_raw_state_transitions(
+                    &[data_contract_create_serialized_transition.clone()],
+                    &platform_state,
+                    &BlockInfo::default(),
+                    &transaction,
+                    platform_version,
+                    false,
+                    None,
+                )
+                .expect("expected to process state transition");
+
+            assert_matches!(
+                processing_result.execution_results().as_slice(),
+                [StateTransitionExecutionResult::SuccessfulExecution { .. }]
+            );
+
+            platform
+                .drive
+                .grove
+                .commit_transaction(transaction)
+                .unwrap()
+                .expect("expected to commit transaction");
+        }
+
+        #[tokio::test]
+        async fn test_data_contract_creation_with_creator_id_index_not_available_on_protocol_version_9(
+        ) {
+            let platform_version = PlatformVersion::get(9).unwrap();
+            let mut platform = TestPlatformBuilder::new()
+                .with_initial_protocol_version(9)
+                .build_with_mock_rpc()
+                .set_genesis_state();
+
+            let platform_state = platform.state.load();
+
+            let (identity, signer, key) = setup_identity(&mut platform, 958, dash_to_credits!(2.0));
+
+            let data_contract = json_document_to_contract_with_ids(
+                "tests/supporting_files/contract/crypto-card-game/crypto-card-game-all-transferable.json",
+                None,
+                None,
+                false, //no need to validate the data contracts in tests for drive
+                platform_version,
+            )
+                .expect("expected to get json based contract");
+
+            let data_contract_create_transition =
+                DataContractCreateTransition::new_from_data_contract(
+                    data_contract,
+                    1,
+                    &identity.into_partial_identity_info(),
+                    key.id(),
+                    &signer,
+                    platform_version,
+                    None,
+                )
+                .await
+                .expect("expect to create documents batch transition");
+
+            let data_contract_create_serialized_transition = data_contract_create_transition
+                .serialize_to_bytes()
+                .expect("expected documents batch serialized state transition");
+
+            let transaction = platform.drive.grove.start_transaction();
+
+            let processing_result = platform
+                .platform
+                .process_raw_state_transitions(
+                    &[data_contract_create_serialized_transition.clone()],
+                    &platform_state,
+                    &BlockInfo::default(),
+                    &transaction,
+                    platform_version,
+                    false,
+                    None,
+                )
+                .expect("expected to process state transition");
+
+            assert_matches!(
+                processing_result.execution_results().as_slice(),
+                [StateTransitionExecutionResult::PaidConsensusError {
+                    error: ConsensusError::BasicError(BasicError::UndefinedIndexPropertyError(_)),
+                    ..
+                }]
+            );
+
+            platform
+                .drive
+                .grove
+                .commit_transaction(transaction)
+                .unwrap()
+                .expect("expected to commit transaction");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_data_contract_creation_with_countable_index() {
+        let platform_version = PlatformVersion::latest();
+        let mut platform = TestPlatformBuilder::new()
+            .build_with_mock_rpc()
+            .set_genesis_state();
+
+        let platform_state = platform.state.load();
+
+        let (identity, signer, key) = setup_identity(&mut platform, 958, dash_to_credits!(2.0));
+
+        let mut data_contract = json_document_to_contract_with_ids(
+            "tests/supporting_files/contract/family/family-contract-countable.json",
+            None,
+            None,
+            false,
+            platform_version,
+        )
+        .expect("expected to get json based contract");
+
+        data_contract.set_owner_id(identity.id());
+        data_contract
+            .set_config(DataContractConfig::default_for_version(platform_version).unwrap());
+
+        let data_contract_create_transition = DataContractCreateTransition::new_from_data_contract(
+            data_contract,
+            1,
+            &identity.into_partial_identity_info(),
+            key.id(),
+            &signer,
+            platform_version,
+            None,
+        )
+        .await
+        .expect("expect to create data contract create transition");
+
+        let data_contract_create_serialized_transition = data_contract_create_transition
+            .serialize_to_bytes()
+            .expect("expected serialized state transition");
+
+        let transaction = platform.drive.grove.start_transaction();
+
+        let processing_result = platform
+            .platform
+            .process_raw_state_transitions(
+                &[data_contract_create_serialized_transition],
+                &platform_state,
+                &BlockInfo::default(),
+                &transaction,
+                platform_version,
+                false,
+                None,
+            )
+            .expect("expected to process state transition");
+
+        assert_matches!(
+            processing_result.execution_results().as_slice(),
+            [StateTransitionExecutionResult::SuccessfulExecution { .. }]
+        );
     }
 }

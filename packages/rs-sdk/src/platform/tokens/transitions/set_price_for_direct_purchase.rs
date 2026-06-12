@@ -1,4 +1,4 @@
-//! Token price setting operations for direct purchase functionality.
+//! Token price setting operations for the Dash Platform SDK.
 //!
 //! This module provides functionality to set or update pricing schedules
 //! for tokens that can be purchased directly.
@@ -60,7 +60,7 @@ impl Sdk {
     /// - The transition signing fails
     /// - Broadcasting the transition fails
     /// - The proof verification returns an unexpected result type
-    pub async fn token_set_price_for_direct_purchase<S: Signer>(
+    pub async fn token_set_price_for_direct_purchase<S: Signer<IdentityPublicKey>>(
         &self,
         set_price_transition_builder: TokenChangeDirectPurchasePriceTransitionBuilder,
         signing_key: &IdentityPublicKey,
@@ -68,12 +68,14 @@ impl Sdk {
     ) -> Result<SetPriceResult, Error> {
         let platform_version = self.version();
 
+        let put_settings = set_price_transition_builder.settings;
+
         let state_transition = set_price_transition_builder
             .sign(self, signing_key, signer, platform_version)
             .await?;
 
         let proof_result = state_transition
-            .broadcast_and_wait::<StateTransitionProofResult>(self, None)
+            .broadcast_and_wait::<StateTransitionProofResult>(self, put_settings)
             .await?;
 
         match proof_result {

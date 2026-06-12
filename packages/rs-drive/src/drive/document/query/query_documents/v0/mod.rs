@@ -6,7 +6,6 @@ use dpp::block::epoch::Epoch;
 use dpp::document::serialization_traits::DocumentPlatformConversionMethodsV0;
 use dpp::document::Document;
 use dpp::version::PlatformVersion;
-use dpp::ProtocolError;
 use grovedb::TransactionArg;
 
 /// The outcome of a query
@@ -69,7 +68,7 @@ impl Drive {
     /// # Returns
     ///
     /// * `Result<QueryDocumentsOutcome, Error>` - Returns `QueryDocumentsOutcome` on success with the list of documents,
-    ///    number of skipped items, and cost. If the operation fails, it returns an `Error`.
+    ///   number of skipped items, and cost. If the operation fails, it returns an `Error`.
     #[inline(always)]
     pub(super) fn query_documents_v0(
         &self,
@@ -93,8 +92,18 @@ impl Drive {
             .into_iter()
             .map(|serialized| {
                 Document::from_bytes(serialized.as_slice(), query.document_type, platform_version)
+                    .map_err(|e| {
+                        Error::ProtocolWithInfoString(
+                            Box::new(e),
+                            format!(
+                                "document bytes are {}, query is using contract {:?}",
+                                hex::encode(serialized),
+                                query.contract
+                            ),
+                        )
+                    })
             })
-            .collect::<Result<Vec<Document>, ProtocolError>>()?;
+            .collect::<Result<Vec<Document>, Error>>()?;
         let cost = if let Some(epoch) = epoch {
             let fee_result = Drive::calculate_fee(
                 None,
@@ -114,5 +123,127 @@ impl Drive {
             skipped,
             cost,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DriveConfig;
+    use crate::drive::document::tests::setup_dashpay;
+    use crate::query::DriveDocumentQuery;
+
+    #[test]
+    fn query_documents_v0_dry_run_returns_default() {
+        // Dry run short-circuits before touching storage.
+        let (drive, contract) = setup_dashpay("qd-v0-dry", true);
+        let platform_version = PlatformVersion::latest();
+
+        let sql = "select * from contactRequest";
+        let query =
+            DriveDocumentQuery::from_sql_expr(sql, &contract, Some(&DriveConfig::default()))
+                .expect("valid query");
+
+        let outcome = drive
+            .query_documents_v0(query, None, true, None, platform_version)
+            .expect("dry run succeeds");
+
+        assert_eq!(outcome.documents().len(), 0);
+        assert_eq!(outcome.skipped(), 0);
+        assert_eq!(outcome.cost(), 0);
+    }
+
+    #[test]
+    fn query_documents_v0_returns_empty_for_unpopulated_contract() {
+        // Contract inserted but no documents — the raw path query executes and
+        // the Document::from_bytes conversion loop runs over an empty vec.
+        let (drive, contract) = setup_dashpay("qd-v0-empty", true);
+        let platform_version = PlatformVersion::latest();
+
+        let sql = "select * from contactRequest";
+        let query =
+            DriveDocumentQuery::from_sql_expr(sql, &contract, Some(&DriveConfig::default()))
+                .expect("valid query");
+
+        let outcome = drive
+            .query_documents_v0(query, None, false, None, platform_version)
+            .expect("query succeeds");
+
+        assert!(outcome.documents().is_empty());
+        assert_eq!(outcome.cost(), 0, "no epoch => cost is 0");
+    }
+
+    #[test]
+    fn query_documents_outcome_methods_v0() {
+        // Covers the trait-method accessor branches on the concrete struct.
+        let outcome = QueryDocumentsOutcomeV0::default();
+        assert_eq!(outcome.documents().len(), 0);
+        assert_eq!(outcome.skipped(), 0);
+        assert_eq!(outcome.cost(), 0);
+        let taken: Vec<_> = outcome.documents_owned();
+        assert!(taken.is_empty());
+    }
+
+    #[test]
+    fn query_documents_v0_returns_inserted_document() {
+        // Exercises the non-dry-run path through execute_raw_results_no_proof_internal
+        // and the Document::from_bytes mapping loop.
+        use crate::util::object_size_info::DocumentInfo::DocumentRefInfo;
+        use crate::util::object_size_info::{DocumentAndContractInfo, OwnedDocumentInfo};
+        use crate::util::storage_flags::StorageFlags;
+        use dpp::block::block_info::BlockInfo;
+        use dpp::data_contract::accessors::v0::DataContractV0Getters;
+        use dpp::tests::json_document::json_document_to_document;
+
+        let (drive, contract) = setup_dashpay("qd-v0-insert", true);
+        let platform_version = PlatformVersion::latest();
+
+        let document_type = contract
+            .document_type_for_name("contactRequest")
+            .expect("contactRequest");
+
+        let owner_id = rand::random::<[u8; 32]>();
+        let document = json_document_to_document(
+            "tests/supporting_files/contract/dashpay/contact-request0.json",
+            Some(owner_id.into()),
+            document_type,
+            platform_version,
+        )
+        .expect("json doc");
+
+        drive
+            .add_document_for_contract(
+                DocumentAndContractInfo {
+                    owned_document_info: OwnedDocumentInfo {
+                        document_info: DocumentRefInfo((
+                            &document,
+                            StorageFlags::optional_default_as_cow(),
+                        )),
+                        owner_id: Some(owner_id),
+                    },
+                    contract: &contract,
+                    document_type,
+                },
+                false,
+                BlockInfo::default(),
+                true,
+                None,
+                platform_version,
+                None,
+            )
+            .expect("insert");
+
+        let sql = "select * from contactRequest";
+        let query =
+            DriveDocumentQuery::from_sql_expr(sql, &contract, Some(&DriveConfig::default()))
+                .expect("valid query");
+
+        let outcome = drive
+            .query_documents_v0(query, None, false, None, platform_version)
+            .expect("query succeeds");
+
+        // The from_bytes loop runs and produces exactly one document.
+        assert_eq!(outcome.documents().len(), 1);
+        assert_eq!(outcome.cost(), 0, "no epoch => cost stays zero");
     }
 }

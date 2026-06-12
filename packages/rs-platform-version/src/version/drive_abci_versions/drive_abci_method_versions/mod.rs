@@ -6,6 +6,8 @@ pub mod v3;
 pub mod v4;
 pub mod v5;
 pub mod v6;
+pub mod v7;
+pub mod v8;
 
 #[derive(Clone, Debug, Default)]
 pub struct DriveAbciMethodVersions {
@@ -131,6 +133,10 @@ pub struct DriveAbciBlockEndMethodVersions {
     pub update_state_cache: FeatureVersion,
     pub update_drive_cache: FeatureVersion,
     pub validator_set_update: FeatureVersion,
+    pub should_checkpoint: OptionalFeatureVersion,
+    pub update_checkpoints: OptionalFeatureVersion,
+    pub record_shielded_pool_anchor: OptionalFeatureVersion,
+    pub prune_shielded_pool_anchors: OptionalFeatureVersion,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -172,4 +178,6 @@ pub struct DriveAbciStateTransitionProcessingMethodVersions {
     pub process_raw_state_transitions: FeatureVersion,
     pub decode_raw_state_transitions: FeatureVersion,
     pub validate_fees_of_event: FeatureVersion,
+    pub store_address_balances_to_recent_block_storage: OptionalFeatureVersion,
+    pub cleanup_recent_block_storage_address_balances: OptionalFeatureVersion,
 }
