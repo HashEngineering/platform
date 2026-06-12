@@ -1016,6 +1016,16 @@ impl IndexProperty {
     pub fn from_platform_value(
         index_property_map: &[(Value, Value)],
     ) -> Result<Self, DataContractError> {
+        // The document meta-schema enforces `minProperties: 1` /
+        // `maxProperties: 1` on each index property object, but that
+        // validation is skipped in check_tx (full_validation=false), so a
+        // crafted contract can reach this point with an empty or oversized
+        // map. Guard explicitly to avoid panicking on an out-of-bounds index.
+        if index_property_map.len() != 1 {
+            return Err(DataContractError::InvalidContractStructure(
+                "index property entry must contain exactly one key/value".to_string(),
+            ));
+        }
         let property = &index_property_map[0];
 
         let key = property

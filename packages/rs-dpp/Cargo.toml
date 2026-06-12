@@ -70,9 +70,9 @@ indexmap = { version = "2.7.0", features = ["serde"] }
 strum = { version = "0.26", features = ["derive"] }
 json-schema-compatibility-validator = { path = '../rs-json-schema-compatibility-validator', optional = true }
 once_cell = "1.19.0"
-ferment-macro = { git = "https://github.com/dashpay/ferment", tag = "v0.2.3", package = "ferment-macro" }
 tracing = { version = "0.1.41" }
 grovedb-commitment-tree = { git = "https://github.com/dashpay/grovedb", rev = "fc814983d4d36c6ea049642556b9a31ab8d4dfaa", optional = true }
+ferment-macro = { git = "https://github.com/dashpay/ferment", tag = "v0.2.3", package = "ferment-macro" }
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["full"] }

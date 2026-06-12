@@ -48,3 +48,8 @@ ferment-macro = { git = "https://github.com/dashpay/ferment", tag = "v0.2.3", pa
 dpp = { path = "../rs-dpp", features = [
   "fixtures-and-mocks",
 ], default-features = false }
+
+[dev-dependencies]
+dpp = { path = "../rs-dpp", features = [
+  "fixtures-and-mocks",
+], default-features = false }
