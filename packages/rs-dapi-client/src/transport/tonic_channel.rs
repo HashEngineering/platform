@@ -24,18 +24,21 @@ pub fn create_channel(
 
     // Start with webpki roots (bundled Mozilla certificates) which work on all platforms
     // Try to add native roots only on platforms where they're available (not iOS)
-    #[cfg(not(target_os = "android"))]
     let mut tls_config = ClientTlsConfig::new()
         .with_webpki_roots()
         .assume_http2(true);
 
-    #[cfg(target_os = "android")]
-    let mut tls_config = ClientTlsConfig::new()
-        .with_webpki_roots()
-        .assume_http2(true);
 
-    // Try to add native roots - this may fail on iOS, which is fine since we have webpki roots
-    #[cfg(not(any(target_os = "ios", target_os = "tvos", target_os = "watchos")))]
+
+    // Try to add native roots - this may fail on iOS/Android, which is fine since we have
+    // webpki roots. Android has no native trust store where tonic/rustls looks, so calling
+    // with_native_roots() there yields NativeCertsNotFound and panics in tls_config() below.
+    #[cfg(not(any(
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "watchos",
+        target_os = "android"
+    )))]
     {
         tls_config = tls_config.with_native_roots();
     }
