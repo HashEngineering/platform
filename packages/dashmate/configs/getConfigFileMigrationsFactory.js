@@ -89,7 +89,7 @@ export default function getConfigFileMigrationsFactory(homeDir, defaultConfigs) 
             // Add pprof config
             options.platform.drive.tenderdash.pprof = base.get('platform.drive.tenderdash.pprof');
 
-            // Set different ports for local netwrok if exists
+            // Set different ports for local network if exists
             if (options.group === 'local') {
               options.platform.drive.tenderdash.pprof.port += i * 100;
 
@@ -1398,6 +1398,24 @@ export default function getConfigFileMigrationsFactory(homeDir, defaultConfigs) 
 
         return configFile;
       },
+      '3.0.2': (configFile) => {
+        // Patch the Platform Gateway (Envoy) image for CVE-2026-47774 /
+        // GHSA-22m2-hvr2-xqc8: an unauthenticated HTTP/2 downstream
+        // memory-exhaustion DoS. Only configs still on the EOL,
+        // dashmate-shipped 1.30.x Envoy image are bumped to the patched base
+        // default (Envoy 1.35.11); a deliberately customised image (private
+        // fork, vendor-patched build, `:latest`, etc.) is left untouched.
+        const patchedImage = base.get('platform.gateway.docker.image');
+        Object.entries(configFile.configs)
+          .forEach(([, options]) => {
+            const docker = options.platform?.gateway?.docker;
+            if (docker && /^dashpay\/envoy:1\.30\./.test(docker.image)) {
+              docker.image = patchedImage;
+            }
+          });
+
+        return configFile;
+      },
       '3.0.1': (configFile) => {
         Object.entries(configFile.configs)
           .forEach(([, options]) => {
@@ -1413,10 +1431,38 @@ export default function getConfigFileMigrationsFactory(homeDir, defaultConfigs) 
             const isLocal = options.network === NETWORK_LOCAL || name === 'local';
             const isTestnet = options.network === NETWORK_TESTNET || name === 'testnet';
 
+            // Flip `core.compactFilters` to true for every config —
+            // pre-3.1.0 configs predate the field entirely (template
+            // emitted nothing, dashcore left the cfilter index off),
+            // so a missing-or-false value here always means
+            // "inherited the old implicit-off default" rather than
+            // "user explicitly opted out". The base config now
+            // ships with this flag on; this backfill brings every
+            // already-set-up cluster up to that line so the iOS
+            // BIP157 SPV flow against `local_seed` (and any other
+            // dashmate node) works without manual editing.
+            if (options.core) {
+              options.core.compactFilters = true;
+            }
+
             if (options.platform?.drive?.tenderdash?.docker
               && defaultConfig.has('platform.drive.tenderdash.docker.image')) {
               options.platform.drive.tenderdash.docker.image = defaultConfig
                 .get('platform.drive.tenderdash.docker.image');
+            }
+
+            // Backfill the new `buildArgs: {}` field on each build block —
+            // forwarded into `dynamic-compose.yml` as `build.args` entries.
+            // Pre-3.1.0 configs predate the field; default it to an empty
+            // object when missing (idempotent: existing values are preserved).
+            if (options.platform?.drive?.abci?.docker?.build
+              && typeof options.platform.drive.abci.docker.build.buildArgs === 'undefined') {
+              options.platform.drive.abci.docker.build.buildArgs = {};
+            }
+
+            if (options.platform?.dapi?.rsDapi?.docker?.build
+              && typeof options.platform.dapi.rsDapi.docker.build.buildArgs === 'undefined') {
+              options.platform.dapi.rsDapi.docker.build.buildArgs = {};
             }
 
             if (options.platform?.drive?.tenderdash?.p2p

@@ -12,7 +12,15 @@ use crate::version::drive_abci_versions::drive_abci_method_versions::{
     DriveAbciVotingMethodVersions,
 };
 
-// Introduced in Protocol version 11 (3.0.0) for checkpoints
+// Introduced in Protocol version 11 (3.0.0) for checkpoints.
+//
+// The shielded-pool block-processing methods (`record_shielded_pool_anchor`,
+// `prune_shielded_pool_anchors`) are deliberately `None` here: they read the
+// shielded credit pool subtree `[ShieldedBalances (52), "M"]`, which is only
+// created from protocol v12 onward. Activating them on a v11 state opens a
+// subtree that does not exist and panics consensus with
+// "path parent layer not found: could not get key 4d for parent [52]".
+// The shielded activation lives in DRIVE_ABCI_METHOD_VERSIONS_V8 (protocol v12).
 pub const DRIVE_ABCI_METHOD_VERSIONS_V7: DriveAbciMethodVersions = DriveAbciMethodVersions {
     engine: DriveAbciEngineMethodVersions {
         init_chain: 0,
@@ -122,6 +130,10 @@ pub const DRIVE_ABCI_METHOD_VERSIONS_V7: DriveAbciMethodVersions = DriveAbciMeth
         validator_set_update: 2,
         should_checkpoint: Some(0),
         update_checkpoints: Some(0),
+        // Shielded-pool anchor methods gated to v12 (DRIVE_ABCI_METHOD_VERSIONS_V8);
+        // the `[52, "M"]` subtree they read does not exist on v11.
+        record_shielded_pool_anchor: None,
+        prune_shielded_pool_anchors: None,
     },
     platform_state_storage: DriveAbciPlatformStateStorageMethodVersions {
         fetch_platform_state: 0,

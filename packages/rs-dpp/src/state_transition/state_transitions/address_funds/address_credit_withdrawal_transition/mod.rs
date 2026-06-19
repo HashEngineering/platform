@@ -2,7 +2,7 @@ use crate::state_transition::address_credit_withdrawal_transition::v0::AddressCr
 
 pub mod accessors;
 pub mod fields;
-#[cfg(feature = "state-transition-json-conversion")]
+#[cfg(feature = "json-conversion")]
 mod json_conversion;
 pub mod methods;
 mod state_transition_estimated_fee_validation;
@@ -10,7 +10,7 @@ mod state_transition_fee_strategy;
 mod state_transition_like;
 mod state_transition_validation;
 pub mod v0;
-#[cfg(feature = "state-transition-value-conversion")]
+#[cfg(feature = "value-conversion")]
 mod value_conversion;
 mod version;
 
@@ -26,15 +26,27 @@ use fields::*;
 use platform_serialization_derive::{PlatformDeserialize, PlatformSerialize, PlatformSignable};
 use platform_version::version::PlatformVersion;
 use platform_versioning::PlatformVersioned;
-#[cfg(feature = "state-transition-serde-conversion")]
+#[cfg(feature = "serde-conversion")]
 use serde::{Deserialize, Serialize};
 
 /// Minimal core per byte. Must be a fibonacci number
 pub const MIN_CORE_FEE_PER_BYTE: u32 = 1;
 
-/// Minimal amount in credits (x1000) to avoid "dust" error in Core
+/// Minimal amount in credits (x1000) to avoid "dust" error in Core.
+///
+/// NOTE: This is the protocol-v11-and-below floor (190 duffs). Consensus reads the
+/// *versioned* `platform_version.system_limits.min_withdrawal_amount` (raised to 1000 duffs
+/// in v12); keep `SYSTEM_LIMITS_V1.min_withdrawal_amount` in sync with this value.
 pub const MIN_WITHDRAWAL_AMOUNT: u64 =
     (ASSET_UNLOCK_TX_SIZE as u64) * (MIN_CORE_FEE_PER_BYTE as u64) * CREDITS_PER_DUFF;
+
+// Compile-time lock: if a dashcore `ASSET_UNLOCK_TX_SIZE` (or fee-rate) change moves this
+// value, the build breaks here — a prompt to re-sync `SYSTEM_LIMITS_V1.min_withdrawal_amount`
+// (the consensus source of truth) with the new figure.
+const _: () = assert!(
+    MIN_WITHDRAWAL_AMOUNT == 190_000,
+    "MIN_WITHDRAWAL_AMOUNT changed; re-sync SYSTEM_LIMITS_V1.min_withdrawal_amount"
+);
 
 #[derive(
     Debug,
@@ -49,16 +61,16 @@ pub const MIN_WITHDRAWAL_AMOUNT: u64 =
     PartialEq,
 )]
 #[cfg_attr(
-    feature = "state-transition-serde-conversion",
+    feature = "serde-conversion",
     derive(Serialize, Deserialize),
-    serde(tag = "$version")
+    serde(tag = "$formatVersion")
 )]
 #[platform_serialize(unversioned)] //versioned directly, no need to use platform_version
 #[platform_version_path(
     "dpp.state_transition_serialization_versions.address_credit_withdrawal_state_transition"
 )]
 pub enum AddressCreditWithdrawalTransition {
-    #[cfg_attr(feature = "state-transition-serde-conversion", serde(rename = "0"))]
+    #[cfg_attr(feature = "serde-conversion", serde(rename = "0"))]
     V0(AddressCreditWithdrawalTransitionV0),
 }
 

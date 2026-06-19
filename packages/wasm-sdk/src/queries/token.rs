@@ -89,6 +89,7 @@ impl From<RewardDistributionMoment> for RewardDistributionMomentWasm {
     }
 }
 
+#[dpp_json_convertible_derive::json_safe_fields(crate = "dash_sdk::dpp")]
 #[wasm_bindgen(js_name = "TokenTotalSupply")]
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -244,7 +245,7 @@ impl WasmSdk {
 
     #[wasm_bindgen(
         js_name = "getIdentitiesTokenBalances",
-        unchecked_return_type = "Map<Identifier, bigint>"
+        unchecked_return_type = "Map<string, bigint>"
     )]
     pub async fn get_identities_token_balances(
         &self,
@@ -276,7 +277,7 @@ impl WasmSdk {
         let balances_map = Map::new();
         for identifier in &identities {
             if let Some(Some(balance)) = balances_result.get(identifier) {
-                let key = JsValue::from(IdentifierWasm::from(*identifier));
+                let key: JsValue = IdentifierWasm::from(*identifier).to_base58().into();
                 let value = JsValue::from(BigInt::from(*balance));
                 balances_map.set(&key, &value);
             }
@@ -287,7 +288,7 @@ impl WasmSdk {
 
     #[wasm_bindgen(
         js_name = "getIdentityTokenInfos",
-        unchecked_return_type = "Map<Identifier, IdentityTokenInfo>"
+        unchecked_return_type = "Map<string, IdentityTokenInfo>"
     )]
     pub async fn get_identity_token_infos(
         &self,
@@ -320,7 +321,7 @@ impl WasmSdk {
         for token in tokens {
             if let Some(Some(info)) = infos_result.get(&token) {
                 let info_wasm = IdentityTokenInfoWasm::from(info.clone());
-                let key = JsValue::from(IdentifierWasm::from(token));
+                let key: JsValue = IdentifierWasm::from(token).to_base58().into();
                 let value = JsValue::from(info_wasm);
                 infos_map.set(&key, &value);
             }
@@ -331,7 +332,7 @@ impl WasmSdk {
 
     #[wasm_bindgen(
         js_name = "getIdentitiesTokenInfos",
-        unchecked_return_type = "Map<Identifier, IdentityTokenInfo>"
+        unchecked_return_type = "Map<string, IdentityTokenInfo>"
     )]
     pub async fn get_identities_token_infos(
         &self,
@@ -364,7 +365,7 @@ impl WasmSdk {
         for identity in identities {
             if let Some(Some(info)) = infos_result.get(&identity) {
                 let info_wasm = IdentityTokenInfoWasm::from(info.clone());
-                let key = JsValue::from(IdentifierWasm::from(identity));
+                let key: JsValue = IdentifierWasm::from(identity).to_base58().into();
                 let value = JsValue::from(info_wasm);
                 infos_map.set(&key, &value);
             }
@@ -375,7 +376,7 @@ impl WasmSdk {
 
     #[wasm_bindgen(
         js_name = "getTokenStatuses",
-        unchecked_return_type = "Map<Identifier, TokenStatus>"
+        unchecked_return_type = "Map<string, TokenStatus>"
     )]
     pub async fn get_token_statuses(
         &self,
@@ -394,7 +395,7 @@ impl WasmSdk {
         let statuses_map = Map::new();
         for token in tokens {
             if let Some(Some(status)) = statuses_result.get(&token) {
-                let key = JsValue::from(IdentifierWasm::from(token));
+                let key: JsValue = IdentifierWasm::from(token).to_base58().into();
                 let value = JsValue::from(TokenStatusWasm::from(status.clone()));
                 statuses_map.set(&key, &value);
             }
@@ -405,7 +406,7 @@ impl WasmSdk {
 
     #[wasm_bindgen(
         js_name = "getTokenDirectPurchasePrices",
-        unchecked_return_type = "Map<Identifier, TokenPriceInfo>"
+        unchecked_return_type = "Map<string, TokenPriceInfo>"
     )]
     pub async fn get_token_direct_purchase_prices(
         &self,
@@ -447,7 +448,7 @@ impl WasmSdk {
 
                 let price_info = TokenPriceInfoWasm::new(token_id_wasm, current_price, base_price);
 
-                let key = JsValue::from(token_id_wasm);
+                let key: JsValue = token_id_wasm.to_base58().into();
                 let value = JsValue::from(price_info);
                 prices_map.set(&key, &value);
             }
@@ -456,21 +457,40 @@ impl WasmSdk {
         Ok(prices_map)
     }
 
+    /// Fetches the contract info for a token (the data contract that defines it
+    /// and the token's position within that contract).
+    ///
+    /// This query is keyed by **token ID**, not by data contract ID. A token ID
+    /// is derived from a data contract ID and the token's position via
+    /// `calculateTokenIdFromContract`. Passing a data contract ID here will not
+    /// match any record and resolves to `undefined`.
+    ///
+    /// # Arguments
+    /// * `token_id` - The token ID in base58 format
+    ///
+    /// # Returns
+    /// The token's contract info, or `undefined` if no token with that ID exists.
+    ///
+    /// # Example
+    /// ```javascript
+    /// const tokenId = WasmSdk.calculateTokenIdFromContract("Hqyu8WcRwXCTwbNxdga4CN5gsVEGc67wng4TFzceyLUv", 0);
+    /// const info = await sdk.getTokenContractInfo(tokenId);
+    /// ```
     #[wasm_bindgen(js_name = "getTokenContractInfo")]
     pub async fn get_token_contract_info(
         &self,
-        #[wasm_bindgen(js_name = "dataContractId")] data_contract_id: IdentifierLikeJs,
+        #[wasm_bindgen(js_name = "tokenId")] token_id: IdentifierLikeJs,
     ) -> Result<Option<TokenContractInfoWasm>, WasmSdkError> {
         use dash_sdk::dpp::tokens::contract_info::TokenContractInfo;
         use dash_sdk::platform::Fetch;
 
-        // Parse contract ID
-        let contract_id: Identifier = data_contract_id.try_into().map_err(|err| {
-            WasmSdkError::invalid_argument(format!("Invalid contract ID: {}", err))
-        })?;
+        // Parse token ID
+        let token_id: Identifier = token_id
+            .try_into()
+            .map_err(|err| WasmSdkError::invalid_argument(format!("Invalid token ID: {}", err)))?;
 
         // Fetch token contract info
-        let info_result = TokenContractInfo::fetch(self.as_ref(), contract_id).await?;
+        let info_result = TokenContractInfo::fetch(self.as_ref(), token_id).await?;
 
         Ok(info_result.map(TokenContractInfoWasm::from))
     }
@@ -527,7 +547,7 @@ impl WasmSdk {
 
     #[wasm_bindgen(
         js_name = "getIdentitiesTokenBalancesWithProofInfo",
-        unchecked_return_type = "ProofMetadataResponseTyped<Map<Identifier, bigint>>"
+        unchecked_return_type = "ProofMetadataResponseTyped<Map<string, bigint>>"
     )]
     pub async fn get_identities_token_balances_with_proof_info(
         &self,
@@ -561,7 +581,7 @@ impl WasmSdk {
         let balances_map = Map::new();
         for identifier in &identities {
             if let Some(Some(balance)) = balances_result.get(identifier) {
-                let key = JsValue::from(IdentifierWasm::from(*identifier));
+                let key: JsValue = IdentifierWasm::from(*identifier).to_base58().into();
                 let value = JsValue::from(BigInt::from(*balance));
                 balances_map.set(&key, &value);
             }
@@ -576,7 +596,7 @@ impl WasmSdk {
 
     #[wasm_bindgen(
         js_name = "getTokenStatusesWithProofInfo",
-        unchecked_return_type = "ProofMetadataResponseTyped<Map<Identifier, TokenStatus>>"
+        unchecked_return_type = "ProofMetadataResponseTyped<Map<string, TokenStatus>>"
     )]
     pub async fn get_token_statuses_with_proof_info(
         &self,
@@ -594,7 +614,7 @@ impl WasmSdk {
         let statuses_map = Map::new();
         for token in tokens {
             if let Some(Some(status)) = statuses_result.get(&token) {
-                let key = JsValue::from(IdentifierWasm::from(token));
+                let key: JsValue = IdentifierWasm::from(token).to_base58().into();
                 let value = JsValue::from(TokenStatusWasm::from(status.clone()));
                 statuses_map.set(&key, &value);
             }
@@ -645,7 +665,7 @@ impl WasmSdk {
 
     #[wasm_bindgen(
         js_name = "getIdentityTokenInfosWithProofInfo",
-        unchecked_return_type = "ProofMetadataResponseTyped<Map<Identifier, IdentityTokenInfo>>"
+        unchecked_return_type = "ProofMetadataResponseTyped<Map<string, IdentityTokenInfo>>"
     )]
     pub async fn get_identity_token_infos_with_proof_info(
         &self,
@@ -679,7 +699,7 @@ impl WasmSdk {
         for token in tokens {
             if let Some(Some(info)) = infos_result.get(&token) {
                 let info_wasm = IdentityTokenInfoWasm::from(info.clone());
-                let key = JsValue::from(IdentifierWasm::from(token));
+                let key: JsValue = IdentifierWasm::from(token).to_base58().into();
                 let value = JsValue::from(info_wasm);
                 infos_map.set(&key, &value);
             }
@@ -692,7 +712,7 @@ impl WasmSdk {
 
     #[wasm_bindgen(
         js_name = "getIdentitiesTokenInfosWithProofInfo",
-        unchecked_return_type = "ProofMetadataResponseTyped<Map<Identifier, IdentityTokenInfo>>"
+        unchecked_return_type = "ProofMetadataResponseTyped<Map<string, IdentityTokenInfo>>"
     )]
     pub async fn get_identities_token_infos_with_proof_info(
         &self,
@@ -726,7 +746,7 @@ impl WasmSdk {
         for identity in identities {
             if let Some(Some(info)) = infos_result.get(&identity) {
                 let info_wasm = IdentityTokenInfoWasm::from(info.clone());
-                let key = JsValue::from(IdentifierWasm::from(identity));
+                let key: JsValue = IdentifierWasm::from(identity).to_base58().into();
                 let value = JsValue::from(info_wasm);
                 infos_map.set(&key, &value);
             }
@@ -739,7 +759,7 @@ impl WasmSdk {
 
     #[wasm_bindgen(
         js_name = "getTokenDirectPurchasePricesWithProofInfo",
-        unchecked_return_type = "ProofMetadataResponseTyped<Map<Identifier, TokenPriceInfo>>"
+        unchecked_return_type = "ProofMetadataResponseTyped<Map<string, TokenPriceInfo>>"
     )]
     pub async fn get_token_direct_purchase_prices_with_proof_info(
         &self,
@@ -785,7 +805,7 @@ impl WasmSdk {
 
                 let price_info = TokenPriceInfoWasm::new(token_id_wasm, current_price, base_price);
 
-                let key = JsValue::from(token_id_wasm);
+                let key: JsValue = token_id_wasm.to_base58().into();
                 let value = JsValue::from(price_info);
                 prices_map.set(&key, &value);
             }
@@ -796,26 +816,37 @@ impl WasmSdk {
         ))
     }
 
+    /// Fetches the contract info for a token, with cryptographic proof.
+    ///
+    /// This query is keyed by **token ID**, not by data contract ID. A token ID
+    /// is derived from a data contract ID and the token's position via
+    /// `calculateTokenIdFromContract`. Passing a data contract ID here will not
+    /// match any record and resolves to `undefined`.
+    ///
+    /// # Arguments
+    /// * `token_id` - The token ID in base58 format
+    ///
+    /// # Returns
+    /// The token's contract info (or `undefined`) along with proof metadata.
     #[wasm_bindgen(
         js_name = "getTokenContractInfoWithProofInfo",
         unchecked_return_type = "ProofMetadataResponseTyped<TokenContractInfo | undefined>"
     )]
     pub async fn get_token_contract_info_with_proof_info(
         &self,
-        #[wasm_bindgen(js_name = "dataContractId")] data_contract_id: IdentifierLikeJs,
+        #[wasm_bindgen(js_name = "tokenId")] token_id: IdentifierLikeJs,
     ) -> Result<ProofMetadataResponseWasm, WasmSdkError> {
         use dash_sdk::dpp::tokens::contract_info::TokenContractInfo;
         use dash_sdk::platform::Fetch;
 
-        // Parse contract ID
-        let contract_id: Identifier = data_contract_id.try_into().map_err(|err| {
-            WasmSdkError::invalid_argument(format!("Invalid contract ID: {}", err))
-        })?;
+        // Parse token ID
+        let token_id: Identifier = token_id
+            .try_into()
+            .map_err(|err| WasmSdkError::invalid_argument(format!("Invalid token ID: {}", err)))?;
 
         // Fetch token contract info with proof
         let (info_result, metadata, proof) =
-            TokenContractInfo::fetch_with_metadata_and_proof(self.as_ref(), contract_id, None)
-                .await?;
+            TokenContractInfo::fetch_with_metadata_and_proof(self.as_ref(), token_id, None).await?;
 
         let data = info_result
             .map(|info| JsValue::from(TokenContractInfoWasm::from(info)))

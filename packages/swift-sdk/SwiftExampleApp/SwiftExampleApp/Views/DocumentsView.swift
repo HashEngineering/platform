@@ -1,15 +1,21 @@
 import SwiftUI
+import SwiftData
 import SwiftDashSDK
 
 struct DocumentsView: View {
     @EnvironmentObject var appState: AppState
+    @EnvironmentObject var walletManager: PlatformWalletManager
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \PersistentDocument.createdAt, order: .reverse)
+    private var documents: [PersistentDocument]
+
     @State private var showingCreateDocument = false
-    @State private var selectedDocument: DocumentModel?
-    
+    @State private var selectedDocument: PersistentDocument?
+
     var body: some View {
         NavigationView {
             List {
-                if appState.documents.isEmpty {
+                if documents.isEmpty {
                     EmptyStateView(
                         systemImage: "doc.text",
                         title: "No Documents",
@@ -17,7 +23,7 @@ struct DocumentsView: View {
                     )
                     .listRowBackground(Color.clear)
                 } else {
-                    ForEach(appState.documents) { document in
+                    ForEach(documents) { document in
                         DocumentRow(document: document) {
                             selectedDocument = document
                         }
@@ -38,64 +44,27 @@ struct DocumentsView: View {
             .sheet(isPresented: $showingCreateDocument) {
                 CreateDocumentView()
                     .environmentObject(appState)
+                    .environmentObject(walletManager)
             }
             .sheet(item: $selectedDocument) { document in
                 DocumentDetailView(document: document)
             }
-            .onAppear {
-                if appState.documents.isEmpty {
-                    loadSampleDocuments()
-                }
-            }
         }
     }
-    
-    private func loadSampleDocuments() {
-        // Add sample documents for demonstration
-        appState.documents = [
-            DocumentModel(
-                id: "doc1",
-                contractId: "dpns-contract",
-                documentType: "domain",
-                ownerId: Data(hexString: "1111111111111111111111111111111111111111111111111111111111111111")!,
-                data: [
-                    "label": "alice",
-                    "normalizedLabel": "alice",
-                    "normalizedParentDomainName": "dash"
-                ],
-                createdAt: Date(),
-                updatedAt: Date()
-            ),
-            DocumentModel(
-                id: "doc2",
-                contractId: "dashpay-contract",
-                documentType: "profile",
-                ownerId: Data(hexString: "2222222222222222222222222222222222222222222222222222222222222222")!,
-                data: [
-                    "displayName": "Bob",
-                    "publicMessage": "Hello from Bob!"
-                ],
-                createdAt: Date(),
-                updatedAt: Date()
-            )
-        ]
-    }
-    
+
     private func deleteDocuments(at offsets: IndexSet) {
-        for index in offsets {
-            if index < appState.documents.count {
-                let document = appState.documents[index]
-                // In a real app, we would delete the document
-                appState.documents.removeAll { $0.id == document.id }
-            }
+        for index in offsets where index < documents.count {
+            let document = documents[index]
+            document.markAsDeleted()
         }
+        try? modelContext.save()
     }
 }
 
 struct DocumentRow: View {
-    let document: DocumentModel
+    let document: PersistentDocument
     let onTap: () -> Void
-    
+
     var body: some View {
         Button(action: onTap) {
             VStack(alignment: .leading, spacing: 4) {
@@ -104,25 +73,23 @@ struct DocumentRow: View {
                         .font(.headline)
                         .foregroundColor(.primary)
                     Spacer()
-                    Text(document.contractId)
+                    Text(document.contractIdBase58)
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .frame(maxWidth: 100)
                 }
-                
-                Text("Owner: \(document.ownerIdString)")
+
+                Text("Owner: \(document.ownerIdBase58)")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                
-                if let createdAt = document.createdAt {
-                    Text("Created: \(createdAt, formatter: dateFormatter)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
+
+                Text("Created: \(document.createdAt, formatter: dateFormatter)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
             .padding(.vertical, 4)
         }
@@ -131,9 +98,9 @@ struct DocumentRow: View {
 }
 
 struct DocumentDetailView: View {
-    let document: DocumentModel
+    let document: PersistentDocument
     @Environment(\.dismiss) var dismiss
-    
+
     var body: some View {
         NavigationView {
             ScrollView {
@@ -141,29 +108,23 @@ struct DocumentDetailView: View {
                     Section {
                         VStack(alignment: .leading, spacing: 8) {
                             DetailRow(label: "Document Type", value: document.documentType)
-                            DetailRow(label: "Document ID", value: document.id)
-                            DetailRow(label: "Contract ID", value: document.contractId)
-                            DetailRow(label: "Owner ID", value: document.ownerIdString)
-                            
-                            if let createdAt = document.createdAt {
-                                DetailRow(label: "Created", value: createdAt.formatted())
-                            }
-                            
-                            if let updatedAt = document.updatedAt {
-                                DetailRow(label: "Updated", value: updatedAt.formatted())
-                            }
+                            DetailRow(label: "Document ID", value: document.documentId)
+                            DetailRow(label: "Contract ID", value: document.contractIdBase58)
+                            DetailRow(label: "Owner ID", value: document.ownerIdBase58)
+                            DetailRow(label: "Created", value: AppDate.formatted(document.createdAt))
+                            DetailRow(label: "Updated", value: AppDate.formatted(document.updatedAt))
                         }
                         .padding()
                         .background(Color.gray.opacity(0.1))
                         .cornerRadius(10)
                     }
-                    
+
                     Section {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Document Data")
                                 .font(.headline)
-                            
-                            Text(document.formattedData)
+
+                            Text(formattedProperties(document.properties))
                                 .font(.system(.caption, design: .monospaced))
                                 .padding()
                                 .background(Color.gray.opacity(0.1))
@@ -184,176 +145,478 @@ struct DocumentDetailView: View {
             }
         }
     }
+
+    private func formattedProperties(_ properties: [String: Any]?) -> String {
+        guard let properties = properties else { return "No data" }
+        guard let jsonData = try? JSONSerialization.data(
+            withJSONObject: properties,
+            options: .prettyPrinted
+        ), let text = String(data: jsonData, encoding: .utf8) else {
+            return properties.map { "\($0.key): \($0.value)" }.joined(separator: "\n")
+        }
+        return text
+    }
 }
 
+/// Production "Create Document" flow.
+///
+/// Renders the document type's schema fields (via `DocumentFieldsView`),
+/// picks an owner identity, and broadcasts a real document state
+/// transition through `ManagedPlatformWallet.createDocument(...)` — which
+/// routes to `platform_wallet_create_document_with_signer` and the
+/// `platform-wallet` library's `create_document_with_signer`. The
+/// signing key is selected and used entirely on the Rust side via the
+/// wallet's keychain-backed `KeychainSigner`; this view only collects
+/// values, marshals them to a properties JSON string, calls the wrapper,
+/// and persists the confirmed `PersistentDocument`.
+///
+/// This is distinct from the Settings builder/test-signer path
+/// (`documentCreate(...)` in `StateTransitionExtensions`).
+///
+/// Launchable two ways:
+///   - From `DocumentTypeDetailsView` with `presetDocumentType` set
+///     (contract + type fixed, schema already in scope).
+///   - From the Documents tab "+" with no preset (the user picks a
+///     contract + document type first).
 struct CreateDocumentView: View {
+    /// When set, the contract + document type are fixed to this row and
+    /// the pickers are hidden. When nil, the user selects them.
+    let presetDocumentType: PersistentDocumentType?
+
     @EnvironmentObject var appState: AppState
+    @EnvironmentObject var walletManager: PlatformWalletManager
+    @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) var dismiss
-    @State private var selectedContract: ContractModel?
-    @State private var selectedDocumentType = ""
+
+    @Query private var contracts: [PersistentDataContract]
+    @Query private var identities: [PersistentIdentity]
+
+    @State private var selectedContract: PersistentDataContract?
+    @State private var selectedDocumentTypeName = ""
+    /// Owner identity id (base58). Drives the AccessiblePicker selection.
     @State private var selectedOwnerId: String = ""
-    @State private var dataKeyToAdd = ""
-    @State private var dataValueToAdd = ""
-    @State private var documentData: [String: Any] = [:]
-    @State private var isLoading = false
-    
+
+    /// Field values produced by `DocumentFieldsView`. Byte-array fields
+    /// arrive as `Data`, identifier fields as `Data`, scalars as
+    /// `Int`/`Double`/`Bool`/`String`, arrays as `[String]`.
+    @State private var fieldValues: [String: Any] = [:]
+
+    @State private var isSubmitting = false
+    @State private var submitError: SubmitError?
+    @State private var didComplete = false
+    @State private var createdDocumentId: String?
+    /// Set when the broadcast succeeded but writing the local SwiftData
+    /// row failed — the document is on-chain, just not cached locally yet.
+    @State private var persistWarning: String?
+
+    init(presetDocumentType: PersistentDocumentType? = nil) {
+        self.presetDocumentType = presetDocumentType
+    }
+
+    private struct SubmitError: Identifiable {
+        let id = UUID()
+        let message: String
+    }
+
     var body: some View {
-        NavigationView {
+        NavigationStack {
             Form {
-                Section(header: Text("Document Configuration")) {
-                    Picker("Contract", selection: $selectedContract) {
-                        Text("Select a contract").tag(nil as ContractModel?)
-                        ForEach(appState.contracts) { contract in
-                            Text(contract.name).tag(contract as ContractModel?)
-                        }
+                if didComplete {
+                    successSection
+                } else {
+                    if presetDocumentType == nil {
+                        selectionSection
+                    } else {
+                        presetSection
                     }
-                    
-                    if let contract = selectedContract {
-                        Picker("Document Type", selection: $selectedDocumentType) {
-                            Text("Select type").tag("")
-                            ForEach(contract.documentTypes, id: \.self) { type in
-                                Text(type).tag(type)
-                            }
-                        }
+                    ownerSection
+                    if let docType = resolvedDocumentType {
+                        schemaSection(for: docType)
                     }
-                    
-                    Picker("Owner", selection: $selectedOwnerId) {
-                        Text("Select owner").tag("")
-                        ForEach(appState.identities) { identity in
-                            Text(identity.alias ?? identity.idString)
-                                .tag(identity.idString)
-                        }
-                    }
-                }
-                
-                Section("Document Data") {
-                    ForEach(Array(documentData.keys), id: \.self) { key in
-                        HStack {
-                            Text(key)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            Spacer()
-                            Text("\(String(describing: documentData[key] ?? ""))")
-                                .font(.subheadline)
-                        }
-                    }
-                    
-                    HStack {
-                        TextField("Key", text: $dataKeyToAdd)
-                            .textFieldStyle(RoundedBorderTextFieldStyle())
-                        TextField("Value", text: $dataValueToAdd)
-                            .textFieldStyle(RoundedBorderTextFieldStyle())
-                        Button("Add") {
-                            if !dataKeyToAdd.isEmpty && !dataValueToAdd.isEmpty {
-                                documentData[dataKeyToAdd] = dataValueToAdd
-                                dataKeyToAdd = ""
-                                dataValueToAdd = ""
-                            }
-                        }
-                    }
+                    submitSection
                 }
             }
-            .navigationTitle("Create Document")
+            .navigationTitle("New Document")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Cancel") {
-                        dismiss()
-                    }
+                    Button("Cancel") { dismiss() }
+                        .disabled(isSubmitting)
                 }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Create") {
-                        Task {
-                            await createDocument()
-                            dismiss()
-                        }
-                    }
-                    .disabled(selectedContract == nil ||
-                             selectedDocumentType.isEmpty ||
-                             selectedOwnerId.isEmpty ||
-                             isLoading)
-                }
+            }
+            // Prevent swipe-to-dismiss while the (non-idempotent) broadcast
+            // is in flight, so the user can't lose the result/warning.
+            .interactiveDismissDisabled(isSubmitting)
+            .alert(item: $submitError) { err in
+                Alert(
+                    title: Text("Create failed"),
+                    message: Text(err.message),
+                    dismissButton: .default(Text("OK"))
+                )
             }
             .onAppear {
-                if appState.contracts.isEmpty {
-                    // Load sample contracts if needed
-                    loadSampleContracts()
+                if let preset = presetDocumentType {
+                    selectedContract = preset.dataContract
+                    selectedDocumentTypeName = preset.name
                 }
             }
         }
     }
-    
-    private func createDocument() async {
-        guard appState.sdk != nil,
-              let contract = selectedContract,
-              !selectedDocumentType.isEmpty else {
-            appState.showError(message: "Please select a contract and document type")
+
+    // MARK: - Sections
+
+    private var selectionSection: some View {
+        Section("Document") {
+            Picker("Contract", selection: $selectedContract) {
+                Text("Select a contract").tag(nil as PersistentDataContract?)
+                ForEach(activeContracts) { contract in
+                    Text(contract.name).tag(contract as PersistentDataContract?)
+                }
+            }
+            .accessibleFormPicker("createDocument.contractPicker")
+            .disabled(isSubmitting)
+            .onChange(of: selectedContract) { _, _ in
+                // A new contract may not have the previously-selected type
+                // (or could share a name) — clear so the picker isn't stale.
+                selectedDocumentTypeName = ""
+            }
+
+            if let contract = selectedContract {
+                Picker("Document Type", selection: $selectedDocumentTypeName) {
+                    Text("Select type").tag("")
+                    ForEach(documentTypeNames(for: contract), id: \.self) { type in
+                        Text(type)
+                            .tag(type)
+                            .accessibilityIdentifier("createDocument.docType.\(type)")
+                    }
+                }
+                .accessibleFormPicker("createDocument.docTypePicker")
+                .disabled(isSubmitting)
+            }
+        }
+    }
+
+    private var presetSection: some View {
+        Section("Document") {
+            if let docType = presetDocumentType {
+                HStack {
+                    Label("Contract", systemImage: "doc.plaintext")
+                    Spacer()
+                    Text(docType.dataContract?.name ?? docType.contractIdBase58)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                HStack {
+                    Label("Document Type", systemImage: "doc.text")
+                    Spacer()
+                    Text(docType.name)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+    }
+
+    private var ownerSection: some View {
+        Section {
+            Picker("Owner", selection: $selectedOwnerId) {
+                Text("Select owner").tag("")
+                ForEach(ownerIdentities) { identity in
+                    Text(identity.alias ?? identity.identityIdBase58)
+                        .tag(identity.identityIdBase58)
+                        .accessibilityIdentifier("createDocument.owner.\(identity.identityIdBase58)")
+                }
+            }
+            .accessibleFormPicker("createDocument.ownerPicker")
+            .disabled(isSubmitting)
+        } header: {
+            Text("Owner Identity")
+        } footer: {
+            Text("The identity that owns and signs for this document. Signing uses this wallet's keychain-backed signer.")
+        }
+    }
+
+    @ViewBuilder
+    private func schemaSection(for docType: PersistentDocumentType) -> some View {
+        Section {
+            DocumentFieldsView(documentType: docType, fieldValues: $fieldValues)
+                // Re-identify per document type so the field editors reset,
+                // and clear the parent values — otherwise switching type in
+                // the no-preset flow could submit the previous schema's values.
+                .id(docType.id)
+                .onChange(of: docType.id) { _, _ in
+                    fieldValues = [:]
+                }
+        } header: {
+            Text("Fields")
+        } footer: {
+            if let required = docType.requiredFields, !required.isEmpty {
+                Text("Required: \(required.joined(separator: ", "))")
+            }
+        }
+    }
+
+    private var submitSection: some View {
+        Section {
+            Button {
+                submit()
+            } label: {
+                HStack {
+                    if isSubmitting {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Broadcasting…")
+                    } else {
+                        Text("Create / Broadcast")
+                    }
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("createDocument.submitButton")
+            .disabled(!canSubmit || isSubmitting)
+        }
+    }
+
+    private var successSection: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Document created", systemImage: "checkmark.seal.fill")
+                    .foregroundColor(.green)
+                    .font(.headline)
+                if let id = createdDocumentId {
+                    HStack(alignment: .top) {
+                        Text("ID:")
+                            .foregroundColor(.secondary)
+                        Text(id)
+                            .font(.system(.caption, design: .monospaced))
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                    }
+                }
+                if let warning = persistWarning {
+                    Label(warning, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                }
+                Button {
+                    dismiss()
+                } label: {
+                    Text("Done")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("createDocument.doneButton")
+                .padding(.top, 4)
+            }
+        }
+    }
+
+    // MARK: - Derived state
+
+    /// The `PersistentDocumentType` row backing the schema form — either
+    /// the preset, or the one matching the selected contract + type name.
+    private var resolvedDocumentType: PersistentDocumentType? {
+        if let preset = presetDocumentType { return preset }
+        guard let contract = selectedContract, !selectedDocumentTypeName.isEmpty else {
+            return nil
+        }
+        return contract.documentTypes?.first { $0.name == selectedDocumentTypeName }
+    }
+
+    /// Owner identities limited to the active network and to wallets the
+    /// app actually holds (so a `KeychainSigner` exists for signing).
+    private var ownerIdentities: [PersistentIdentity] {
+        identities.filter { $0.network == appState.currentNetwork && $0.wallet != nil }
+    }
+
+    /// Contracts limited to the active network — pairing a current-network
+    /// owner with a contract from another network would fetch/broadcast
+    /// against the wrong SDK network.
+    private var activeContracts: [PersistentDataContract] {
+        contracts.filter { $0.network == appState.currentNetwork }
+    }
+
+    private var selectedOwnerIdentity: PersistentIdentity? {
+        ownerIdentities.first { $0.identityIdBase58 == selectedOwnerId }
+    }
+
+    private var managedWallet: ManagedPlatformWallet? {
+        guard let walletId = selectedOwnerIdentity?.wallet?.walletId else { return nil }
+        return walletManager.wallet(for: walletId)
+    }
+
+    private var canSubmit: Bool {
+        resolvedDocumentType != nil
+            && selectedOwnerIdentity != nil
+            && managedWallet != nil
+    }
+
+    private func documentTypeNames(for contract: PersistentDataContract) -> [String] {
+        // Prefer the parsed PersistentDocumentType rows (they carry the
+        // schema the form needs); fall back to the stored name list.
+        if let types = contract.documentTypes, !types.isEmpty {
+            return types.map { $0.name }.sorted()
+        }
+        return contract.documentTypesList.sorted()
+    }
+
+    // MARK: - Submit
+
+    private func submit() {
+        guard
+            let docType = resolvedDocumentType,
+            let ownerIdentity = selectedOwnerIdentity,
+            let wallet = managedWallet
+        else {
+            submitError = .init(message: "Select a document type and an owner identity held by a loaded wallet.")
             return
         }
-        
-        isLoading = true
-        
-        // In a real app, we would use the SDK's document creation functionality
-        let document = DocumentModel(
-            id: UUID().uuidString,
-            contractId: contract.id,
-            documentType: selectedDocumentType,
-            ownerId: Data(hexString: selectedOwnerId) ?? Data(),
-            data: documentData,
-            createdAt: Date(),
-            updatedAt: Date()
-        )
-        
-        appState.documents.append(document)
-        appState.showError(message: "Document created successfully")
-        
-        isLoading = false
+
+        let propertiesJSON: String
+        do {
+            propertiesJSON = try Self.propertiesJSON(from: fieldValues, documentType: docType)
+        } catch {
+            submitError = .init(message: "Could not encode document fields: \(error.localizedDescription)")
+            return
+        }
+
+        isSubmitting = true
+        // Fresh `KeychainSigner` per submit pass, same as
+        // `TransferCreditsView` / `RegisterNameView`: the trampoline
+        // derives the signing key on demand — no bytes leave Rust.
+        let signer = KeychainSigner(modelContainer: modelContext.container)
+        let ownerId = ownerIdentity.identityId
+        let contractId = docType.contractId
+        let typeName = docType.name
+        let network = appState.currentNetwork
+        let parentContract = docType.dataContract
+
+        Task {
+            do {
+                let (documentId, canonicalJSON) = try await wallet.createDocument(
+                    ownerIdentityId: ownerId,
+                    contractId: contractId,
+                    documentType: typeName,
+                    propertiesJSON: propertiesJSON,
+                    signer: signer
+                )
+                _ = signer
+                await MainActor.run {
+                    // The broadcast is confirmed on-chain at this point.
+                    // Persisting the local cache row is best-effort: if it
+                    // fails we still report success (the document exists and
+                    // is queryable) but flag the local-save failure rather
+                    // than swallowing it.
+                    do {
+                        try persistConfirmedDocument(
+                            documentId: documentId,
+                            documentType: typeName,
+                            contractId: contractId,
+                            ownerId: ownerId,
+                            canonicalJSON: canonicalJSON,
+                            network: network,
+                            parentContract: parentContract
+                        )
+                    } catch {
+                        self.persistWarning = "Broadcast confirmed, but saving the local copy failed: \(error.localizedDescription). The document is on-chain and queryable."
+                    }
+                    self.createdDocumentId = documentId.toBase58String()
+                    self.isSubmitting = false
+                    self.didComplete = true
+                }
+            } catch {
+                await MainActor.run {
+                    self.submitError = .init(message: error.localizedDescription)
+                    self.isSubmitting = false
+                }
+            }
+        }
     }
-    
-    private func loadSampleContracts() {
-        // Add sample contracts for demonstration
-        appState.contracts = [
-            ContractModel(
-                id: "dpns-contract",
-                name: "DPNS",
-                version: 1,
-                ownerId: Data(hexString: "0000000000000000000000000000000000000000000000000000000000000000") ?? Data(),
-                documentTypes: ["domain", "preorder"],
-                schema: [
-                    "domain": [
-                        "type": "object",
-                        "properties": [
-                            "label": ["type": "string"],
-                            "normalizedLabel": ["type": "string"],
-                            "normalizedParentDomainName": ["type": "string"]
-                        ]
-                    ]
-                ]
-            ),
-            ContractModel(
-                id: "dashpay-contract",
-                name: "DashPay",
-                version: 1,
-                ownerId: Data(hexString: "0000000000000000000000000000000000000000000000000000000000000000") ?? Data(),
-                documentTypes: ["profile", "contactRequest"],
-                schema: [
-                    "profile": [
-                        "type": "object",
-                        "properties": [
-                            "displayName": ["type": "string"],
-                            "publicMessage": ["type": "string"]
-                        ]
-                    ]
-                ]
-            )
-        ]
+
+    /// Persist the confirmed document so it shows up in the Documents
+    /// list (DOC-01). Persistence stays in Swift per
+    /// `swift-sdk/CLAUDE.md`; the broadcast itself happened in Rust.
+    private func persistConfirmedDocument(
+        documentId: Identifier,
+        documentType: String,
+        contractId: Data,
+        ownerId: Identifier,
+        canonicalJSON: String,
+        network: Network,
+        parentContract: PersistentDataContract?
+    ) throws {
+        // Persist the confirmed document's canonical query-side JSON
+        // (system fields + DPP-normalized properties as returned by the
+        // Rust side), not the user's raw form input, so the local cache
+        // matches what a DOC-01 query would return.
+        let dataBlob = canonicalJSON.data(using: .utf8) ?? Data()
+        let document = PersistentDocument(
+            documentId: documentId.toBase58String(),
+            documentType: documentType,
+            revision: 1,
+            data: dataBlob,
+            contractId: contractId.toBase58String(),
+            ownerId: ownerId.toBase58String(),
+            network: network
+        )
+        // Link to the parent contract so cascading cleanup works and the
+        // contract-scoped document list picks it up.
+        document.dataContract = parentContract
+        modelContext.insert(document)
+        document.linkToLocalIdentityIfNeeded(in: modelContext)
+        do {
+            try modelContext.save()
+        } catch {
+            // Save failed — detach the row we just inserted so a later
+            // save from elsewhere can't silently flush it, which would
+            // contradict the "not saved locally" warning we surface.
+            modelContext.delete(document)
+            throw error
+        }
+    }
+
+    // MARK: - Properties JSON
+
+    /// Convert the form's `[String: Any]` into a JSON object string the
+    /// Rust side can parse. `Data` values (byte arrays + identifiers)
+    /// are encoded as hex strings — the schema-driven sanitize step in
+    /// `create_document_with_signer` decodes hex/base64 byte arrays and
+    /// hex/base58 identifiers back to native values. `object`-typed
+    /// fields arrive as the editor's raw JSON `String`; they are parsed
+    /// back into a nested object so they serialize as objects, not as a
+    /// JSON string. Other values are JSON-native and pass through.
+    static func propertiesJSON(
+        from fieldValues: [String: Any],
+        documentType: PersistentDocumentType
+    ) throws -> String {
+        let objectFields = Set(
+            documentType.propertiesList?
+                .filter { $0.type == "object" }
+                .map(\.name) ?? []
+        )
+        var jsonObject: [String: Any] = [:]
+        for (key, value) in fieldValues {
+            if let data = value as? Data {
+                jsonObject[key] = data.toHexString()
+            } else if objectFields.contains(key), let text = value as? String {
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty, let objData = trimmed.data(using: .utf8) else { continue }
+                // Throws on invalid JSON → surfaced as an encode error.
+                jsonObject[key] = try JSONSerialization.jsonObject(with: objData)
+            } else {
+                jsonObject[key] = value
+            }
+        }
+        let data = try JSONSerialization.data(withJSONObject: jsonObject, options: [])
+        return String(data: data, encoding: .utf8) ?? "{}"
     }
 }
 
 struct DetailRow: View {
     let label: String
     let value: String
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
@@ -368,7 +631,7 @@ struct DetailRow: View {
 }
 
 private let dateFormatter: DateFormatter = {
-    let formatter = DateFormatter()
+    let formatter = DateFormatter.gregorian()
     formatter.dateStyle = .medium
     formatter.timeStyle = .short
     return formatter

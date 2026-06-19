@@ -3,26 +3,87 @@ import SwiftData
 import SwiftDashSDK
 
 struct TransactionListView: View {
-    @EnvironmentObject var walletService: WalletService
-    @EnvironmentObject var unifiedAppState: UnifiedAppState
-    let wallet: HDWallet
+    /// Per-wallet transaction list. Queries `PersistentTxo` flat by
+    /// the denormalized `walletId` column and resolves distinct
+    /// creating-or-spending `PersistentTransaction`s in the body —
+    /// same union `WalletDetailView`'s count uses.
+    ///
+    /// Reached via value-based navigation (see
+    /// `WalletsContentView`'s `.navigationDestination` modifiers).
+    /// Closure-based `NavigationLink { Destination }` is unusable on
+    /// iOS 26 here — the eager destination construction stalls the
+    /// push when the destination has any meaningful `init` or
+    /// `@Query`. Value-based push only constructs the destination
+    /// at navigate time.
+    let walletId: Data
+    /// Membership: which txids belong to this wallet, via the
+    /// denormalized `walletId` on TXOs.
+    @Query private var walletTxos: [PersistentTxo]
+    @Query private var transactionObservation: [PersistentTransaction]
+    /// Per-wallet asset-lock rows. Used to look up the *locked* amount
+    /// for each asset-lock tx — `PersistentTransaction.netAmount` is
+    /// the wallet's input-vs-output diff, which sees the credit
+    /// output as "to-self" and reports ~0 for asset locks. The
+    /// `amountDuffs` on the asset-lock row is the actual L1 burn.
+    @Query private var assetLocks: [PersistentAssetLock]
+    @State private var selectedTransaction: PersistentTransaction?
 
-    @State private var transactions: [WalletTransaction] = []
-    @State private var isLoading = false
-    @State private var errorMessage: String?
-    @State private var showError = false
-    @State private var selectedTransaction: WalletTransaction?
+    init(walletId: Data) {
+        self.walletId = walletId
+        let txoDescriptor = FetchDescriptor<PersistentTxo>(
+            predicate: #Predicate { $0.walletId == walletId }
+        )
+        _walletTxos = Query(txoDescriptor)
+        let assetLockDescriptor = FetchDescriptor<PersistentAssetLock>(
+            predicate: PersistentAssetLock.predicate(walletId: walletId)
+        )
+        _assetLocks = Query(assetLockDescriptor)
+    }
 
-    private var sortedTransactions: [WalletTransaction] {
-        transactions.sorted { $0.timestamp > $1.timestamp }
+    /// Lookup `txid (display-order hex) → total asset-lock amount in
+    /// duffs`, built once per @Query invalidation so the row's amount
+    /// label can swap in the real funded amount without re-fetching.
+    ///
+    /// `PersistentAssetLock.outPointHex` is `"<txidHex>:<vout>"`. A
+    /// single funding tx can carry multiple credit outputs (DIP-0027
+    /// allows up to 255), each becoming its own `PersistentAssetLock`
+    /// row at a distinct `vout`. We sum amounts across all rows
+    /// sharing a txid so the list shows the *total* DASH burned by
+    /// that funding tx, not whichever row SwiftData happened to
+    /// enumerate last.
+    private var assetLockAmountByTxid: [String: Int64] {
+        var map: [String: Int64] = [:]
+        for lock in assetLocks {
+            let parts = lock.outPointHex.split(separator: ":", maxSplits: 1)
+            guard let txidHex = parts.first.map(String.init) else { continue }
+            map[txidHex, default: 0] += lock.amountDuffs
+        }
+        return map
+    }
+
+    private var transactions: [PersistentTransaction] {
+        _ = transactionObservation // keep the subscription alive
+        var seen: Set<Data> = []
+        var result: [PersistentTransaction] = []
+        for txo in walletTxos {
+            if let tx = txo.transaction, seen.insert(tx.txid).inserted {
+                result.append(tx)
+            }
+            if let spending = txo.spendingTransaction, seen.insert(spending.txid).inserted {
+                result.append(spending)
+            }
+        }
+        return result.sorted { lhs, rhs in
+            if (lhs.context == 0) != (rhs.context == 0) {
+                return lhs.context == 0
+            }
+            return lhs.firstSeen > rhs.firstSeen
+        }
     }
 
     var body: some View {
         ZStack {
-            if isLoading {
-                ProgressView("Loading transactions...")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if transactions.isEmpty {
+            if transactions.isEmpty {
                 emptyStateView
             } else {
                 transactionsList
@@ -30,19 +91,11 @@ struct TransactionListView: View {
         }
         .navigationTitle("Transactions")
         .navigationBarTitleDisplayMode(.inline)
-        .alert("Error", isPresented: $showError) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(errorMessage ?? "Unknown error occurred")
-        }
         .sheet(item: $selectedTransaction) { transaction in
-            TransactionDetailView(transaction: transaction)
-        }
-        .task {
-            await loadTransactions()
-        }
-        .refreshable {
-            await loadTransactions()
+            TransactionDetailView(
+                transaction: transaction,
+                assetLockAmountDuffs: assetLockAmountByTxid[transaction.txidHex]
+            )
         }
     }
 
@@ -52,12 +105,12 @@ struct TransactionListView: View {
                 .font(.system(size: 60))
                 .foregroundColor(.gray)
 
-            Text("No Transactions Yet")
+            Text("No transactions found.")
                 .font(.headline)
 
             Text("Transactions will appear here once you send or receive Dash")
                 .font(.caption)
-                .foregroundColor(.secondary)
+                .foregroundColor(.gray)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
         }
@@ -65,114 +118,108 @@ struct TransactionListView: View {
     }
 
     private var transactionsList: some View {
-        List {
-            ForEach(sortedTransactions, id: \.txid) { transaction in
-                Button {
-                    selectedTransaction = transaction
-                } label: {
-                    TransactionRowView(transaction: transaction)
-                }
-                .buttonStyle(.plain)
+        let assetLockAmounts = assetLockAmountByTxid
+        return List(transactions) { transaction in
+            Button {
+                selectedTransaction = transaction
+            } label: {
+                TransactionRowView(
+                    transaction: transaction,
+                    assetLockAmountDuffs: assetLockAmounts[transaction.txidHex]
+                )
             }
+            .buttonStyle(.plain)
         }
         .listStyle(.insetGrouped)
-    }
-
-    private func loadTransactions() async {
-        isLoading = true
-        defer { isLoading = false }
-
-        do {
-            // Get wallet manager
-            guard let walletManager = walletService.walletManager else {
-                throw NSError(domain: "TransactionListView", code: 1,
-                            userInfo: [NSLocalizedDescriptionKey: "Wallet manager not initialized"])
-            }
-
-            // Get transactions from the wallet manager
-            let fetchedTransactions = try await walletManager.getTransactions(for: wallet)
-
-            await MainActor.run {
-                self.transactions = fetchedTransactions
-            }
-        } catch {
-            await MainActor.run {
-                self.errorMessage = error.localizedDescription
-                self.showError = true
-            }
-        }
     }
 }
 
 // MARK: - Transaction Row View
 
 struct TransactionRowView: View {
-    let transaction: WalletTransaction
+    let transaction: PersistentTransaction
+    /// Override amount displayed for asset-lock rows. The wallet's
+    /// `netAmount` shows ~0 for these (credit output is structurally
+    /// self-owned), so the list view passes the linked
+    /// `PersistentAssetLock.amountDuffs` — the actual L1 DASH burned
+    /// to mint platform credits. `nil` for non-asset-lock rows or
+    /// when no matching row was found.
+    var assetLockAmountDuffs: Int64? = nil
 
     private var typeIcon: String {
-        switch transaction.type {
-        case "received":
-            return "arrow.down.circle.fill"
-        case "sent":
-            return "arrow.up.circle.fill"
-        case "self":
-            return "arrow.triangle.2.circlepath"
-        default:
-            return "questionmark.circle"
+        // Asset-lock / asset-unlock txs override direction-based icons
+        // since the `direction` classifier reports `Internal` (the
+        // credit output is structurally self-owned), but the intent
+        // is L1→L2 / L2→L1 credit conversion — neither "send" nor
+        // "receive" applies cleanly.
+        if transaction.isAssetLock { return "lock.fill" }
+        if transaction.isAssetUnlock { return "lock.open.fill" }
+        // direction: 0=incoming, 1=outgoing, 2=internal, 3=coinJoin
+        switch transaction.direction {
+        case 0: return "arrow.down.circle.fill"
+        case 1: return "arrow.up.circle.fill"
+        case 2: return "arrow.triangle.2.circlepath"
+        case 3: return "shuffle.circle.fill"
+        default: return "questionmark.circle"
         }
     }
 
     private var typeColor: Color {
-        switch transaction.type {
-        case "received":
-            return .green
-        case "sent":
-            return .red
-        case "self":
-            return .blue
-        default:
-            return .gray
+        // Asset-lock txs render purple — distinct from the red
+        // outgoing / green incoming axis so the user can scan the
+        // list and immediately spot identity-funding rows.
+        if transaction.isAssetLock || transaction.isAssetUnlock {
+            return .purple
         }
+        switch transaction.direction {
+        case 0: return .green
+        case 1, 2: return .red
+        case 3: return .blue
+        default: return .secondary
+        }
+    }
+
+    private var isConfirmed: Bool {
+        // context: 0=mempool, 1=instantSend, 2=inBlock, 3=inChainLockedBlock
+        transaction.context >= 2
+    }
+
+    private var truncatedTxid: String {
+        let txid = transaction.txidHex
+        guard txid.count > 16 else { return txid }
+        return "\(txid.prefix(8))…\(txid.suffix(8))"
+    }
+
+    private var transactionDate: Date {
+        Date(timeIntervalSince1970: TimeInterval(transaction.firstSeen))
     }
 
     @ViewBuilder
     private var confirmationBadge: some View {
-        if transaction.confirmations == 0 {
-                HStack(spacing: 4) {
-                    Image(systemName: "clock")
-                        .font(.caption2)
-                    Text("Pending")
-                        .font(.caption2)
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.orange.opacity(0.2))
-                .foregroundColor(.orange)
-                .cornerRadius(4)
-            } else if transaction.confirmations < 6 {
-                HStack(spacing: 4) {
-                    Image(systemName: "checkmark.circle")
-                        .font(.caption2)
-                    Text("\(transaction.confirmations)")
-                        .font(.caption2)
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.blue.opacity(0.2))
-                .foregroundColor(.blue)
-                .cornerRadius(4)
-            } else {
-                HStack(spacing: 4) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.caption2)
-                    Text("Confirmed")
-                        .font(.caption2)
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.green.opacity(0.2))
-                .foregroundColor(.green)
-                .cornerRadius(4)
+        if !isConfirmed {
+            HStack(spacing: 4) {
+                Image(systemName: "clock")
+                    .font(.caption2)
+                Text("Pending")
+                    .font(.caption2)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.orange.opacity(0.2))
+            .foregroundColor(.orange)
+            .cornerRadius(4)
+        } else {
+            HStack(spacing: 4) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.caption2)
+                Text("Confirmed")
+                    .font(.caption2)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.green.opacity(0.2))
+            .foregroundColor(.green)
+            .cornerRadius(4)
         }
     }
 
@@ -185,37 +232,68 @@ struct TransactionRowView: View {
                 .frame(width: 40)
 
             VStack(alignment: .leading, spacing: 4) {
-                // Transaction ID (truncated)
-                Text(transaction.truncatedTxid)
-                    .font(.system(.subheadline, design: .monospaced))
-                    .foregroundColor(.primary)
+                // Transaction ID (truncated) and timestamp
+                HStack {
+                    Text(truncatedTxid)
+                        .font(.system(.subheadline, design: .monospaced))
+                        .foregroundColor(.primary)
 
-                // Date and confirmation
-                HStack(spacing: 8) {
-                    Text(transaction.date, style: .relative)
+                    Spacer()
+
+                    Text(transactionDate, style: .relative)
                         .font(.caption)
                         .foregroundColor(.secondary)
-
-                    confirmationBadge
                 }
-            }
 
-            Spacer()
+                // confirmation and amount
+                HStack {
+                    confirmationBadge
 
-            // Amount
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(transaction.formattedAmount)
-                    .font(.headline)
-                    .foregroundColor(typeColor)
+                    Spacer()
 
-                if let fee = transaction.formattedFee, transaction.type == "sent" {
-                    Text("Fee: \(fee)")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(displayAmount)
+                            .font(.headline)
+                            .foregroundColor(typeColor)
+
+                        if let fee = transaction.fee, transaction.netAmount < 0 {
+                            Text("Fee: \(formatFee(fee))")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
                 }
             }
         }
         .padding(.vertical, 4)
     }
-}
 
+    private func formatFee(_ fee: UInt64) -> String {
+        let dash = Double(fee) / 100_000_000.0
+        return String(format: "%.8f DASH", dash)
+    }
+
+    /// Amount label for the row. For asset-lock txs we substitute
+    /// the linked `PersistentAssetLock.amountDuffs` (the L1 DASH
+    /// actually burned to mint platform credits); the wallet's
+    /// `netAmount` is ~0 for these because the credit output is a
+    /// self-owned address. Rendered as a negative (DASH leaving L1).
+    ///
+    /// If we know the row is an asset lock but the linked
+    /// `PersistentAssetLock` is missing (e.g. a historical record
+    /// from before the `Consumed`-status retention change shipped),
+    /// we render "Asset Lock (amount unknown)" instead of falling
+    /// through to `transaction.formattedAmount` — that would say
+    /// `+0.00000000 DASH`, which is misleading for a row the user
+    /// can see was a funding tx.
+    private var displayAmount: String {
+        if transaction.isAssetLock {
+            if let duffs = assetLockAmountDuffs {
+                let dash = Double(duffs) / 100_000_000.0
+                return String(format: "-%.8f DASH", dash)
+            }
+            return "Asset Lock (amount unknown)"
+        }
+        return transaction.formattedAmount
+    }
+}

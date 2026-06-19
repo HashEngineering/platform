@@ -344,6 +344,12 @@ impl Platform for PlatformServiceImpl {
         dapi_grpc::platform::v0::GetDocumentsResponse
     );
 
+    drive_method!(
+        get_document_history,
+        dapi_grpc::platform::v0::GetDocumentHistoryRequest,
+        dapi_grpc::platform::v0::GetDocumentHistoryResponse
+    );
+
     // System methods
     drive_method!(
         get_consensus_params,
@@ -554,5 +560,42 @@ impl Platform for PlatformServiceImpl {
         get_recent_compacted_address_balance_changes,
         dapi_grpc::platform::v0::GetRecentCompactedAddressBalanceChangesRequest,
         dapi_grpc::platform::v0::GetRecentCompactedAddressBalanceChangesResponse
+    );
+
+    // Shielded pool methods
+    drive_method!(
+        get_shielded_encrypted_notes,
+        dapi_grpc::platform::v0::GetShieldedEncryptedNotesRequest,
+        dapi_grpc::platform::v0::GetShieldedEncryptedNotesResponse
+    );
+
+    drive_method!(
+        get_shielded_anchors,
+        dapi_grpc::platform::v0::GetShieldedAnchorsRequest,
+        dapi_grpc::platform::v0::GetShieldedAnchorsResponse
+    );
+
+    drive_method!(
+        get_most_recent_shielded_anchor,
+        dapi_grpc::platform::v0::GetMostRecentShieldedAnchorRequest,
+        dapi_grpc::platform::v0::GetMostRecentShieldedAnchorResponse
+    );
+
+    drive_method!(
+        get_shielded_pool_state,
+        dapi_grpc::platform::v0::GetShieldedPoolStateRequest,
+        dapi_grpc::platform::v0::GetShieldedPoolStateResponse
+    );
+
+    drive_method!(
+        get_shielded_notes_count,
+        dapi_grpc::platform::v0::GetShieldedNotesCountRequest,
+        dapi_grpc::platform::v0::GetShieldedNotesCountResponse
+    );
+
+    drive_method!(
+        get_shielded_nullifiers,
+        dapi_grpc::platform::v0::GetShieldedNullifiersRequest,
+        dapi_grpc::platform::v0::GetShieldedNullifiersResponse
     );
 }

@@ -1,4 +1,5 @@
 use crate::address_funds::PlatformAddress;
+use crate::asset_lock::StoredAssetLockInfo;
 use crate::balances::credits::TokenAmount;
 use crate::data_contract::group::GroupSumPower;
 use crate::data_contract::DataContract;
@@ -16,7 +17,7 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, strum::Display, derive_more::TryInto)]
 #[cfg_attr(
-    feature = "state-transition-serde-conversion",
+    feature = "serde-conversion",
     derive(serde::Serialize, serde::Deserialize)
 )]
 pub enum StateTransitionProofResult {
@@ -55,4 +56,30 @@ pub enum StateTransitionProofResult {
         PartialIdentity,
         BTreeMap<PlatformAddress, Option<(AddressNonce, Credits)>>,
     ),
+    VerifiedAssetLockConsumed(StoredAssetLockInfo),
+    VerifiedShieldedNullifiers(Vec<(Vec<u8>, bool)>),
+    VerifiedShieldedNullifiersWithAddressInfos(
+        Vec<(Vec<u8>, bool)>,
+        BTreeMap<PlatformAddress, Option<(AddressNonce, Credits)>>,
+    ),
+    VerifiedShieldedNullifiersWithWithdrawalDocument(
+        Vec<(Vec<u8>, bool)>,
+        BTreeMap<Identifier, Option<Document>>,
+    ),
+    /// Returned by `ShieldFromAssetLock` when a `surplus_output` is set. Carries the consumed
+    /// asset-lock info AND the proven balance of the surplus-output address, so a light/SDK
+    /// client can cryptographically confirm the asset-lock surplus credit landed at the signed
+    /// `surplus_output` address. The plain [`VerifiedAssetLockConsumed`] is still returned when
+    /// no `surplus_output` is set.
+    ///
+    /// [`VerifiedAssetLockConsumed`]: StateTransitionProofResult::VerifiedAssetLockConsumed
+    VerifiedAssetLockConsumedWithAddressInfos(
+        StoredAssetLockInfo,
+        BTreeMap<PlatformAddress, Option<(AddressNonce, Credits)>>,
+    ),
+    /// Returned by `IdentityCreateFromShieldedPool`. Carries the newly-created [`Identity`] AND the
+    /// presence of each spent nullifier (`(nullifier_bytes, present)`), proven together in a single
+    /// STRICT merged multi-root GroveDB proof. A light/SDK client can cryptographically confirm both
+    /// that the identity was created and that the funding nullifiers were consumed.
+    VerifiedIdentityWithShieldedNullifiers(Identity, Vec<(Vec<u8>, bool)>),
 }

@@ -308,6 +308,12 @@ impl StateTransitionWasm {
             AddressFundsTransfer(_) => 12,
             AddressFundingFromAssetLock(_) => 13,
             AddressCreditWithdrawal(_) => 14,
+            Shield(_) => 15,
+            ShieldedTransfer(_) => 16,
+            Unshield(_) => 17,
+            ShieldFromAssetLock(_) => 18,
+            ShieldedWithdrawal(_) => 19,
+            IdentityCreateFromShieldedPool(_) => 20,
         }
     }
 
@@ -392,6 +398,12 @@ impl StateTransitionWasm {
             | AddressFundsTransfer(_)
             | AddressFundingFromAssetLock(_)
             | AddressCreditWithdrawal(_) => None,
+            Shield(_)
+            | ShieldedTransfer(_)
+            | Unshield(_)
+            | ShieldFromAssetLock(_)
+            | ShieldedWithdrawal(_)
+            | IdentityCreateFromShieldedPool(_) => None,
         }
     }
 
@@ -414,6 +426,12 @@ impl StateTransitionWasm {
             AddressFundsTransfer(_)
             | AddressFundingFromAssetLock(_)
             | AddressCreditWithdrawal(_) => None,
+            Shield(_)
+            | ShieldedTransfer(_)
+            | Unshield(_)
+            | ShieldFromAssetLock(_)
+            | ShieldedWithdrawal(_)
+            | IdentityCreateFromShieldedPool(_) => None,
         }
     }
 
@@ -551,15 +569,25 @@ impl StateTransitionWasm {
                     "Cannot set owner for address funds transfer transition",
                 ));
             }
+            Shield(_)
+            | ShieldedTransfer(_)
+            | Unshield(_)
+            | ShieldFromAssetLock(_)
+            | ShieldedWithdrawal(_)
+            | IdentityCreateFromShieldedPool(_) => {
+                return Err(WasmDppError::invalid_argument(
+                    "Cannot set owner for shielded transition",
+                ));
+            }
         };
 
         Ok(())
     }
 
     #[wasm_bindgen(js_name = "setIdentityContractNonce")]
-    pub fn set_identity_contract_nonce(&mut self, nonce: JsValue) -> WasmDppResult<()> {
+    pub fn set_identity_contract_nonce(&mut self, nonce: &js_sys::BigInt) -> WasmDppResult<()> {
         use crate::utils::try_to_u64;
-        let nonce: IdentityNonce = try_to_u64(&nonce, "identityContractNonce")?;
+        let nonce: IdentityNonce = try_to_u64(nonce, "identityContractNonce")?;
         use StateTransition::*;
         self.0 = match self.0.clone() {
             DataContractCreate(_) => {
@@ -619,15 +647,25 @@ impl StateTransitionWasm {
                     "Cannot set identity contract nonce for address-related transition types",
                 ));
             }
+            Shield(_)
+            | ShieldedTransfer(_)
+            | Unshield(_)
+            | ShieldFromAssetLock(_)
+            | ShieldedWithdrawal(_)
+            | IdentityCreateFromShieldedPool(_) => {
+                return Err(WasmDppError::invalid_argument(
+                    "Cannot set identity contract nonce for shielded transition",
+                ));
+            }
         };
 
         Ok(())
     }
 
     #[wasm_bindgen(js_name = "setIdentityNonce")]
-    pub fn set_identity_nonce(&mut self, nonce: JsValue) -> WasmDppResult<()> {
+    pub fn set_identity_nonce(&mut self, nonce: &js_sys::BigInt) -> WasmDppResult<()> {
         use crate::utils::try_to_u64;
-        let nonce: IdentityNonce = try_to_u64(&nonce, "identityNonce")?;
+        let nonce: IdentityNonce = try_to_u64(nonce, "identityNonce")?;
         use StateTransition::*;
         self.0 = match self.0.clone() {
             DataContractCreate(mut contract_create) => {
@@ -705,6 +743,16 @@ impl StateTransitionWasm {
             | AddressCreditWithdrawal(_) => {
                 return Err(WasmDppError::invalid_argument(
                     "Cannot set identity nonce for address-related transition types",
+                ));
+            }
+            Shield(_)
+            | ShieldedTransfer(_)
+            | Unshield(_)
+            | ShieldFromAssetLock(_)
+            | ShieldedWithdrawal(_)
+            | IdentityCreateFromShieldedPool(_) => {
+                return Err(WasmDppError::invalid_argument(
+                    "Cannot set identity nonce for shielded transition",
                 ));
             }
         };

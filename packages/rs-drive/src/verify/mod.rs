@@ -4,6 +4,12 @@
 pub mod contract;
 /// Document verification methods on proofs
 pub mod document;
+/// Document-count verification methods on proofs (the
+/// `GetDocumentsCount` endpoint's prove-path verifiers).
+pub mod document_count;
+/// Document-sum verification methods on proofs (the
+/// `GetDocumentsSum` endpoint's prove-path verifiers).
+pub mod document_sum;
 /// Identity verification methods on proofs
 pub mod identity;
 /// Single Document verification methods on proofs
@@ -16,6 +22,8 @@ pub mod system;
 pub mod address_funds;
 /// Group proof verification module
 pub mod group;
+/// Shielded pool proof verification module
+pub mod shielded;
 /// Verifies that a state transition contents exist in the proof
 pub mod state_transition;
 /// Token proof verification module
