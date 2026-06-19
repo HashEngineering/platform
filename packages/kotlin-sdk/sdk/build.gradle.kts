@@ -72,13 +72,10 @@ android {
 }
 
 dependencies {
-    implementation(libs.kotlin.stdlib)
-    implementation(libs.kotlinx.coroutines.core)
+    api(project(":sdk-jvm"))
     implementation(libs.kotlinx.coroutines.android)
 
-    // JNA (Java Native Access) — allows calling C functions by name without a
-    // hand-written JNI wrapper, analogous to how Swift imports the C header directly.
-    // Classifier must be declared inline; version catalog doesn't support @aar notation.
+    // JNA AAR for Android (contains the jnidispatch.so JNA needs at runtime)
     implementation("net.java.dev.jna:jna:5.14.0@aar")
 
     testImplementation(libs.junit)

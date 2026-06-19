@@ -25,19 +25,24 @@ interface DashSdkFfi : Library {
     /** Create a new SDK instance. Returns [DashSDKResultNative] by value (struct). */
     fun dash_sdk_create(config: DashSDKConfigNative): DashSDKResultNative
 
-    /** Destroy an SDK instance created by [dash_sdk_create]. */
+    /**
+     * Create a new SDK instance using trusted context providers (fetches quorum info
+     * from Dash Core Group-operated nodes). Suitable for testnet/mainnet without
+     * manually supplying DAPI addresses — pass [DashSDKConfigNative.dapi_addresses] = null
+     * to use built-in defaults for the selected network.
+     */
+    fun dash_sdk_create_trusted(config: DashSDKConfigNative): DashSDKResultNative
+
+    /** Destroy an SDK instance created by [dash_sdk_create] or [dash_sdk_create_trusted]. */
     fun dash_sdk_destroy(handle: Pointer)
 
     /** Return the last error message for the current SDK instance (caller must free). */
     fun dash_sdk_get_last_error(handle: Pointer): String?
 
-    /** Free a C string returned by the SDK. */
-    fun dash_sdk_free_string(s: Pointer)
+    /** Free a C string returned by the SDK (Rust: dash_sdk_string_free). */
+    fun dash_sdk_string_free(s: Pointer)
 
-    /** Free a [DashSDKResult] returned by any SDK call. */
-    fun dash_sdk_result_free(result: Pointer)
-
-    /** Free a [DashSDKError] struct. */
+    /** Free a heap-allocated [DashSDKError] struct returned inside a result. */
     fun dash_sdk_error_free(error: Pointer)
 
     // -------------------------------------------------------------------------
@@ -49,16 +54,16 @@ interface DashSdkFfi : Library {
      * Returns a [DashSDKResult] with [DashSDKResultDataType.ResultIdentityHandle].
      * Caller must free the result with [dash_sdk_result_free].
      */
-    fun dash_sdk_identity_fetch(handle: Pointer, identity_id_hex: String): Pointer?
+    fun dash_sdk_identity_fetch(handle: Pointer, identity_id_hex: String): DashSDKResultNative
 
     /**
      * Fetch an identity's balance by its hex-encoded ID.
      * Returns a [DashSDKResult] with the balance in credits as a uint64.
      */
-    fun dash_sdk_identity_fetch_balance(handle: Pointer, identity_id_hex: String): Pointer?
+    fun dash_sdk_identity_fetch_balance(handle: Pointer, identity_id_hex: String): DashSDKResultNative
 
     /** Get identity info from an IdentityHandle. */
-    fun dash_sdk_identity_get_info(identity_handle: Pointer): Pointer?
+    fun dash_sdk_identity_get_info(identity_handle: Pointer): DashSDKResultNative
 
     /** Free an IdentityHandle. */
     fun dash_sdk_identity_handle_free(identity_handle: Pointer)
@@ -71,13 +76,13 @@ interface DashSdkFfi : Library {
      * Fetch a data contract by its hex-encoded ID.
      * Returns a [DashSDKResult] with [DashSDKResultDataType.ResultDataContractHandle].
      */
-    fun dash_sdk_data_contract_fetch(handle: Pointer, contract_id_hex: String): Pointer?
+    fun dash_sdk_data_contract_fetch(handle: Pointer, contract_id_hex: String): DashSDKResultNative
 
     /**
      * Fetch a data contract as a JSON string.
      * Returns a [DashSDKResult] with [DashSDKResultDataType.String].
      */
-    fun dash_sdk_data_contract_fetch_json(handle: Pointer, contract_id_hex: String): Pointer?
+    fun dash_sdk_data_contract_fetch_json(handle: Pointer, contract_id_hex: String): DashSDKResultNative
 
     /** Free a DataContractHandle. */
     fun dash_sdk_data_contract_handle_free(contract_handle: Pointer)
@@ -95,7 +100,7 @@ interface DashSdkFfi : Library {
         contract_handle: Pointer,
         document_type: String,
         document_id_hex: String
-    ): Pointer?
+    ): DashSDKResultNative
 
     /**
      * Search documents with optional where/order-by JSON filters.
@@ -104,7 +109,7 @@ interface DashSdkFfi : Library {
     fun dash_sdk_document_search(
         handle: Pointer,
         params: DashSDKDocumentSearchParamsNative
-    ): Pointer?
+    ): DashSDKResultNative
 
     /** Free a DocumentHandle. */
     fun dash_sdk_document_handle_free(document_handle: Pointer)
@@ -114,31 +119,22 @@ interface DashSdkFfi : Library {
     // -------------------------------------------------------------------------
 
     /** Resolve a DPNS name to an identity ID. Returns JSON string result. */
-    fun dash_sdk_dpns_resolve(handle: Pointer, name: String): Pointer?
+    fun dash_sdk_dpns_resolve(handle: Pointer, name: String): DashSDKResultNative
 
     /** Check if a DPNS name is available. Returns bool result. */
-    fun dash_sdk_dpns_check_availability(handle: Pointer, name: String): Pointer?
+    fun dash_sdk_dpns_check_availability(handle: Pointer, name: String): DashSDKResultNative
 
     /** Search DPNS names by prefix. Returns JSON array result. */
-    fun dash_sdk_dpns_search(handle: Pointer, prefix: String, limit: Int): Pointer?
+    fun dash_sdk_dpns_search(handle: Pointer, prefix: String, limit: Int): DashSDKResultNative
 
     // -------------------------------------------------------------------------
     // Helper: result accessors
     // -------------------------------------------------------------------------
 
-    /** Get the data_type field from a DashSDKResult pointer. */
-    fun dash_sdk_result_get_data_type(result: Pointer): Int
-
-    /** Get the data pointer from a DashSDKResult. */
-    fun dash_sdk_result_get_data(result: Pointer): Pointer?
-
-    /** Get the error pointer from a DashSDKResult (null if success). */
-    fun dash_sdk_result_get_error(result: Pointer): Pointer?
-
-    /** Get error code from a DashSDKError pointer. */
+    /** Get error code from a [DashSDKError] pointer (read field at offset 0). */
     fun dash_sdk_error_get_code(error: Pointer): Int
 
-    /** Get error message from a DashSDKError pointer (do not free separately). */
+    /** Get error message from a [DashSDKError] pointer (do not free separately). */
     fun dash_sdk_error_get_message(error: Pointer): String?
 
     companion object {

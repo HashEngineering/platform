@@ -39,7 +39,7 @@ pub unsafe extern "C" fn dash_sdk_dpns_get_contested_usernames_by_identity(
         ));
     }
 
-    let sdk_wrapper = unsafe { &*(sdk_handle as *const SDKWrapper) };
+    let sdk_wrapper: &SDKWrapper = unsafe { &*(sdk_handle as *const SDKWrapper) };
     let sdk = &sdk_wrapper.sdk;
 
     let identity_id_str = match CStr::from_ptr(identity_id).to_str() {

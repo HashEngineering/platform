@@ -15,4 +15,6 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "KotlinDashSDK"
+include(":sdk-jvm")
 include(":sdk")
+include(":console")
