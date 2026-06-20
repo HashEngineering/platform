@@ -5,4 +5,5 @@ local.properties
 *.iml
 .idea/
 sdk/src/main/jniLibs/*/librs_sdk_ffi.so
+sdk/src/main/jniLibs/*/librs_unified_sdk_ffi.so
 sdk/src/main/jniLibs/*/libdash_spv_ffi.so

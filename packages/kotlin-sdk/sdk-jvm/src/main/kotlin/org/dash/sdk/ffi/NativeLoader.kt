@@ -22,7 +22,7 @@ object NativeLoader {
                 }
                 else -> {
                     // Android: library is packaged in jniLibs and extracted at install time
-                    System.loadLibrary("rs_sdk_ffi")
+                    System.loadLibrary(NativeLibrary.name)
                 }
             }
             loaded = true

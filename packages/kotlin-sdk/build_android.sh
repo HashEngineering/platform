@@ -3,28 +3,60 @@ set -e
 
 # Build script for Dash SDK FFI (Android targets via NDK)
 # This script builds the Rust library for Android targets and copies .so files
-# Usage: ./build_android.sh [arm64|arm|x86|x86_64|all]
-# Default: all
+# Usage: ./build_android.sh [arm64|x86_64|all] [--unified] [--clean]
+# Default: all supported ABIs, rs-sdk-ffi (read-path) library.
+#
+# Supported ABIs are 64-bit only: arm64-v8a (devices) and x86_64 (emulator).
+# 32-bit ABIs (armeabi-v7a / x86) are intentionally dropped — the unified
+# library's FFI structs carry hard-coded 64-bit size/alignment guards (matching
+# the iOS aarch64-only framework), so 32-bit targets do not compile.
+#
+#   (default)   builds rs-sdk-ffi      -> librs_sdk_ffi.so          (preserves existing behavior)
+#   --unified   builds rs-unified-sdk-ffi -> librs_unified_sdk_ffi.so (full SDK + wallet + shielded)
+#
+# Both libraries land side-by-side in jniLibs/<abi>/ (different file names), so a
+# --unified build does NOT clobber the existing read-path library.
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$SCRIPT_DIR/../.."
-FFI_PACKAGE_DIR="$PROJECT_ROOT/packages/rs-sdk-ffi"
 ANDROID_PACKAGE_DIR="$SCRIPT_DIR/sdk/src/main/jniLibs"
+HEADERS_OUT_DIR="$SCRIPT_DIR/native/include"
 
 # Parse arguments
-BUILD_ARCH="${1:-all}"
+BUILD_ARCH="all"
 CLEAN_BUILD=0
+UNIFIED=0
 
 for arg in "$@"; do
     case $arg in
-        arm64|arm|x86|x86_64|all)
+        arm64|x86_64|all)
             BUILD_ARCH="$arg"
+            ;;
+        --unified)
+            UNIFIED=1
             ;;
         --clean)
             CLEAN_BUILD=1
             ;;
     esac
 done
+
+# Select the crate / output library / features based on the build mode.
+if [ "$UNIFIED" -eq 1 ]; then
+    # Unified FFI crate: re-exports dash-network, key-wallet-ffi, rs-sdk-ffi and
+    # platform-wallet-ffi into a single cdylib. key-wallet-ffi is an auto-pulled
+    # Cargo git dependency — no separate checkout needed.
+    FFI_PACKAGE="rs-unified-sdk-ffi"
+    FFI_LIB="librs_unified_sdk_ffi.so"
+    # Orchard / shielded-pool support is an opt-in Cargo feature; enable it for
+    # parity with the iOS framework (which ships shielded by default).
+    FFI_FEATURES="shielded"
+else
+    # Existing read-path library — unchanged.
+    FFI_PACKAGE="rs-sdk-ffi"
+    FFI_LIB="librs_sdk_ffi.so"
+    FFI_FEATURES=""
+fi
 
 # Colors for output
 RED='\033[0;31m'
@@ -35,7 +67,7 @@ NC='\033[0m'
 # Minimum Android API level (API 24 = Android 7.0)
 ANDROID_API="${ANDROID_API:-24}"
 
-echo -e "${GREEN}Building Dash SDK FFI for Android ($BUILD_ARCH, API $ANDROID_API)${NC}"
+echo -e "${GREEN}Building $FFI_PACKAGE ($FFI_LIB) for Android ($BUILD_ARCH, API $ANDROID_API)${NC}"
 
 # Detect Android NDK
 if [ -z "$ANDROID_NDK_HOME" ]; then
@@ -115,7 +147,13 @@ build_target() {
     local RUST_TARGET_ENV_UPPER
     RUST_TARGET_ENV_UPPER="$(echo "$RUST_TARGET_ENV" | tr '[:lower:]' '[:upper:]')"
 
-    echo -ne "${GREEN}Building for $RUST_TARGET ($ABI_DIR)...${NC}"
+    echo -ne "${GREEN}Building $FFI_PACKAGE for $RUST_TARGET ($ABI_DIR)...${NC}"
+
+    # Only pass --features when non-empty (cargo rejects an empty --features arg).
+    local FEATURES_ARG=()
+    if [ -n "$FFI_FEATURES" ]; then
+        FEATURES_ARG=(--features "$FFI_FEATURES")
+    fi
 
     # NDK sysroot — gives C crates (e.g. rs-x11-hash) the Android headers.
     # cc-rs 1.x on Apple Silicon falls back to system clang when it can't find the NDK
@@ -141,7 +179,8 @@ build_target() {
            --lib \
            --target "$RUST_TARGET" \
            --release \
-           --package rs-sdk-ffi \
+           --package "$FFI_PACKAGE" \
+           "${FEATURES_ARG[@]}" \
            --manifest-path "$PROJECT_ROOT/Cargo.toml" \
            > /tmp/cargo_build_${ABI_DIR}.log 2>&1; then
         echo -e "\r${GREEN}✓ $RUST_TARGET ($ABI_DIR) build successful${NC}        "
@@ -154,15 +193,23 @@ build_target() {
     # Copy .so to jniLibs
     local OUT_DIR="$ANDROID_PACKAGE_DIR/$ABI_DIR"
     mkdir -p "$OUT_DIR"
-    cp "$PROJECT_ROOT/target/$RUST_TARGET/release/librs_sdk_ffi.so" \
-       "$OUT_DIR/librs_sdk_ffi.so"
-    echo -e "${GREEN}✓ Copied to $OUT_DIR/librs_sdk_ffi.so${NC}"
+    cp "$PROJECT_ROOT/target/$RUST_TARGET/release/$FFI_LIB" \
+       "$OUT_DIR/$FFI_LIB"
+    echo -e "${GREEN}✓ Copied to $OUT_DIR/$FFI_LIB${NC}"
+
+    # Collect cbindgen headers (emitted by each FFI crate's build.rs into the
+    # per-target include dir) so the JNA-binding generator has a stable copy.
+    local INCLUDE_SRC="$PROJECT_ROOT/target/$RUST_TARGET/release/include"
+    if [ -d "$INCLUDE_SRC" ]; then
+        mkdir -p "$HEADERS_OUT_DIR"
+        cp -R "$INCLUDE_SRC/." "$HEADERS_OUT_DIR/" 2>/dev/null || true
+    fi
 }
 
 if [ "$CLEAN_BUILD" -eq 1 ]; then
     echo -e "${GREEN}Cleaning Android build artifacts...${NC}"
-    for target in aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android; do
-        cargo clean --release --target "$target" -p rs-sdk-ffi --manifest-path "$PROJECT_ROOT/Cargo.toml" 2>/dev/null || true
+    for target in aarch64-linux-android x86_64-linux-android; do
+        cargo clean --release --target "$target" -p "$FFI_PACKAGE" --manifest-path "$PROJECT_ROOT/Cargo.toml" 2>/dev/null || true
     done
 fi
 
@@ -171,23 +218,15 @@ case "$BUILD_ARCH" in
     arm64)
         build_target "aarch64-linux-android"  "arm64-v8a"  "aarch64-linux-android"
         ;;
-    arm)
-        build_target "armv7-linux-androideabi" "armeabi-v7a" "armv7a-linux-androideabi"
-        ;;
-    x86)
-        build_target "i686-linux-android"     "x86"        "i686-linux-android"
-        ;;
     x86_64)
         build_target "x86_64-linux-android"   "x86_64"     "x86_64-linux-android"
         ;;
     all)
         build_target "aarch64-linux-android"   "arm64-v8a"  "aarch64-linux-android"
-        build_target "armv7-linux-androideabi" "armeabi-v7a" "armv7a-linux-androideabi"
-        build_target "i686-linux-android"      "x86"        "i686-linux-android"
         build_target "x86_64-linux-android"    "x86_64"     "x86_64-linux-android"
         ;;
     *)
-        echo -e "${RED}Unknown arch: $BUILD_ARCH. Use arm64|arm|x86|x86_64|all${NC}"
+        echo -e "${RED}Unknown arch: $BUILD_ARCH. Use arm64|x86_64|all (64-bit only)${NC}"
         exit 1
         ;;
 esac

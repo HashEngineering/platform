@@ -140,7 +140,7 @@ interface DashSdkFfi : Library {
     companion object {
         val INSTANCE: DashSdkFfi by lazy {
             NativeLoader.load()
-            Native.load("rs_sdk_ffi", DashSdkFfi::class.java)
+            Native.load(NativeLibrary.name, DashSdkFfi::class.java)
         }
     }
 }
@@ -155,14 +155,18 @@ interface DashSdkFfi : Library {
  * Field order and types must match the Rust repr(C) struct exactly:
  *   network: u32 (4) + padding (4) + dapi_addresses: *const c_char (8)
  *   + skip_asset_lock_proof_verification: bool (1) + padding (3)
- *   + request_retry_count: u32 (4) + request_timeout_ms: u64 (8) = 32 bytes
+ *   + request_retry_count: u32 (4) + request_timeout_ms: u64 (8)
+ *   + quorum_url: *const c_char (8) + platform_version: u32 (4) + padding (4)
+ *   = 48 bytes
  */
 @Structure.FieldOrder(
     "network",
     "dapi_addresses",
     "skip_asset_lock_proof_verification",
     "request_retry_count",
-    "request_timeout_ms"
+    "request_timeout_ms",
+    "quorum_url",
+    "platform_version"
 )
 class DashSDKConfigNative : Structure() {
     /** DashSDKNetwork enum value (0=Mainnet, 1=Testnet, 2=Regtest, 3=Devnet, 4=Local) */
@@ -173,6 +177,16 @@ class DashSDKConfigNative : Structure() {
     @JvmField var skip_asset_lock_proof_verification: Byte = 0
     @JvmField var request_retry_count: Int = 3
     @JvmField var request_timeout_ms: Long = 30_000L
+    /**
+     * Optional trusted-context-provider quorum lookup base URL; null = derive
+     * the default endpoint from [network]. Only honored on the
+     * `dash_sdk_create_trusted` path. Must be present in the struct regardless:
+     * Rust reads this field by offset, so omitting it leaves the pointer
+     * reading past the allocation and crashes in strlen.
+     */
+    @JvmField var quorum_url: String? = null
+    /** Pin to a specific protocol version; 0 = SDK default (auto-detect). */
+    @JvmField var platform_version: Int = 0
 }
 
 /**
