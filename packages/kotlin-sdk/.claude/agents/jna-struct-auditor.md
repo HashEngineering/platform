@@ -23,8 +23,8 @@ a `char*` field that the Kotlin side never declared.
 
 ## Scope
 
-- Kotlin structs: `packages/kotlin-sdk/sdk-jvm/src/main/kotlin/org/dash/sdk/ffi/DashSdkFfi.kt`
-  (and any other file under `sdk-jvm/src/main/kotlin/` declaring `: Structure()`).
+- Kotlin structs: `packages/kotlin-sdk/platform-sdk-jvm/src/main/kotlin/org/dash/sdk/ffi/DashSdkFfi.kt`
+  (and any other file under `platform-sdk-jvm/src/main/kotlin/` declaring `: Structure()`).
 - Authoritative C headers: `packages/kotlin-sdk/native/include/**/*.h`
   (primary: `rs-sdk-ffi/rs-sdk-ffi.h`). The header is the source of truth — the
   Kotlin must follow it, never the reverse.
@@ -32,7 +32,7 @@ a `char*` field that the Kotlin side never declared.
 ## Method
 
 1. **Enumerate** every JNA struct. Find them with
-   `grep -rn ": Structure()" sdk-jvm/src/main/kotlin/`.
+   `grep -rn ": Structure()" platform-sdk-jvm/src/main/kotlin/`.
 2. For each, **locate the C `typedef struct`** by the name without the
    `Native` suffix (e.g. `DashSDKConfigNative` → `typedef struct DashSDKConfig`).
    Read the full definition through its closing brace — do not stop early.

@@ -13,10 +13,11 @@ import org.junit.Test
  * Integration-style test that exercises the native library directly via JNA.
  *
  * Prerequisites:
- *   Run `./build_local.sh` (Mac/Linux) or `build_local.bat` (Windows) to build
- *   the Rust library for the host platform. Gradle will automatically point JNA
- *   at the output directory (target/release/) via the `dash.sdk.lib.dir`
- *   system property configured in build.gradle.kts.
+ *   Run `./build_platform_local.sh` / `./build_unified_local.sh` (Mac/Linux) or
+ *   `build_local.bat [platform|unified]` (Windows) to build the Rust library for the
+ *   host platform. Gradle will automatically point JNA at the output directory
+ *   (target/release/) via the `dash.sdk.lib.dir` system property configured in
+ *   platform-sdk-jvm/build.gradle.kts.
  *
  * Tests are skipped automatically when the native library is not present.
  */
@@ -28,7 +29,7 @@ class NativeSdkTest {
     @Before
     fun skipIfNoNativeLib() {
         assumeTrue(
-            "Native library not found — run build_local.sh first",
+            "Native library not found — run build_platform_local.sh first",
             nativeLibAvailable
         )
     }

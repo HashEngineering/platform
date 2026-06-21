@@ -4,7 +4,7 @@ bin/
 local.properties
 *.iml
 .idea/
-sdk/src/main/jniLibs/*/librs_sdk_ffi.so
-sdk/src/main/jniLibs/*/librs_unified_sdk_ffi.so
-sdk/src/main/jniLibs/*/libdash_spv_ffi.so
+platform-sdk-android/src/main/jniLibs/*/librs_sdk_ffi.so
+unified-sdk-android/src/main/jniLibs/*/librs_unified_sdk_ffi.so
+*/src/main/jniLibs/*/libdash_spv_ffi.so
 native/include

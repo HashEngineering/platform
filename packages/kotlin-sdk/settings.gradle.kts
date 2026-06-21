@@ -15,6 +15,14 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "KotlinDashSDK"
-include(":sdk-jvm")
-include(":sdk")
+
+// Platform flavor → rs-sdk-ffi (read-path). Holds the read-path SDK code.
+include(":platform-sdk-jvm")
+include(":platform-sdk-android")
+
+// Unified flavor → rs-unified-sdk-ffi (full SDK + wallet + shielded).
+// Builds on the platform flavor (unified is a superset of the read-path symbols).
+include(":unified-sdk-jvm")
+include(":unified-sdk-android")
+
 include(":console")

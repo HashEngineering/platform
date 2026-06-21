@@ -28,19 +28,30 @@ entry points the Swift SDK already consumes. Business logic stays in Rust (see �
 ### What exists in `kotlin-sdk` today
 A thin, **read-only** JNA-based SDK. Working, but a small fraction of the Swift surface.
 
+The SDK ships in two compile-time flavors — **platform** (`rs-sdk-ffi`, read-path) and
+**unified** (`rs-unified-sdk-ffi`, full SDK + wallet + shielded). The unified native
+library is a superset of the read-path symbols, so the unified flavor builds on the
+platform flavor (no separate shared module).
+
 | Module | Purpose | Target |
 |---|---|---|
-| `sdk-jvm` | Pure-JVM library: FFI bindings + services + models | JVM 17 |
-| `sdk` | Android library wrapping `sdk-jvm`, bundles `librs_sdk_ffi.so` for 4 ABIs | Android API 24+ |
-| `console` | CLI DPNS-search demo | JVM 17 |
+| `platform-sdk-jvm` | Read-path SDK (pure JVM): FFI bindings + services + models + tests; defaults to `rs_sdk_ffi` | JVM 17 |
+| `platform-sdk-android` | Android library: `api(:platform-sdk-jvm)` + `librs_sdk_ffi.so` | Android API 24+ |
+| `unified-sdk-jvm` | Unified flavor: `api(:platform-sdk-jvm)` + pins `rs_unified_sdk_ffi`; home of net-new wallet/shielded bindings | JVM 17 |
+| `unified-sdk-android` | Android library: `api(:unified-sdk-jvm)` + `librs_unified_sdk_ffi.so` | Android API 24+ |
+| `console` | CLI DPNS-search demo (depends on `:platform-sdk-jvm`) | JVM 17 |
 
-Implemented: `DashSDK` facade (`create`/`close`), JNA bindings (`DashSdkFfi`,
-`NativeLoader`, `ResultUnwrapper`), models (`Identity`, `DataContract`, `Document`,
-`Network`, `DashSDKException`), read services (`IdentityService`, `DataContractService`,
-`DocumentService`, `DpnsService`). All `suspend` on `Dispatchers.IO`. JSON parsed via regex.
+Implemented (in `platform-sdk-jvm`): `DashSDK` facade (`create`/`close`), JNA bindings (`DashSdkFfi`,
+`NativeLoader`, `NativeLibrary`, `ResultUnwrapper`), models (`Identity`, `DataContract`,
+`Document`, `Network`, `DashSDKException`), read services (`IdentityService`,
+`DataContractService`, `DocumentService`, `DpnsService`). All `suspend` on
+`Dispatchers.IO`. JSON parsed via regex.
+
+> The net-new wallet/shielded work below lands in `:unified-sdk-jvm` (it needs symbols
+> that exist only in `rs-unified-sdk-ffi`); read-path additions go in `:platform-sdk-jvm`.
 
 Tooling: JNA 5.14, Kotlin 2.0.21, coroutines 1.9, Gradle 8.9, AGP 8.5.2. Native build via
-`build_local.sh` (host) and `build_android.sh` (NDK cross-compile → `jniLibs/`).
+`build_native.sh` and the per-flavor wrappers (`build_{platform,unified}_{local,android}.sh`).
 
 ### What the Swift SDK has that Kotlin does not (the work)
 - **KeyWallet** (27 files): BIP-39 mnemonics, HD wallets, accounts (ECDSA/BLS/EdDSA), key
