@@ -23,8 +23,13 @@ internal object ResultUnwrapper {
     fun unwrap(result: DashSDKResultNative): Pointer {
         val errorPtr = result.error
         if (errorPtr != null) {
-            val code = ffi.dash_sdk_error_get_code(errorPtr)
-            val msg = ffi.dash_sdk_error_get_message(errorPtr) ?: "Unknown error"
+            // DashSDKError { enum code (C int @0); char *message (@POINTER_SIZE) }.
+            // Read the struct fields directly — the header exposes no error accessor
+            // functions (dash_sdk_error_get_code/_get_message do not exist in the
+            // library); only dash_sdk_error_free is exported. This mirrors DashSDK.create.
+            val code = errorPtr.getInt(0)
+            val msgPtr = errorPtr.getPointer(com.sun.jna.Native.POINTER_SIZE.toLong())
+            val msg = msgPtr?.getString(0) ?: "Unknown error"
             ffi.dash_sdk_error_free(errorPtr)
             throw DashSDKException(code, msg)
         }

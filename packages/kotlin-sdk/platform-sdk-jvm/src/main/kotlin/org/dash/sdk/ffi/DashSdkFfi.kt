@@ -81,6 +81,157 @@ interface DashSdkFfi : Library {
     /** Free an IdentityHandle. */
     fun dash_sdk_identity_handle_free(identity_handle: Pointer)
 
+    // --- Identity read-path batch (Phase 1a, batch 2) ---
+
+    /**
+     * Fetch an identity's balance and revision by its hex-encoded ID.
+     * Returns a [DashSDKResult] with a JSON string (balance + revision).
+     */
+    fun dash_sdk_identity_fetch_balance_and_revision(handle: Pointer, identity_id: String): DashSDKResultNative
+
+    /**
+     * Fetch an identity by a (unique) public key hash.
+     * Returns a [DashSDKResult] with a JSON string of the identity, or null if not found.
+     */
+    fun dash_sdk_identity_fetch_by_public_key_hash(handle: Pointer, public_key_hash: String): DashSDKResultNative
+
+    /**
+     * Fetch identities by a non-unique public key hash, paginated by [start_after] (may be null).
+     * Returns a [DashSDKResult] with a JSON string.
+     */
+    fun dash_sdk_identity_fetch_by_non_unique_public_key_hash(
+        handle: Pointer,
+        public_key_hash: String,
+        start_after: String?
+    ): DashSDKResultNative
+
+    /**
+     * Fetch the identity contract nonce.
+     * Returns a [DashSDKResult] with a C string.
+     */
+    fun dash_sdk_identity_fetch_contract_nonce(
+        handle: Pointer,
+        identity_id: String,
+        contract_id: String
+    ): DashSDKResultNative
+
+    /**
+     * Fetch the identity nonce.
+     * Returns a [DashSDKResult] with the nonce as a C string.
+     */
+    fun dash_sdk_identity_fetch_nonce(handle: Pointer, identity_id: String): DashSDKResultNative
+
+    /**
+     * Fetch an identity by its hex-encoded ID, returning a handle.
+     * Returns a [DashSDKResult] with [DashSDKResultDataType.IDENTITY_HANDLE];
+     * caller must free the handle with [dash_sdk_identity_destroy].
+     */
+    fun dash_sdk_identity_fetch_handle(handle: Pointer, identity_id: String): DashSDKResultNative
+
+    /**
+     * Fetch an identity's public keys.
+     * Returns a [DashSDKResult] with a JSON string of the public keys.
+     */
+    fun dash_sdk_identity_fetch_public_keys(handle: Pointer, identity_id: String): DashSDKResultNative
+
+    /**
+     * Fetch token balances for a single identity over a comma-separated list of token IDs.
+     * Returns a [DashSDKResult] with a JSON string (token IDs → balances).
+     */
+    fun dash_sdk_identity_fetch_token_balances(
+        handle: Pointer,
+        identity_id: String,
+        token_ids: String
+    ): DashSDKResultNative
+
+    /**
+     * Fetch token information for a single identity over a comma-separated list of token IDs.
+     * Returns a [DashSDKResult] with a JSON string (token IDs → info).
+     */
+    fun dash_sdk_identity_fetch_token_infos(
+        handle: Pointer,
+        identity_id: String,
+        token_ids: String
+    ): DashSDKResultNative
+
+    /**
+     * Fetch contract keys for multiple identities.
+     * [identity_ids] is comma-separated or a JSON array; [purposes] is the purpose list.
+     * [document_type_name] may be null.
+     * Returns a [DashSDKResult] with a JSON string (identity IDs → contract keys by purpose).
+     */
+    fun dash_sdk_identities_fetch_contract_keys(
+        handle: Pointer,
+        identity_ids: String,
+        contract_id: String,
+        document_type_name: String?,
+        purposes: String
+    ): DashSDKResultNative
+
+    /**
+     * Fetch token balances for multiple identities for a single token.
+     * Returns a [DashSDKResult] with a JSON string (identity IDs → balances).
+     */
+    fun dash_sdk_identities_fetch_token_balances(
+        handle: Pointer,
+        identity_ids: String,
+        token_id: String
+    ): DashSDKResultNative
+
+    /**
+     * Fetch token information for multiple identities for a single token.
+     * Returns a [DashSDKResult] with a JSON string (identity IDs → info).
+     */
+    fun dash_sdk_identities_fetch_token_infos(
+        handle: Pointer,
+        identity_ids: String,
+        token_id: String
+    ): DashSDKResultNative
+
+    /**
+     * Resolve a name to an identity.
+     * Returns a [DashSDKResult] with a JSON string.
+     */
+    fun dash_sdk_identity_resolve_name(handle: Pointer, name: String): DashSDKResultNative
+
+    /**
+     * Parse an identity from a JSON string into an identity handle (process-local; no network).
+     * Returns a [DashSDKResult] with [DashSDKResultDataType.IDENTITY_HANDLE];
+     * caller must free the handle with [dash_sdk_identity_destroy].
+     */
+    fun dash_sdk_identity_parse_json(json_str: String): DashSDKResultNative
+
+    /**
+     * Get a public key from an identity handle by its key ID.
+     * Returns a [DashSDKResult] with [DashSDKResultDataType.PUBLIC_KEY_HANDLE];
+     * caller must free the handle with [dash_sdk_identity_public_key_destroy].
+     */
+    fun dash_sdk_identity_get_public_key_by_id(identity: Pointer, key_id: Byte): DashSDKResultNative
+
+    /**
+     * Get the appropriate signing key for a state transition.
+     * [transition_type] mirrors the C `StateTransitionType` enum — see [StateTransitionType].
+     * Returns a [DashSDKResult] with [DashSDKResultDataType.PUBLIC_KEY_HANDLE];
+     * caller must free the handle with [dash_sdk_identity_public_key_destroy].
+     */
+    fun dash_sdk_identity_get_signing_key_for_transition(
+        identity_handle: Pointer,
+        transition_type: Int
+    ): DashSDKResultNative
+
+    /** Get the key ID (uint32) from an IdentityPublicKeyHandle. Returns 0 if the handle is null. */
+    fun dash_sdk_identity_public_key_get_id(key_handle: Pointer): Int
+
+    /** Free an IdentityPublicKeyHandle. */
+    fun dash_sdk_identity_public_key_destroy(handle: Pointer)
+
+    /**
+     * Destroy an IdentityHandle (header-true free for handles from `*_fetch_handle`,
+     * `*_parse_json`, etc.). This is the function the header actually exports; the older
+     * [dash_sdk_identity_handle_free] above is a non-header binding kept for compatibility.
+     */
+    fun dash_sdk_identity_destroy(handle: Pointer)
+
     // -------------------------------------------------------------------------
     // Data contract queries
     // -------------------------------------------------------------------------
@@ -322,6 +473,18 @@ object DashSDKResultDataType {
     const val DATA_CONTRACT_HANDLE = 5
     const val IDENTITY_BALANCE_MAP = 6
     const val PUBLIC_KEY_HANDLE = 7
+}
+
+// State transition type constants (mirrors the C `StateTransitionType` enum;
+// passed as a C int to dash_sdk_identity_get_signing_key_for_transition).
+object StateTransitionType {
+    const val IDENTITY_UPDATE = 0
+    const val IDENTITY_TOP_UP = 1
+    const val IDENTITY_CREDIT_TRANSFER = 2
+    const val IDENTITY_CREDIT_WITHDRAWAL = 3
+    const val DOCUMENTS_BATCH = 4
+    const val DATA_CONTRACT_CREATE = 5
+    const val DATA_CONTRACT_UPDATE = 6
 }
 
 // Network constants (mirrors DashSDKNetwork enum)
