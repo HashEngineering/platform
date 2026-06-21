@@ -11,6 +11,7 @@ import org.dash.sdk.services.DataContractService
 import org.dash.sdk.services.DocumentService
 import org.dash.sdk.services.DpnsService
 import org.dash.sdk.services.IdentityService
+import org.dash.sdk.services.SystemService
 
 /**
  * Main entry point for the Dash Platform Android SDK.
@@ -48,6 +49,9 @@ class DashSDK private constructor(
 
     /** Dash Platform Naming Service (DPNS) operations. */
     val dpns: DpnsService = DpnsService(handle)
+
+    /** System / status / protocol-version read queries. */
+    val system: SystemService = SystemService(handle)
 
     /** Release native resources. Safe to call multiple times. */
     override fun close() {

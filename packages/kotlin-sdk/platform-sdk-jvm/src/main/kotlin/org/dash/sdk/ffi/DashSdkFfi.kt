@@ -19,6 +19,19 @@ import com.sun.jna.ptr.LongByReference
 interface DashSdkFfi : Library {
 
     // -------------------------------------------------------------------------
+    // Global / process-wide (no SDK handle)
+    // -------------------------------------------------------------------------
+
+    /** Initialize global SDK state (logging/runtime). Idempotent; call once at startup. */
+    fun dash_sdk_init()
+
+    /** SDK version string (static storage — do not free). Header: `const char *`. */
+    fun dash_sdk_version(): String?
+
+    /** Set the global log verbosity (0 = off; higher = more verbose). */
+    fun dash_sdk_enable_logging(level: Byte)
+
+    // -------------------------------------------------------------------------
     // SDK lifecycle
     // -------------------------------------------------------------------------
 
@@ -126,6 +139,59 @@ interface DashSdkFfi : Library {
 
     /** Search DPNS names by prefix. Returns JSON array result. */
     fun dash_sdk_dpns_search(handle: Pointer, prefix: String, limit: Int): DashSDKResultNative
+
+    // -------------------------------------------------------------------------
+    // System / status / protocol-version queries (read-path; return DashSDKResult)
+    // -------------------------------------------------------------------------
+
+    /** Network the handle was created for (FFINetwork enum value: 0=Mainnet,1=Testnet,…). */
+    fun dash_sdk_get_network(handle: Pointer): Int
+
+    /** Overall SDK status. Returns a [DashSDKResultNative] with a JSON string. */
+    fun dash_sdk_get_status(handle: Pointer): DashSDKResultNative
+
+    /** Platform-only status. Returns a [DashSDKResultNative] with a JSON string. */
+    fun dash_sdk_get_platform_status(handle: Pointer): DashSDKResultNative
+
+    /**
+     * Epoch info for [count] epochs starting at [start_epoch] (null = current),
+     * ordered by [ascending]. Returns a JSON string result.
+     */
+    fun dash_sdk_system_get_epochs_info(
+        handle: Pointer,
+        start_epoch: String?,
+        count: Int,
+        ascending: Boolean
+    ): DashSDKResultNative
+
+    /** Current quorums info. Returns a JSON string result. */
+    fun dash_sdk_system_get_current_quorums_info(handle: Pointer): DashSDKResultNative
+
+    /**
+     * Total credits currently in platform. Returns a uint64 result.
+     * Not yet surfaced via [org.dash.sdk.services.SystemService]: the numeric
+     * `DashSDKResult` representation must be confirmed before adding a typed unwrap.
+     */
+    fun dash_sdk_system_get_total_credits_in_platform(handle: Pointer): DashSDKResultNative
+
+    /**
+     * Prefunded specialized balance for the hex-encoded [id]. Returns a uint64 result.
+     * Bindings-only for now (see [dash_sdk_system_get_total_credits_in_platform]).
+     */
+    fun dash_sdk_system_get_prefunded_specialized_balance(handle: Pointer, id: String): DashSDKResultNative
+
+    /** Protocol-version upgrade state. Returns a JSON string result. */
+    fun dash_sdk_protocol_version_get_upgrade_state(handle: Pointer): DashSDKResultNative
+
+    /**
+     * Protocol-version upgrade vote status from [start_pro_tx_hash] over [count]
+     * masternodes. Returns a JSON string result.
+     */
+    fun dash_sdk_protocol_version_get_upgrade_vote_status(
+        handle: Pointer,
+        start_pro_tx_hash: String,
+        count: Int
+    ): DashSDKResultNative
 
     // -------------------------------------------------------------------------
     // Helper: result accessors
