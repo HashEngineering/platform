@@ -3,9 +3,12 @@ package org.dash.sdk.services
 import com.sun.jna.Pointer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.dash.sdk.ffi.DashSDKErrorCode
 import org.dash.sdk.ffi.DashSdkFfi
 import org.dash.sdk.ffi.ResultUnwrapper
 import org.dash.sdk.models.DataContract
+import org.dash.sdk.models.DataContractFetchResult
+import org.dash.sdk.models.DashSDKException
 
 /**
  * High-level service for Dash Platform data contract operations.
@@ -42,6 +45,52 @@ class DataContractService internal constructor(private val sdkHandle: Pointer) {
     /** Release a DataContractHandle obtained from [fetchHandle]. */
     fun releaseHandle(handle: Pointer) {
         ffi.dash_sdk_data_contract_destroy(handle)
+    }
+
+    /**
+     * Fetch a data contract by ID, optionally returning its JSON string and/or serialized
+     * bytes. Wraps `dash_sdk_data_contract_fetch_with_serialization`, which returns a
+     * result struct by value carrying its own error/handle/buffers.
+     *
+     * The contract handle inside the result is freed along with the other inner buffers via
+     * `dash_sdk_data_contract_fetch_result_free` (this method does not surface the handle).
+     *
+     * @param contractId 32-byte contract ID as a hex string
+     * @param returnJson request the JSON representation
+     * @param returnSerialized request the serialized bytes
+     * @return a [DataContractFetchResult] with whichever fields were requested
+     * @throws DashSDKException if the FFI reports an error
+     */
+    suspend fun fetchWithSerialization(
+        contractId: String,
+        returnJson: Boolean,
+        returnSerialized: Boolean
+    ): DataContractFetchResult = withContext(Dispatchers.IO) {
+        val result = ffi.dash_sdk_data_contract_fetch_with_serialization(
+            sdkHandle, contractId, returnJson, returnSerialized
+        )
+        try {
+            val errorPtr = result.error
+            if (errorPtr != null) {
+                // Same DashSDKError shape ResultUnwrapper reads: int code @0, char* message @POINTER_SIZE.
+                val code = errorPtr.getInt(0)
+                val msgPtr = errorPtr.getPointer(com.sun.jna.Native.POINTER_SIZE.toLong())
+                val msg = msgPtr?.getString(0) ?: "Unknown error"
+                throw DashSDKException(code, msg)
+            }
+            val json = result.json_string?.getString(0, "UTF-8")
+            val serialized = result.serialized_data?.let { ptr ->
+                ptr.getByteArray(0, result.serialized_data_len.toInt())
+            }
+            DataContractFetchResult(id = contractId, json = json, serialized = serialized)
+        } finally {
+            // Free the inner heap pointers (json_string, serialized_data, contract_handle,
+            // error). The outer struct lives on our stack (returned by value); pass its
+            // backing pointer. Reading the struct's pointer requires the native fields to be
+            // laid down — write() ensures the JNA-side memory mirrors the returned struct.
+            result.write()
+            ffi.dash_sdk_data_contract_fetch_result_free(result.pointer)
+        }
     }
 
     /**

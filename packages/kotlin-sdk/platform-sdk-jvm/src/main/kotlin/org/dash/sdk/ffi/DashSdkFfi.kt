@@ -274,6 +274,29 @@ interface DashSdkFfi : Library {
     /** Free a DataContractHandle (header-true destroy). */
     fun dash_sdk_data_contract_destroy(contract_handle: Pointer)
 
+    /**
+     * Fetch a data contract by ID, optionally returning a JSON string and/or serialized
+     * bytes alongside the handle. Header:
+     * `struct DashSDKDataContractFetchResult dash_sdk_data_contract_fetch_with_serialization(
+     *   const SDKHandle *, const char *contract_id, bool return_json, bool return_serialized)`.
+     * Returns the result struct **by value** ([DashSDKDataContractFetchResultNative]); free its
+     * inner heap pointers with [dash_sdk_data_contract_fetch_result_free].
+     */
+    fun dash_sdk_data_contract_fetch_with_serialization(
+        sdk_handle: Pointer,
+        contract_id: String,
+        return_json: Boolean,
+        return_serialized: Boolean
+    ): DashSDKDataContractFetchResultNative
+
+    /**
+     * Free the inner heap-allocated buffers of a [DashSDKDataContractFetchResultNative].
+     * The outer struct lives on the caller's stack (returned by value) and is NOT freed —
+     * pass the backing pointer of the returned struct. After the call every inner pointer
+     * is nulled, so a redundant call is a no-op.
+     */
+    fun dash_sdk_data_contract_fetch_result_free(result: Pointer)
+
     // -------------------------------------------------------------------------
     // Document queries
     // -------------------------------------------------------------------------
@@ -305,6 +328,17 @@ interface DashSdkFfi : Library {
      * `DashSDKError *` (null on success); free a non-null error with [dash_sdk_error_free].
      */
     fun dash_sdk_document_destroy(sdk_handle: Pointer, document_handle: Pointer): Pointer?
+
+    /**
+     * Get document info from a DocumentHandle. Header:
+     * `struct DashSDKDocumentInfo *dash_sdk_document_get_info(const DocumentHandle *)`.
+     * Returns a heap pointer to a [DashSDKDocumentInfoNative] (or null); read it, then
+     * release it with [dash_sdk_document_info_free]. (NOT a DashSDKResult.)
+     */
+    fun dash_sdk_document_get_info(document_handle: Pointer): Pointer?
+
+    /** Free a [DashSDKDocumentInfoNative] returned by [dash_sdk_document_get_info]. */
+    fun dash_sdk_document_info_free(info: Pointer)
 
     // -------------------------------------------------------------------------
     // DPNS queries
@@ -413,6 +447,101 @@ class DashSDKIdentityInfoNative : Structure {
 
     constructor() : super()
     constructor(p: Pointer) : super(p)
+}
+
+/**
+ * Maps to `struct DashSDKDocumentInfo` in rs-sdk-ffi.h — the by-pointer return of
+ * [DashSdkFfi.dash_sdk_document_get_info].
+ *
+ * C 64-bit layout (all naturally 8-aligned; no padding):
+ *   id:                 char*     @0   (8)
+ *   owner_id:           char*     @8   (8)
+ *   data_contract_id:   char*     @16  (8)
+ *   document_type:      char*     @24  (8)
+ *   revision:           u64       @32  (8)
+ *   created_at:         i64       @40  (8)
+ *   updated_at:         i64       @48  (8)
+ *   data_fields_count:  uintptr_t @56  (8)
+ *   data_fields:        DashSDKDocumentField* @64 (8)
+ *   = 72 bytes
+ *
+ * Usage: construct over the returned pointer, [read], copy the fields out, then release
+ * the pointer with [DashSdkFfi.dash_sdk_document_info_free] (which frees the heap strings
+ * and the data_fields array) — do not touch the string/pointer fields after freeing.
+ *
+ * [data_fields] is left as an opaque [Pointer] (the field-array is not read on the
+ * read path); modeling DashSDKDocumentField would be required before dereferencing it.
+ */
+@Structure.FieldOrder(
+    "id",
+    "owner_id",
+    "data_contract_id",
+    "document_type",
+    "revision",
+    "created_at",
+    "updated_at",
+    "data_fields_count",
+    "data_fields"
+)
+class DashSDKDocumentInfoNative : Structure {
+    /** Document ID as a hex string (heap `char*`). */
+    @JvmField var id: String? = null
+    /** Owner ID as a hex string (heap `char*`). */
+    @JvmField var owner_id: String? = null
+    /** Data contract ID as a hex string (heap `char*`). */
+    @JvmField var data_contract_id: String? = null
+    /** Document type (heap `char*`). */
+    @JvmField var document_type: String? = null
+    /** Revision number. */
+    @JvmField var revision: Long = 0
+    /** Created-at timestamp (ms since epoch). */
+    @JvmField var created_at: Long = 0
+    /** Updated-at timestamp (ms since epoch). */
+    @JvmField var updated_at: Long = 0
+    /** Number of data fields in [data_fields]. */
+    @JvmField var data_fields_count: Long = 0
+    /** Pointer to the `DashSDKDocumentField[]` array (opaque; not read here). */
+    @JvmField var data_fields: Pointer? = null
+
+    constructor() : super()
+    constructor(p: Pointer) : super(p)
+}
+
+/**
+ * Maps to `struct DashSDKDataContractFetchResult` in rs-sdk-ffi.h — returned **by value**
+ * from [DashSdkFfi.dash_sdk_data_contract_fetch_with_serialization].
+ *
+ * C 64-bit layout (all naturally 8-aligned; no padding):
+ *   contract_handle:    DataContractHandle* @0  (8)
+ *   json_string:        char*               @8  (8)
+ *   serialized_data:    uint8_t*            @16 (8)
+ *   serialized_data_len:uintptr_t           @24 (8)
+ *   error:              DashSDKError*       @32 (8)
+ *   = 40 bytes
+ *
+ * After reading fields out, free the inner heap pointers with
+ * [DashSdkFfi.dash_sdk_data_contract_fetch_result_free] (pass this struct's backing
+ * pointer). [json_string] is left opaque ([Pointer]) so it is read explicitly before free
+ * rather than auto-marshalled twice.
+ */
+@Structure.FieldOrder(
+    "contract_handle",
+    "json_string",
+    "serialized_data",
+    "serialized_data_len",
+    "error"
+)
+class DashSDKDataContractFetchResultNative : Structure(), Structure.ByValue {
+    /** Handle to the fetched data contract (null on error or if not requested). */
+    @JvmField var contract_handle: Pointer? = null
+    /** JSON representation of the contract (heap `char*`; null on error or if not requested). */
+    @JvmField var json_string: Pointer? = null
+    /** Serialized contract bytes (heap `uint8_t*`; null on error or if not requested). */
+    @JvmField var serialized_data: Pointer? = null
+    /** Length of [serialized_data] in bytes. */
+    @JvmField var serialized_data_len: Long = 0
+    /** Heap-allocated [DashSDKError] (null on success). */
+    @JvmField var error: Pointer? = null
 }
 
 /**

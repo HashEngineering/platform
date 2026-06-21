@@ -1,5 +1,7 @@
 package org.dash.sdk
 
+import org.dash.sdk.ffi.DashSDKDataContractFetchResultNative
+import org.dash.sdk.ffi.DashSDKDocumentInfoNative
 import org.dash.sdk.ffi.DashSDKErrorCode
 import org.dash.sdk.ffi.DashSDKIdentityInfoNative
 import org.dash.sdk.ffi.DashSDKNetwork
@@ -31,5 +33,28 @@ class DashSDKTest {
     @Test
     fun identityInfoStructIs32Bytes() {
         assertEquals(32, DashSDKIdentityInfoNative().size())
+    }
+
+    /**
+     * Guards the DashSDKDocumentInfo layout against drift. C 64-bit (all 8-aligned):
+     * id*(8) + owner_id*(8) + data_contract_id*(8) + document_type*(8)
+     * + revision u64(8) + created_at i64(8) + updated_at i64(8)
+     * + data_fields_count uintptr(8) + data_fields*(8) = 72 bytes, no tail padding.
+     * Pure JVM/JNA — no rs-sdk-ffi library needed.
+     */
+    @Test
+    fun documentInfoStructIs72Bytes() {
+        assertEquals(72, DashSDKDocumentInfoNative().size())
+    }
+
+    /**
+     * Guards the DashSDKDataContractFetchResult layout against drift. C 64-bit (all 8-aligned):
+     * contract_handle*(8) + json_string*(8) + serialized_data*(8)
+     * + serialized_data_len uintptr(8) + error*(8) = 40 bytes, no tail padding.
+     * Pure JVM/JNA — no rs-sdk-ffi library needed.
+     */
+    @Test
+    fun dataContractFetchResultStructIs40Bytes() {
+        assertEquals(40, DashSDKDataContractFetchResultNative().size())
     }
 }

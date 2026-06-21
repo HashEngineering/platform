@@ -3,9 +3,12 @@ package org.dash.sdk.services
 import com.sun.jna.Pointer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.dash.sdk.ffi.DashSdkFfi
+import org.dash.sdk.ffi.DashSDKDocumentInfoNative
 import org.dash.sdk.ffi.DashSDKDocumentSearchParamsNative
+import org.dash.sdk.ffi.DashSDKErrorCode
+import org.dash.sdk.ffi.DashSdkFfi
 import org.dash.sdk.ffi.ResultUnwrapper
+import org.dash.sdk.models.DashSDKException
 import org.dash.sdk.models.Document
 
 /**
@@ -71,19 +74,31 @@ class DocumentService internal constructor(private val sdkHandle: Pointer) {
         parseDocumentArray(json)
     }
 
+    /**
+     * Read a [DashSDKDocumentInfo][DashSDKDocumentInfoNative] off a DocumentHandle.
+     * Reads the heap struct returned by `dash_sdk_document_get_info`, copies the fields
+     * out, and frees it. The struct exposes no JSON-properties blob (document data lives in
+     * the opaque `data_fields` array, not modeled on the read path), so [propertiesJson]
+     * is left as the empty object "{}".
+     */
     private fun parseDocumentHandle(handle: Pointer): Document {
-        // In the real implementation this would call a dash_sdk_document_get_info() FFI function.
-        // Placeholder: return a minimal Document using the handle address as a stand-in ID.
-        return Document(
-            id = handle.toString(),
-            ownerId = "",
-            dataContractId = "",
-            documentType = "",
-            revision = 0L,
-            createdAt = 0L,
-            updatedAt = 0L,
-            propertiesJson = "{}"
-        )
+        val infoPtr = ffi.dash_sdk_document_get_info(handle)
+            ?: throw DashSDKException(DashSDKErrorCode.INTERNAL_ERROR, "document_get_info returned null")
+        try {
+            val info = DashSDKDocumentInfoNative(infoPtr).apply { read() }
+            return Document(
+                id = info.id.orEmpty(),
+                ownerId = info.owner_id.orEmpty(),
+                dataContractId = info.data_contract_id.orEmpty(),
+                documentType = info.document_type.orEmpty(),
+                revision = info.revision,
+                createdAt = info.created_at,
+                updatedAt = info.updated_at,
+                propertiesJson = "{}"
+            )
+        } finally {
+            ffi.dash_sdk_document_info_free(infoPtr)
+        }
     }
 
     private fun parseDocumentArray(json: String): List<Document> {
