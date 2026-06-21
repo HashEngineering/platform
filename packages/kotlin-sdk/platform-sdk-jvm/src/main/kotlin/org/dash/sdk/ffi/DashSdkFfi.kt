@@ -75,11 +75,16 @@ interface DashSdkFfi : Library {
      */
     fun dash_sdk_identity_fetch_balance(handle: Pointer, identity_id_hex: String): DashSDKResultNative
 
-    /** Get identity info from an IdentityHandle. */
-    fun dash_sdk_identity_get_info(identity_handle: Pointer): DashSDKResultNative
+    /**
+     * Get identity info from an IdentityHandle. Header:
+     * `struct DashSDKIdentityInfo *dash_sdk_identity_get_info(const IdentityHandle *)`.
+     * Returns a heap pointer to a [DashSDKIdentityInfoNative] (or null); read it, then
+     * release it with [dash_sdk_identity_info_free]. (NOT a DashSDKResult.)
+     */
+    fun dash_sdk_identity_get_info(identity_handle: Pointer): Pointer?
 
-    /** Free an IdentityHandle. */
-    fun dash_sdk_identity_handle_free(identity_handle: Pointer)
+    /** Free a [DashSDKIdentityInfoNative] returned by [dash_sdk_identity_get_info]. */
+    fun dash_sdk_identity_info_free(info: Pointer)
 
     // --- Identity read-path batch (Phase 1a, batch 2) ---
 
@@ -226,9 +231,8 @@ interface DashSdkFfi : Library {
     fun dash_sdk_identity_public_key_destroy(handle: Pointer)
 
     /**
-     * Destroy an IdentityHandle (header-true free for handles from `*_fetch_handle`,
-     * `*_parse_json`, etc.). This is the function the header actually exports; the older
-     * [dash_sdk_identity_handle_free] above is a non-header binding kept for compatibility.
+     * Destroy an IdentityHandle (the header-true free for handles from `*_fetch_handle`,
+     * `*_parse_json`, `*_fetch`, etc.).
      */
     fun dash_sdk_identity_destroy(handle: Pointer)
 
@@ -344,15 +348,9 @@ interface DashSdkFfi : Library {
         count: Int
     ): DashSDKResultNative
 
-    // -------------------------------------------------------------------------
-    // Helper: result accessors
-    // -------------------------------------------------------------------------
-
-    /** Get error code from a [DashSDKError] pointer (read field at offset 0). */
-    fun dash_sdk_error_get_code(error: Pointer): Int
-
-    /** Get error message from a [DashSDKError] pointer (do not free separately). */
-    fun dash_sdk_error_get_message(error: Pointer): String?
+    // Note: the library exposes no error-accessor functions. A DashSDKError is read by
+    // its struct fields directly — `code` (C int @0) and `message` (char* @POINTER_SIZE) —
+    // see ResultUnwrapper / DashSDK.create. Only dash_sdk_error_free is exported.
 
     companion object {
         val INSTANCE: DashSdkFfi by lazy {
@@ -365,6 +363,33 @@ interface DashSdkFfi : Library {
 // ---------------------------------------------------------------------------
 // JNA Structure mappings for C structs in dash_sdk_ffi.h
 // ---------------------------------------------------------------------------
+
+/**
+ * Maps to `struct DashSDKIdentityInfo` in rs-sdk-ffi.h — the by-pointer return of
+ * [DashSdkFfi.dash_sdk_identity_get_info].
+ *
+ * 64-bit layout (all naturally aligned):
+ *   id: char* (8) + balance: u64 (8) + revision: u64 (8) + public_keys_count: u32 (4)
+ *   + 4 tail padding = 32 bytes.
+ *
+ * Usage: construct over the returned pointer, [read], copy the fields out, then release
+ * the pointer with [DashSdkFfi.dash_sdk_identity_info_free] (which frees the heap `id`
+ * string too) — do not touch [id] after freeing.
+ */
+@Structure.FieldOrder("id", "balance", "revision", "public_keys_count")
+class DashSDKIdentityInfoNative : Structure {
+    /** Identity ID as a hex string (heap `char*`). */
+    @JvmField var id: String? = null
+    /** Balance in credits. */
+    @JvmField var balance: Long = 0
+    /** Revision number. */
+    @JvmField var revision: Long = 0
+    /** Number of public keys on the identity. */
+    @JvmField var public_keys_count: Int = 0
+
+    constructor() : super()
+    constructor(p: Pointer) : super(p)
+}
 
 /**
  * Maps to DashSDKConfig in dash_sdk_ffi.h.

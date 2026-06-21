@@ -126,8 +126,11 @@ private fun searchLoop(ffi: DashSdkFfi, sdkHandle: Pointer, initialPrefix: Strin
 private fun checkResult(ffi: DashSdkFfi, result: DashSDKResultNative, op: String): Pointer? {
     val errorPtr = result.error
     if (errorPtr != null) {
-        val code = ffi.dash_sdk_error_get_code(errorPtr)
-        val msg  = ffi.dash_sdk_error_get_message(errorPtr) ?: "Unknown error"
+        // DashSDKError { enum code (C int @0); char *message (@POINTER_SIZE) } — read the
+        // struct fields directly; the library exposes no error-accessor functions.
+        val code = errorPtr.getInt(0)
+        val msg  = errorPtr.getPointer(com.sun.jna.Native.POINTER_SIZE.toLong())
+            ?.getString(0) ?: "Unknown error"
         ffi.dash_sdk_error_free(errorPtr)
         println("Error ($op) [code $code]: $msg")
         return null

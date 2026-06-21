@@ -3,8 +3,11 @@ package org.dash.sdk.services
 import com.sun.jna.Pointer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.dash.sdk.ffi.DashSDKErrorCode
+import org.dash.sdk.ffi.DashSDKIdentityInfoNative
 import org.dash.sdk.ffi.DashSdkFfi
 import org.dash.sdk.ffi.ResultUnwrapper
+import org.dash.sdk.models.DashSDKException
 import org.dash.sdk.models.Identity
 
 /**
@@ -23,12 +26,16 @@ class IdentityService internal constructor(private val sdkHandle: Pointer) {
      * @throws org.dash.sdk.models.DashSDKException on failure
      */
     suspend fun fetchIdentity(identityId: String): Identity = withContext(Dispatchers.IO) {
-        val result = ffi.dash_sdk_identity_fetch(sdkHandle, identityId)
+        // dash_sdk_identity_fetch returns a JSON *string*; only dash_sdk_identity_fetch_handle
+        // returns a real IdentityHandle that get_info/destroy can operate on. Passing the
+        // JSON-string pointer to identity_destroy crashes (it reads the base58 id text as a
+        // BTreeMap). See rs-sdk-ffi.h notes on dash_sdk_identity_fetch / _fetch_handle.
+        val result = ffi.dash_sdk_identity_fetch_handle(sdkHandle, identityId)
         val identityHandle = ResultUnwrapper.unwrapHandle(result)
         try {
             parseIdentityInfo(identityHandle)
         } finally {
-            ffi.dash_sdk_identity_handle_free(identityHandle)
+            ffi.dash_sdk_identity_destroy(identityHandle)
         }
     }
 
@@ -195,26 +202,25 @@ class IdentityService internal constructor(private val sdkHandle: Pointer) {
     fun destroyIdentity(identityHandle: Pointer) =
         ffi.dash_sdk_identity_destroy(identityHandle)
 
+    /**
+     * Read a [DashSDKIdentityInfo][DashSDKIdentityInfoNative] off an identity handle.
+     * Reads the heap struct returned by `dash_sdk_identity_get_info`, copies the fields
+     * out, and frees it — no JSON involved (the previous binding wrongly treated the
+     * struct pointer as a JSON-string result).
+     */
     private fun parseIdentityInfo(identityHandle: Pointer): Identity {
-        val infoResult = ffi.dash_sdk_identity_get_info(identityHandle)
-        val infoJson = ResultUnwrapper.unwrapString(infoResult)
-
-        // Parse simple JSON fields (avoids pulling in a full JSON library dependency)
-        return Identity(
-            id = jsonField(infoJson, "id"),
-            balance = jsonLong(infoJson, "balance"),
-            revision = jsonLong(infoJson, "revision"),
-            publicKeysCount = jsonInt(infoJson, "public_keys_count")
-        )
+        val infoPtr = ffi.dash_sdk_identity_get_info(identityHandle)
+            ?: throw DashSDKException(DashSDKErrorCode.INTERNAL_ERROR, "identity_get_info returned null")
+        try {
+            val info = DashSDKIdentityInfoNative(infoPtr).apply { read() }
+            return Identity(
+                id = info.id.orEmpty(),
+                balance = info.balance,
+                revision = info.revision,
+                publicKeysCount = info.public_keys_count
+            )
+        } finally {
+            ffi.dash_sdk_identity_info_free(infoPtr)
+        }
     }
-
-    // Minimal JSON field extractors for the flat identity info structure
-    private fun jsonField(json: String, key: String): String =
-        Regex(""""$key"\s*:\s*"([^"]+)"""").find(json)?.groupValues?.get(1) ?: ""
-
-    private fun jsonLong(json: String, key: String): Long =
-        Regex(""""$key"\s*:\s*(\d+)""").find(json)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
-
-    private fun jsonInt(json: String, key: String): Int =
-        Regex(""""$key"\s*:\s*(\d+)""").find(json)?.groupValues?.get(1)?.toIntOrNull() ?: 0
 }
