@@ -97,7 +97,7 @@ A `kotlin-sdk/CLAUDE.md` should be created restating this rule (Phase 0).
 
 | Swift / Apple | Kotlin / Android | Notes |
 |---|---|---|
-| Swift Package (`Sources/SwiftDashSDK`) | Gradle modules `sdk-jvm` + `sdk` | Keep the JVM/Android split already in place |
+| Swift Package (`Sources/SwiftDashSDK`) | Gradle flavor modules `platform-sdk-{jvm,android}` + `unified-sdk-{jvm,android}` | JVM/Android split per flavor; read-path in platform, wallet/shielded in unified (see §5) |
 | `DashSDKFFI` (C interop) | JNA bindings (`DashSdkFfi`) | Existing approach. Callback-heavy code (signer/persister/resolver) → JNA `Callback`. Consider JNI/Panama only if profiling demands it (§6) |
 | iOS Keychain | Android Keystore + `EncryptedSharedPreferences` / Tink | Biometric gate via `BiometricPrompt` |
 | SwiftData `@Model` (29) | Room `@Entity` + DAO + `RoomDatabase` | `#Predicate` → Room `@Query`; cascade/nullify → Room FK `onDelete` |
@@ -118,38 +118,64 @@ A `kotlin-sdk/CLAUDE.md` should be created restating this rule (Phase 0).
 
 ## 5. Target module structure
 
-Keep the existing 3-module layout and grow it; add an example app module.
+The two-flavor split (see §2) is the load-bearing decision here: **read-path code goes in
+the platform flavor; everything that needs the unified native library (KeyWallet,
+PlatformWallet, shielded, signing/persistence callbacks) goes in the unified flavor.**
+`unified-sdk-jvm` does `api(project(":platform-sdk-jvm"))`, so the unified flavor is a
+superset — it sees all the platform types and adds the wallet/shielded surface on top.
+Grow the existing layout; add an example app module.
 
 ```
 kotlin-sdk/
-├── sdk-jvm/      # pure-JVM: FFI bindings, DPP models, services, wallet logic-free wrappers
+├── platform-sdk-jvm/        # pure-JVM read-path SDK (rs-sdk-ffi). The host unit tests live here.
 │   └── org.dash.sdk/
-│       ├── ffi/            # JNA bindings + callbacks (signer, persister, resolver)
-│       ├── models / dpp/   # DPP types, enums, @Serializable data classes
-│       ├── keywallet/      # mnemonic, wallet, account, address, tx wrappers
-│       ├── platformwallet/ # manager, sync wrappers, dashpay, tokens, assetlock
+│       ├── ffi/             # JNA bindings for dash_sdk_* + ResultUnwrapper, NativeLoader/Library
+│       ├── models / dpp/    # DPP types, enums, @Serializable data classes
 │       ├── address/, utils/, helpers/, config/, core/ (logging)
-│       └── DashSDK.kt      # facade (already present, to be expanded)
-├── sdk/         # Android library: depends on :sdk-jvm
+│       ├── services/        # read services (Identity, DataContract, Document, DPNS)
+│       └── DashSDK.kt       # facade (already present, to be expanded)
+├── platform-sdk-android/    # Android .aar: api(:platform-sdk-jvm) + librs_sdk_ffi.so
+├── unified-sdk-jvm/         # api(:platform-sdk-jvm); adds the unified-only surface (rs-unified-sdk-ffi)
+│   └── org.dash.sdk/
+│       ├── ffi/             # JNA bindings + callbacks (signer, persister, resolver) for
+│       │                    #   platform_wallet_* / key-wallet / shielded symbols
+│       ├── keywallet/       # mnemonic, wallet, account, address, tx wrappers
+│       └── platformwallet/  # manager, sync wrappers, dashpay, tokens, assetlock
+├── unified-sdk-android/     # Android .aar: api(:unified-sdk-jvm) + librs_unified_sdk_ffi.so
 │   └── org.dash.sdk.android/
-│       ├── persistence/    # Room entities (29), DAOs, database, migrations
-│       ├── security/       # Keystore signer, biometric, keystore-backed resolver/persister
-│       └── state/          # StateFlow holders mirroring PlatformWalletManager observables
-├── example-app/ # NEW Android app module (Compose) ≈ SwiftExampleApp
-├── console/     # existing CLI (extend to mirror example flows where headless-feasible)
-└── build_android.sh / build_local.sh  # extend to build the FULL native surface (§6)
+│       ├── persistence/     # Room entities (29), DAOs, database, migrations
+│       ├── security/        # Keystore signer, biometric, keystore-backed resolver/persister
+│       └── state/           # StateFlow holders mirroring PlatformWalletManager observables
+├── example-app/             # NEW Android app module (Compose) ≈ SwiftExampleApp; uses unified-sdk-android
+├── console/                 # existing CLI (depends on :platform-sdk-jvm)
+└── build_native.sh + build_{platform,unified}_{local,android}.sh   # native build (see §6)
 ```
 
-Persistence + Keystore live in the **Android** module (Room/Keystore are Android APIs).
-`sdk-jvm` should define persistence/security as **interfaces** so JVM consumers (and tests)
-can supply non-Android implementations; the Android module provides Room/Keystore impls.
-This mirrors the Swift design where the SDK is handed a persistence + keychain handler.
+Persistence + Keystore live in the **`unified-sdk-android`** module (Room/Keystore are
+Android APIs, and these features are driven by the platform-wallet persister callbacks that
+only exist in the unified library). Define persistence/security as **interfaces** in
+`unified-sdk-jvm` so JVM consumers (and tests) can supply non-Android implementations; the
+Android module provides the Room/Keystore impls. This mirrors the Swift design where the
+SDK is handed a persistence + keychain handler.
+
+> Why persistence/security sit on the unified side, not platform: they exist to service the
+> wallet/sync callbacks (signer, persister, resolver) which are unified-only symbols. The
+> platform flavor is a pure read path with no wallet state to persist.
 
 ---
 
 ## 6. Native / FFI strategy — RESOLVED & BUILD-PROVEN by Phase-0 spike
 
-The spike (2026-06-19) settled this **and proved the build end-to-end**. Far simpler than
+> **Historical record (2026-06-19 spike).** The *findings* below (unified crate bundles
+> everything, cbindgen headers auto-emitted, 64-bit-only ABI decision, callback strategy)
+> are still authoritative. The *delivery mechanism* described here — a single `sdk` module
+> holding both `.so`s with a runtime `dash.sdk.native.lib` switch, built by
+> `build_android.sh --unified` — has since been **superseded by the §2 flavor split**:
+> two flavors chosen at compile time (`platform-*` → `rs-sdk-ffi`, `unified-*` →
+> `rs-unified-sdk-ffi`), built by `build_native.sh` + the per-flavor wrappers. Read the
+> script/module names below as their §2 equivalents.
+
+The spike settled the native strategy **and proved the build end-to-end**. Far simpler than
 feared: **the unified crate already exists and bundles everything.**
 
 ### Build proof (arm64-v8a)
@@ -236,19 +262,16 @@ dirs removed.
    and **pin** callback objects (strong ref) for as long as Rust holds them; run the persister
    off the main thread. Fall back to a JNI shim only if JNA proves fragile under profiling.
 
-### Concrete change to the Android build (small, well-scoped)
-In `kotlin-sdk/build_android.sh`:
-- `FFI_PACKAGE_DIR` → `rs-unified-sdk-ffi`; build flags `--package rs-sdk-ffi` →
-  `-p rs-unified-sdk-ffi --features shielded`.
-- Copy `target/<rust-target>/release/librs_unified_sdk_ffi.so` →
-  `jniLibs/<abi>/librs_unified_sdk_ffi.so` (was `librs_sdk_ffi.so`).
-- Update `NativeLoader` to load `rs_unified_sdk_ffi`; update `--clean` target list package.
-- After a build, copy headers from `target/<rust-target>/release/include/*/*.h` for the
-  binding generator.
-- Mirror the same package swap in `build_local.sh` (host `.dylib`/`.so` for JVM tests).
+### Concrete change to the Android build — DONE, then superseded by the flavor split
+The spike originally proposed mutating `build_android.sh` to swap `rs-sdk-ffi` →
+`rs-unified-sdk-ffi --features shielded` in place. That was implemented, then **replaced by
+the §2 flavor split**: `build_native.sh <platform|unified>` + the per-flavor wrappers now
+build each crate into its own flavor module's `jniLibs/` (two 64-bit ABIs) and the host
+`target/release` for tests. cbindgen headers are still collected to
+`kotlin-sdk/native/include/<crate>/*.h` — the input for the Phase 1 / 1a binding work.
 
-Deliverable: updated `build_android.sh` / `build_local.sh` producing the unified `.so` for 4
-ABIs + host, and a Kotlin `BUILD_GUIDE_FOR_AI.md`.
+Remaining deliverable from this section: a Kotlin `BUILD_GUIDE_FOR_AI.md` (the build scripts
+themselves are done).
 
 ---
 
@@ -258,23 +281,42 @@ Each phase is independently reviewable and leaves the tree buildable. Phases 1�
 8 the app; 9 tests; 10 polish. Within the SDK, order is chosen so each layer compiles against
 the one below.
 
-### Phase 0 — Foundations & native surface  *(blocking)*
-- Settle the unified native library strategy (§6); extend build scripts; bundle/produce all
-  required `.so`s for 4 ABIs and host (`.dylib`/`.so`).
-- Generate or scaffold full JNA bindings for the merged header (`dash_sdk_*`,
-  `platform_wallet_*`, `key_wallet_*`, `dash_core_sdk_*`).
+### Phase 0 — Foundations & native surface  *(blocking — DONE for native; flavor split landed)*
+- Native library strategy settled (§6) and **delivered via the two-flavor split** (§2):
+  `build_native.sh` + per-flavor wrappers produce `librs_sdk_ffi.so` (platform) and
+  `librs_unified_sdk_ffi.so` (unified) for the two **64-bit** ABIs (`arm64-v8a`, `x86_64`)
+  plus the host `.dylib`/`.so`. ✅
+- Generate or scaffold the JNA bindings. Split along the flavor seam: read-path
+  `dash_sdk_*` bindings in `platform-sdk-jvm` (**Phase 1a**); the unified-only surface
+  (`platform_wallet_*`, key-wallet domain prefixes, shielded) in `unified-sdk-jvm` (Phase 1).
 - Add `kotlinx.serialization`, Room, `androidx.biometric`, Compose, Hilt (or chosen DI),
   CameraX/ML-Kit to `libs.versions.toml`.
 - Write `kotlin-sdk/CLAUDE.md` (architectural rule, §3) and a Kotlin `BUILD_GUIDE_FOR_AI.md`.
 
-### Phase 1 — FFI bindings & result/error infrastructure
+### Phase 1a — Complete `rs-sdk-ffi` JNA bindings (platform-sdk only)
+Module: **`platform-sdk-jvm`** · Header: `native/include/rs-sdk-ffi/rs-sdk-ffi.h` · Lib: `rs_sdk_ffi`.
+The natural first slice — a strict subset of Phase 1, needing none of the unified library,
+callbacks, Room, or Keystore. The existing `DashSdkFfi.kt` binds ~21 of the **216** exported
+`dash_sdk_*` functions; finish the rest.
+- Full JNA `interface` + `repr(C)` `Structure` surface for all `dash_sdk_*` entry points,
+  keyed off the header (not a guessed prefix). Extend `ResultUnwrapper` / `DashSDKException`
+  for the new result types; `SDKError` → Kotlin `sealed class`.
+- **No** callbacks, wallet/shielded symbols, or the unified lib — those are Phase 1.
+- Verify: `./build_platform_local.sh && ./gradlew :platform-sdk-jvm:test` against `librs_sdk_ffi`.
+  Keep `console` building as the regression anchor.
+
+### Phase 1 — Unified FFI bindings & result/error infrastructure
+Module: **`unified-sdk-jvm`** (builds on Phase 1a via `api(:platform-sdk-jvm)`).
 Swift refs: `FFI/`, `SwiftDashSDK.swift`, `PlatformWalletFFI.swift`, `ResultUnwrapper`.
-- Full JNA `interface`s + `Structure`s for all entry points and `repr(C)` structs.
-- `ResultUnwrapper` parity for the new result types; `SDKError` → Kotlin `sealed class`.
+- Full JNA `interface`s + `Structure`s for the **unified-only** entry points
+  (`platform_wallet_*`, the key-wallet domain prefixes per §6, shielded) and their `repr(C)`
+  structs — from the cbindgen headers, in the merge order in §6.
+- `ResultUnwrapper` parity for the new result types (reuse the platform infra from Phase 1a).
 - Callback scaffolding (typed JNA `Callback` wrappers) for signer/persister/resolver — impls
   land in later phases, but the marshalling contract is fixed here.
 
 ### Phase 2 — DPP & domain models
+Module: **`platform-sdk-jvm`** (shared read-path types; extends the existing models).
 Swift refs: `DPP/`, `Models/`, `DashNetwork.swift`, `Address/PlatformAddressInfo`, `Wallet/WalletModels`, `Utils/DataExtensions` (base58/hex), `Validation`.
 - `@Serializable` data classes + enums (`KeyType`, `KeyPurpose`, `SecurityLevel`, `Network`
   already exists, extend).
@@ -282,15 +324,17 @@ Swift refs: `DPP/`, `Models/`, `DashNetwork.swift`, `Address/PlatformAddressInfo
 - State-transition form definitions (`StateTransitionDefinitions`) as data + sealed inputs.
 
 ### Phase 3 — Persistence (Room)
+Module: **`unified-sdk-android`** (Room impl) + **`unified-sdk-jvm`** (the handler interface).
 Swift refs: `Persistence/` (29 `@Model`), `DashModelContainer`, `DataContractParser`, `ContractIdentityLinker`, `Services/DataManager`.
 - One Room `@Entity` per `PersistentX`; relationships via FK + `@Relation`; uniqueness via
   indices; cascade/nullify via `onDelete`.
 - `RoomDatabase` + `Migration`s mirroring `DashMigrationPlan` (additive).
 - DAOs exposing `Flow<…>` for reactive reads (the `@Query` analogue).
 - Port `DataContractParser` (it parses Rust JSON → entities — this is marshalling, allowed).
-- Define a `PersistenceHandler` interface in `sdk-jvm`; Room impl in `sdk` (Android).
+- Define a `PersistenceHandler` interface in `unified-sdk-jvm`; Room impl in `unified-sdk-android`.
 
 ### Phase 4 — Security & callback bridges
+Module: **`unified-sdk-android`** (Keystore/biometric impl) + **`unified-sdk-jvm`** (callback wiring from Phase 1).
 Swift refs: `Security/` (`KeychainManager`, `KeychainInspector`), `FFI/KeychainSigner`, `FFI/MnemonicResolverAndPersister`, `Core/Wallet/WalletStorage`.
 - Android Keystore-backed `KeystoreManager` (store/retrieve private key bytes, special MN keys).
 - Biometric gate via `BiometricPrompt`.
@@ -300,13 +344,16 @@ Swift refs: `Security/` (`KeychainManager`, `KeychainInspector`), `FFI/KeychainS
 - Mnemonic/metadata storage (`WalletStorage` analogue) in `EncryptedSharedPreferences`.
 
 ### Phase 5 — KeyWallet wrappers
+Module: **`unified-sdk-jvm`** (key-wallet symbols are unified-only).
 Swift refs: `KeyWallet/` (27 files).
 - Thin handle-wrapper classes: `Mnemonic`, `Wallet`, `Account`(+BLS/EdDSA), `KeyDerivation`,
   `Address`/`AddressPool`, `Transaction`/`TxOutput`, `KeyManager`/`WalletManager`,
   `Managed*` lifecycle wrappers, `KeyWalletTypes` enums.
-- Every method = one `key_wallet_*` FFI call. No derivation logic in Kotlin.
+- Every method = one key-wallet FFI call (domain prefixes per §6: `managed_account_`,
+  `wallet_manager_`, `bls_account_`, …, **not** `key_wallet_`). No derivation logic in Kotlin.
 
 ### Phase 6 — PlatformWallet & sync
+Module: **`unified-sdk-jvm`** (wrappers) + **`unified-sdk-android`** (StateFlow holders / state).
 Swift refs: `PlatformWallet/` (19+ files incl. `*SPV`, `*AddressSync`, `*IdentitySync`, `*ShieldedSync`, `*ShieldedFunding`, `IdentityManager`, `Managed*`, `DashPay*`, `Tokens/`, `AssetLock/`, `CoreWallet/`, `PlatformWalletPersistenceHandler`).
 - `PlatformWalletManager` as a coroutine-based coordinator exposing `StateFlow`s mirroring the
   Swift `@Published` set (spvProgress, syncing flags, wallets map, lastError, shielded tree
@@ -316,6 +363,8 @@ Swift refs: `PlatformWallet/` (19+ files incl. `*SPV`, `*AddressSync`, `*Identit
 - DashPay models, token actions, asset-lock manager wrappers.
 
 ### Phase 7 — High-level SDK API & services
+Module: read-path facade/services + `SDKLogger` in **`platform-sdk-jvm`**; any wallet-aware
+surface (identity registration/top-up that needs wallet state) in **`unified-sdk-jvm`**.
 Swift refs: `SDK.swift` (entry point, nested `Identities`/`Addresses`/`SDKStatus`), `Core/Services/SDKLogger`, `Address/Addresses`, existing `services/`.
 - Expand the existing `DashSDK` facade: init/version negotiation/DAPI discovery/quorum config,
   protocol-version refresh, known-contract preload.
@@ -325,7 +374,8 @@ Swift refs: `SDK.swift` (entry point, nested `Identities`/`Addresses`/`SDKStatus
 ### Phase 8 — Example app (Android / Compose)
 Swift ref: `SwiftExampleApp/` (138 files, 5 tabs).
 - New `example-app` module. Architecture: Compose + Navigation + ViewModels(`StateFlow`) +
-  Hilt + Room (reuse `sdk` module). Mirror the 5 tabs:
+  Hilt + Room (depends on `unified-sdk-android` — it needs the wallet/shielded surface).
+  Mirror the 5 tabs:
   1. **Sync status** (SPV heights, BLAST sync, shielded stats)
   2. **Wallets** (create/import/restore, accounts, addresses, send/receive, tx history, QR)
   3. **Identities** (create/register/top-up, keys, DPNS, DashPay contacts)
@@ -339,11 +389,12 @@ Swift ref: `SwiftExampleApp/` (138 files, 5 tabs).
 
 ### Phase 9 — Tests
 Swift refs: `SwiftTests/SwiftDashSDKTests` (~206), `SwiftExampleAppTests` (~79), UI tests.
-- **JVM unit tests** (`sdk-jvm`): data transformers, error mapping, validation, base58/hex,
-  key/identity type conversions, SDK-method bindings against a mock SDK (no DAPI) — mirror
-  `DataTransformersTests`, `ErrorHandlingTests`, `ValidationTests`, `SDKMethodTests`,
-  `IdentityManagerTests`, `KeyManagerTests`, `PlatformWalletTypesTests`.
-- **Instrumented/integration tests** (`sdk`, Android): native lib load, create/destroy,
+- **JVM unit tests** (read-path in `platform-sdk-jvm`; wallet/key types in `unified-sdk-jvm`):
+  data transformers, error mapping, validation, base58/hex, key/identity type conversions,
+  SDK-method bindings against a mock SDK (no DAPI) — mirror `DataTransformersTests`,
+  `ErrorHandlingTests`, `ValidationTests`, `SDKMethodTests`, `IdentityManagerTests`,
+  `KeyManagerTests`, `PlatformWalletTypesTests`.
+- **Instrumented/integration tests** (`platform-sdk-android` / `unified-sdk-android`): native lib load, create/destroy,
   Room persistence round-trips, Keystore signer, multi-network isolation, platform-wallet
   integration — mirror `PlatformWalletTests`, `PlatformWalletIntegrationTests`,
   `ManagedPlatformAddressWalletTests`, `ShieldedSyncGenerationTests`, `StateManagementTests`.
@@ -368,7 +419,7 @@ Swift refs: `SwiftTests/SwiftDashSDKTests` (~206), `SwiftExampleAppTests` (~79),
 | Swift (`Sources/SwiftDashSDK/…`) | Kotlin target | Phase |
 |---|---|---|
 | `SDK.swift`, `SwiftDashSDK.swift`, `DashNetwork.swift`, `ConcurrencyCompat.swift` | `DashSDK.kt`, `Network`, coroutine scopes | 7 / 1 |
-| `FFI/*` | `ffi/*` (bindings + callbacks) | 1, 4 |
+| `FFI/*` | `ffi/*` — `dash_sdk_*` in `platform-sdk-jvm` (1a); unified surface + callbacks in `unified-sdk-jvm` | 1a, 1, 4 |
 | `DPP/*`, `Models/*` | `dpp/*`, `models/*` (`@Serializable`) | 2 |
 | `Utils/*`, `Helpers/*`, `Address/*`, `Wallet/*`, `Config/*` | `utils/`, `helpers/`, `address/`, `config/` | 2, 7 |
 | `Persistence/*` (29 `@Model`), `Services/DataManager`, `Core/Utils/DataContractParser` | `persistence/*` (Room) | 3 |
@@ -386,9 +437,9 @@ Swift refs: `SwiftTests/SwiftDashSDKTests` (~206), `SwiftExampleAppTests` (~79),
 1. **Native surface — RESOLVED (§6).** Build & bundle the existing `rs-unified-sdk-ffi`
    cdylib (`--features shielded`) instead of just `rs-sdk-ffi`. `key-wallet-ffi` is an
    auto-pulled Cargo git dep (no checkout needed); headers are emitted by cbindgen on every
-   build. Remaining unknown: whether all transitive C deps (e.g. openssl-sys) cross-compile
-   cleanly for all 4 Android ABIs under the unified crate — validate in Phase 0 by actually
-   running the modified `build_android.sh`.
+   build. Transitive C deps (e.g. openssl-sys) were confirmed to cross-compile cleanly for
+   both 64-bit ABIs under the unified crate during the Phase-0 build (run via the flavor
+   wrappers, `build_unified_android.sh`); 32-bit is intentionally unsupported (§6).
 2. **JNA callbacks across NDK** for signer/persister/resolver: confirm lifetime/threading
    (pin callback objects; persister runs off-main; signer materializes key briefly). Fallback:
    JNI shim for the callback-heavy paths if JNA proves fragile.
@@ -413,9 +464,11 @@ Swift refs: `SwiftTests/SwiftDashSDKTests` (~206), `SwiftExampleAppTests` (~79),
   **`kotlin-quality-engineer`** for review gates (no force-unwraps/unsafe casts, file/test
   placement, idiomatic coroutines/Flow).
 - One PR per phase (or per subsystem within a phase), each green-building with its tests.
-- Land Phase 0 + 1 first and prove a single non-trivial `platform_wallet_*` call end-to-end
-  (create manager → callback → Room write) before scaling out — it validates the whole
-  native+callback+persistence spine.
+- **Start with Phase 1a** (complete the `rs-sdk-ffi` bindings in `platform-sdk-jvm`) — it's
+  self-contained, ships value immediately, and needs none of the unified machinery.
+- Then land Phase 1 + the unified spine and prove a single non-trivial `platform_wallet_*`
+  call end-to-end (create manager → callback → Room write) before scaling out — it validates
+  the whole native+callback+persistence path.
 - Keep the read-path `console` and existing services working throughout as a regression anchor.
 
 ---
@@ -426,4 +479,6 @@ Swift refs: `SwiftTests/SwiftDashSDKTests` (~206), `SwiftExampleAppTests` (~79),
 - `SwiftExampleApp`: 138 Swift files (≈109 in app target) — 5 tabs, SwiftUI + SwiftData.
 - Tests: `SwiftDashSDKTests` 12 files / ~206 fns; `SwiftExampleAppTests` 10 files / ~79 fns;
   UI tests 2 files.
-- Existing `kotlin-sdk`: 51 files; read-only SDK over JNA; bundles `librs_sdk_ffi.so` (4 ABIs).
+- Existing `kotlin-sdk`: read-only SDK over JNA, split into platform/unified flavors;
+  `platform-sdk-android` bundles `librs_sdk_ffi.so` and `unified-sdk-android`
+  `librs_unified_sdk_ffi.so`, each for the two 64-bit ABIs (`arm64-v8a`, `x86_64`).
