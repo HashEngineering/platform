@@ -13,3 +13,16 @@ configure<org.gradle.api.plugins.JavaApplication> {
 dependencies {
     "implementation"(project(":platform-sdk-jvm"))
 }
+
+// The `run` task launches DpnsSearch (the configured application mainClass).
+// Add a sibling task to launch the GetIdentity console program.
+tasks.register<JavaExec>("runGetIdentity") {
+    group = "application"
+    description = "Run the GetIdentity console program."
+    mainClass.set("org.dash.sdk.console.GetIdentityKt")
+    classpath = the<SourceSetContainer>()["main"].runtimeClasspath
+    jvmArgs = listOf(
+        "-Djna.library.path=${rootProject.file("../../target/release").absolutePath}"
+    )
+    standardInput = System.`in`
+}
