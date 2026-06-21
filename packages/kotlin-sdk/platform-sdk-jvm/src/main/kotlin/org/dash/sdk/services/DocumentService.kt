@@ -33,7 +33,9 @@ class DocumentService internal constructor(private val sdkHandle: Pointer) {
         try {
             parseDocumentHandle(docHandle)
         } finally {
-            ffi.dash_sdk_document_handle_free(docHandle)
+            // Query-path cleanup: dash_sdk_document_destroy(sdkHandle, docHandle) — matches
+            // the Swift reference. Returns a DashSDKError* (null on success); free if present.
+            ffi.dash_sdk_document_destroy(sdkHandle, docHandle)?.let { ffi.dash_sdk_error_free(it) }
         }
     }
 

@@ -252,8 +252,27 @@ interface DashSdkFfi : Library {
      */
     fun dash_sdk_data_contract_fetch_json(handle: Pointer, contract_id_hex: String): DashSDKResultNative
 
-    /** Free a DataContractHandle. */
-    fun dash_sdk_data_contract_handle_free(contract_handle: Pointer)
+    /**
+     * Fetch a data contract's revision history. Returns a [DashSDKResult] with a JSON string.
+     * @param start_at_ms only history entries at/after this timestamp (ms); 0 = from genesis.
+     */
+    fun dash_sdk_data_contract_fetch_history(
+        handle: Pointer,
+        contract_id: String,
+        limit: Int,
+        offset: Int,
+        start_at_ms: Long
+    ): DashSDKResultNative
+
+    /**
+     * Get the JSON schema for [document_type] from a DataContractHandle. Header:
+     * `char *dash_sdk_data_contract_get_schema(const DataContractHandle *, const char *)`.
+     * Returns a heap C string (or null) — read it, then free with [dash_sdk_string_free].
+     */
+    fun dash_sdk_data_contract_get_schema(contract_handle: Pointer, document_type: String): Pointer?
+
+    /** Free a DataContractHandle (header-true destroy). */
+    fun dash_sdk_data_contract_destroy(contract_handle: Pointer)
 
     // -------------------------------------------------------------------------
     // Document queries
@@ -279,8 +298,13 @@ interface DashSdkFfi : Library {
         params: DashSDKDocumentSearchParamsNative
     ): DashSDKResultNative
 
-    /** Free a DocumentHandle. */
-    fun dash_sdk_document_handle_free(document_handle: Pointer)
+    /**
+     * Destroy a DocumentHandle from a fetch/query. Header:
+     * `struct DashSDKError *dash_sdk_document_destroy(SDKHandle *, DocumentHandle *)`.
+     * Takes the SDK handle (matches the Swift query-path cleanup). Returns a
+     * `DashSDKError *` (null on success); free a non-null error with [dash_sdk_error_free].
+     */
+    fun dash_sdk_document_destroy(sdk_handle: Pointer, document_handle: Pointer): Pointer?
 
     // -------------------------------------------------------------------------
     // DPNS queries
