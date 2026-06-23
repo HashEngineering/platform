@@ -14,6 +14,7 @@ import org.dash.sdk.ffi.ResultUnwrapper
 import org.dash.sdk.models.DashSDKException
 import org.dash.sdk.models.Identity
 import org.dash.sdk.models.IdentityPublicKeyParams
+import org.dash.sdk.signing.Signer
 
 /**
  * High-level service for Dash Platform identity operations.
@@ -284,6 +285,113 @@ class IdentityService internal constructor(private val sdkHandle: Pointer) {
         Reference.reachabilityFence(dataBuffers)
         Reference.reachabilityFence(rows)
         handle
+    }
+
+    /**
+     * Register a new identity, funding it with an **InstantSend-locked** asset lock, and
+     * wait for platform confirmation. Network call — requires a live node.
+     *
+     * The caller supplies a ready-made asset-lock proof (the funding is out of scope for
+     * the read-path SDK): the serialized [instantLockBytes] + [transactionBytes], the
+     * [outputIndex] of the asset-lock output, and that output's [assetLockPrivateKey]
+     * (32 bytes). [signer] must be able to sign with the [publicKeys] (it signs the
+     * IdentityCreate transition) — keep it alive for the duration of this call.
+     *
+     * Returns the **confirmed** [Identity]; its [Identity.id] is the real on-chain id the
+     * transition derived from the asset-lock proof (not any placeholder).
+     *
+     * @throws IllegalArgumentException on malformed inputs
+     * @throws DashSDKException if the broadcast fails
+     */
+    suspend fun registerWithInstantLock(
+        publicKeys: List<IdentityPublicKeyParams>,
+        instantLockBytes: ByteArray,
+        transactionBytes: ByteArray,
+        outputIndex: Int,
+        assetLockPrivateKey: ByteArray,
+        signer: Signer,
+    ): Identity = withContext(Dispatchers.IO) {
+        require(instantLockBytes.isNotEmpty()) { "instantLockBytes must not be empty" }
+        require(transactionBytes.isNotEmpty()) { "transactionBytes must not be empty" }
+        require(assetLockPrivateKey.size == 32) {
+            "assetLockPrivateKey must be 32 bytes, was ${assetLockPrivateKey.size}"
+        }
+
+        // Placeholder id — the IdentityCreate transition derives the real id from the proof.
+        val identityHandle = createFromComponents(ByteArray(32), publicKeys)
+        val ilMem = Memory(instantLockBytes.size.toLong()).apply { write(0, instantLockBytes, 0, instantLockBytes.size) }
+        val txMem = Memory(transactionBytes.size.toLong()).apply { write(0, transactionBytes, 0, transactionBytes.size) }
+        val keyMem = Memory(32)
+        try {
+            keyMem.write(0, assetLockPrivateKey, 0, 32)
+            val confirmed = ResultUnwrapper.unwrapHandle(
+                ffi.dash_sdk_identity_put_to_platform_with_instant_lock_and_wait(
+                    sdkHandle, identityHandle,
+                    ilMem, NativeLong(instantLockBytes.size.toLong()),
+                    txMem, NativeLong(transactionBytes.size.toLong()),
+                    outputIndex, keyMem, signer.handle, null
+                )
+            )
+            Reference.reachabilityFence(ilMem)
+            Reference.reachabilityFence(txMem)
+            Reference.reachabilityFence(keyMem)
+            Reference.reachabilityFence(signer)
+            try {
+                getInfo(confirmed)
+            } finally {
+                destroyIdentity(confirmed)
+            }
+        } finally {
+            keyMem.clear() // scrub the asset-lock key
+            destroyIdentity(identityHandle)
+        }
+    }
+
+    /**
+     * Register a new identity funded by a **ChainLock-confirmed** asset lock, and wait for
+     * confirmation. Network call — requires a live node. Sibling to
+     * [registerWithInstantLock]; the caller supplies the asset lock as a 36-byte [outPoint]
+     * (txid + vout) plus its [coreChainLockedHeight] and the output's 32-byte
+     * [assetLockPrivateKey]. Returns the confirmed [Identity].
+     *
+     * @throws IllegalArgumentException on malformed inputs
+     * @throws DashSDKException if the broadcast fails
+     */
+    suspend fun registerWithChainLock(
+        publicKeys: List<IdentityPublicKeyParams>,
+        coreChainLockedHeight: Int,
+        outPoint: ByteArray,
+        assetLockPrivateKey: ByteArray,
+        signer: Signer,
+    ): Identity = withContext(Dispatchers.IO) {
+        require(outPoint.size == 36) { "outPoint must be 36 bytes (txid + vout), was ${outPoint.size}" }
+        require(assetLockPrivateKey.size == 32) {
+            "assetLockPrivateKey must be 32 bytes, was ${assetLockPrivateKey.size}"
+        }
+
+        val identityHandle = createFromComponents(ByteArray(32), publicKeys)
+        val outPointMem = Memory(36).apply { write(0, outPoint, 0, 36) }
+        val keyMem = Memory(32)
+        try {
+            keyMem.write(0, assetLockPrivateKey, 0, 32)
+            val confirmed = ResultUnwrapper.unwrapHandle(
+                ffi.dash_sdk_identity_put_to_platform_with_chain_lock_and_wait(
+                    sdkHandle, identityHandle, coreChainLockedHeight, outPointMem,
+                    keyMem, signer.handle, null
+                )
+            )
+            Reference.reachabilityFence(outPointMem)
+            Reference.reachabilityFence(keyMem)
+            Reference.reachabilityFence(signer)
+            try {
+                getInfo(confirmed)
+            } finally {
+                destroyIdentity(confirmed)
+            }
+        } finally {
+            keyMem.clear() // scrub the asset-lock key
+            destroyIdentity(identityHandle)
+        }
     }
 
     /**

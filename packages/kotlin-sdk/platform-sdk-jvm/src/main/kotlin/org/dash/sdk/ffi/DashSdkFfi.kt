@@ -258,6 +258,47 @@ interface DashSdkFfi : Library {
     ): DashSDKResultNative
 
     /**
+     * Register an identity, funding it with an InstantSend-locked asset lock, and wait for
+     * confirmation. Returns a [DashSDKResult] with the **confirmed** identity handle (its
+     * on-chain id is derived from the asset-lock proof); free it with [dash_sdk_identity_destroy].
+     *
+     * [identity_handle] is the locally-built identity (see [dash_sdk_identity_create_from_components]);
+     * [instant_lock_bytes]/[transaction_bytes] are the serialized InstantLock + funding tx
+     * ([com.sun.jna.Memory]); [output_index] is the asset-lock output (C `uint32_t`);
+     * [private_key] is a [com.sun.jna.Memory] of 32 bytes (the asset-lock output key);
+     * [signer_handle] signs the IdentityCreate transition; [put_settings] may be null for defaults.
+     */
+    fun dash_sdk_identity_put_to_platform_with_instant_lock_and_wait(
+        sdk_handle: Pointer,
+        identity_handle: Pointer,
+        instant_lock_bytes: Pointer,
+        instant_lock_len: NativeLong,
+        transaction_bytes: Pointer,
+        transaction_len: NativeLong,
+        output_index: Int,
+        private_key: Pointer,
+        signer_handle: Pointer,
+        put_settings: Pointer?
+    ): DashSDKResultNative
+
+    /**
+     * Register an identity funded by a ChainLock-confirmed asset lock, and wait for
+     * confirmation. Returns a [DashSDKResult] with the confirmed identity handle (free with
+     * [dash_sdk_identity_destroy]). [core_chain_locked_height] is a C `uint32_t`; [out_point]
+     * is a [com.sun.jna.Memory] of 36 bytes (txid + vout); [private_key] is a 32-byte
+     * [com.sun.jna.Memory]; [put_settings] may be null for defaults.
+     */
+    fun dash_sdk_identity_put_to_platform_with_chain_lock_and_wait(
+        sdk_handle: Pointer,
+        identity_handle: Pointer,
+        core_chain_locked_height: Int,
+        out_point: Pointer,
+        private_key: Pointer,
+        signer_handle: Pointer,
+        put_settings: Pointer?
+    ): DashSDKResultNative
+
+    /**
      * Get a public key from an identity handle by its key ID.
      * Returns a [DashSDKResult] with [DashSDKResultDataType.PUBLIC_KEY_HANDLE];
      * caller must free the handle with [dash_sdk_identity_public_key_destroy].
