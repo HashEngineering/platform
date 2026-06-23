@@ -117,7 +117,18 @@ offline — create→get_info round-trips the key count (1 and 2 keys). Plan as 
 - **Offline tests**: build keys → `create_from_components` → existing
   `dash_sdk_identity_get_info` round-trip asserts the handle is well-formed.
 
-**Phase C — Registration broadcast** *(needs a node + real asset lock; native-gated)*
+**Phase C — Registration broadcast** ✅ DONE (uncommitted) *(needs a node + real asset lock)*
+Implemented in `platform-sdk-jvm`: bound `identity_put_to_platform_with_instant_lock_and_wait`
++ `..._with_chain_lock_and_wait` (the wait variants return the confirmed identity handle;
+`put_settings` passed as null = defaults, so `DashSDKPutSettings` is not modelled yet).
+`IdentityService.registerWithInstantLock(...)` / `registerWithChainLock(...)` build the
+identity (placeholder id), pack the asset-lock proof + 32-byte key, pass the `Signer`
+handle, broadcast-and-wait, then return the confirmed `Identity` (real on-chain id via
+`getInfo`). Native buffers held across the call via `Reference.reachabilityFence`; asset-lock
+key scrubbed. `IdentityRegisterTest` (2): a bad key length throws `IllegalArgumentException`;
+a malformed proof surfaces `DashSDKException` (not a crash) — the proof parses before any
+network I/O, so this pins the marshalling path offline. End-to-end broadcast needs a funded
+asset lock + node. Plan as built:
 - Bind: `dash_sdk_identity_put_to_platform_with_instant_lock` (+`_and_wait`),
   `_with_chain_lock`.
 - Struct: `DashSDKPutSettings` (9 fields; pass `NULL` for defaults in v1).

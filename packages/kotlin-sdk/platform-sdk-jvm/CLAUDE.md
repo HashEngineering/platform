@@ -18,9 +18,16 @@ unified-sdk-android/   api(:unified-sdk-jvm) + librs_unified_sdk_ffi.so
 ```
 
 The unified library is a **superset** of the read-path symbols, so everything here
-works unchanged against it. **Unified-only** bindings (wallet, shielded, signing,
-broadcast) belong in `:unified-sdk-jvm`, not here — this module must stay loadable
-against the read-path `rs_sdk_ffi` library.
+works unchanged against it. The rule that decides placement is **which library exports
+the symbol**, not whether the operation reads or writes: a binding belongs here iff its
+symbol is exported by the read-path `rs_sdk_ffi` library (this module must stay loadable
+against it). On that basis some **write/signing** code lives here — the external signer
+(`org.dash.sdk.signing`) and identity registration with a caller-supplied asset-lock proof
+(`IdentityService.register*`) use only `rs_sdk_ffi` symbols. What stays in
+`:unified-sdk-jvm` is anything needing the unified-only symbols: **wallet** funding
+(turning UTXOs into an asset lock), **shielded** ops, and the wallet-funded
+register/top-up one-shots. When adding a new write binding, `nm`-check the read-path
+`librs_sdk_ffi` first (see IDENTITY_REGISTRATION_DESIGN.md §0.1).
 
 ## Layout
 
