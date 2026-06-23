@@ -1,15 +1,24 @@
 package org.dash.sdk.services
 
+import com.sun.jna.Memory
 import com.sun.jna.Pointer
+import java.lang.ref.Reference
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.dash.sdk.ffi.DashSDKDocumentCreateParamsNative
+import org.dash.sdk.ffi.DashSDKDocumentCreateResultNative
+import org.dash.sdk.ffi.DashSDKDocumentHandleParamsNative
 import org.dash.sdk.ffi.DashSDKDocumentInfoNative
 import org.dash.sdk.ffi.DashSDKDocumentSearchParamsNative
 import org.dash.sdk.ffi.DashSDKErrorCode
 import org.dash.sdk.ffi.DashSdkFfi
 import org.dash.sdk.ffi.ResultUnwrapper
+import org.dash.sdk.ffi.toNative
 import org.dash.sdk.models.DashSDKException
 import org.dash.sdk.models.Document
+import org.dash.sdk.models.DocumentCreateResult
+import org.dash.sdk.models.PutSettings
+import org.dash.sdk.signing.Signer
 
 /**
  * High-level service for Dash Platform document operations.
@@ -73,6 +82,296 @@ class DocumentService internal constructor(private val sdkHandle: Pointer) {
         val json = ResultUnwrapper.unwrapString(result)
         parseDocumentArray(json)
     }
+
+    // -------------------------------------------------------------------------
+    // Document write-path (state transitions) — external-signer pattern. Each is a
+    // 1:1 FFI wrapper: marshal in → call → unwrap. The signing key is an
+    // IdentityPublicKeyHandle [Pointer] (from IdentityService.getPublicKeyById /
+    // getSigningKeyForTransition); the [signer] supplies the SignerHandle. The optional
+    // token_payment_info and state_transition_creation_options are always NULL.
+    // -------------------------------------------------------------------------
+
+    /**
+     * Create a document (process-local; builds a DocumentHandle, no broadcast).
+     *
+     * @param dataContractId data contract ID (base58)
+     * @param documentType document type name within the contract
+     * @param ownerIdentityId owner identity ID (base58)
+     * @param propertiesJson JSON object of the document's properties
+     * @return the created [DocumentCreateResult] (handle + 32-byte entropy); the caller owns
+     *   the handle and must free it with [destroyDocument]
+     */
+    suspend fun createDocument(
+        dataContractId: String,
+        documentType: String,
+        ownerIdentityId: String,
+        propertiesJson: String
+    ): DocumentCreateResult = withContext(Dispatchers.IO) {
+        val params = DashSDKDocumentCreateParamsNative().apply {
+            data_contract_id = dataContractId
+            document_type = documentType
+            owner_identity_id = ownerIdentityId
+            properties_json = propertiesJson
+            write()
+        }
+        val dataPtr = ResultUnwrapper.unwrap(ffi.dash_sdk_document_create(sdkHandle, params))
+        Reference.reachabilityFence(params)
+        try {
+            val native = DashSDKDocumentCreateResultNative(dataPtr).apply { read() }
+            val handle = native.document_handle
+                ?: throw DashSDKException(DashSDKErrorCode.INTERNAL_ERROR, "document_create returned a null handle")
+            DocumentCreateResult(handle = handle, entropy = native.entropy.copyOf())
+        } finally {
+            ffi.dash_sdk_document_create_result_free(dataPtr)
+        }
+    }
+
+    /**
+     * Build a DocumentHandle from explicit parameters (process-local; no broadcast).
+     *
+     * @param id document ID (base58)
+     * @param dataContractId data contract ID (base58)
+     * @param documentType document type name
+     * @param ownerIdentityId owner identity ID (base58)
+     * @param propertiesJson JSON object of the document's properties
+     * @param revision optional revision (0 = no revision)
+     * @return an opaque DocumentHandle; the caller owns it and must free it with [destroyDocument]
+     */
+    suspend fun makeHandle(
+        id: String,
+        dataContractId: String,
+        documentType: String,
+        ownerIdentityId: String,
+        propertiesJson: String,
+        revision: Long = 0
+    ): Pointer = withContext(Dispatchers.IO) {
+        val params = DashSDKDocumentHandleParamsNative().apply {
+            this.id = id
+            data_contract_id = dataContractId
+            document_type = documentType
+            owner_identity_id = ownerIdentityId
+            properties_json = propertiesJson
+            this.revision = revision
+            write()
+        }
+        val handle = ResultUnwrapper.unwrapHandle(ffi.dash_sdk_document_make_handle(params))
+        Reference.reachabilityFence(params)
+        handle
+    }
+
+    /**
+     * Set a DocumentHandle's properties from a JSON object (process-local mutation).
+     *
+     * @param documentHandle handle to mutate
+     * @param propertiesJson JSON object of the new properties
+     * @throws DashSDKException if the FFI reports an error
+     */
+    suspend fun setProperties(documentHandle: Pointer, propertiesJson: String): Unit =
+        withContext(Dispatchers.IO) {
+            val errorPtr = ffi.dash_sdk_document_set_properties(documentHandle, propertiesJson)
+            if (errorPtr != null) {
+                val code = errorPtr.getInt(0)
+                val msgPtr = errorPtr.getPointer(com.sun.jna.Native.POINTER_SIZE.toLong())
+                val msg = msgPtr?.getString(0) ?: "Unknown error"
+                ffi.dash_sdk_error_free(errorPtr)
+                throw DashSDKException(code, msg)
+            }
+        }
+
+    /**
+     * Put a document to platform and wait for confirmation. Network call — requires a live node.
+     *
+     * @param documentHandle the document to create (e.g. from [createDocument])
+     * @param dataContractId data contract ID (base58)
+     * @param documentTypeName document type name
+     * @param entropy 32-byte entropy from [createDocument] (the document-ID entropy)
+     * @param signingKeyHandle IdentityPublicKeyHandle that signs the transition
+     * @param signer external signer; keep alive across the call
+     * @return the confirmed DocumentHandle; the caller owns it and must free it with [destroyDocument]
+     * @throws IllegalArgumentException if [entropy] is not 32 bytes
+     */
+    suspend fun putToPlatform(
+        documentHandle: Pointer,
+        dataContractId: String,
+        documentTypeName: String,
+        entropy: ByteArray,
+        signingKeyHandle: Pointer,
+        signer: Signer,
+        settings: PutSettings? = null
+    ): Pointer = withContext(Dispatchers.IO) {
+        require(entropy.size == 32) { "entropy must be 32 bytes, was ${entropy.size}" }
+        val entropyMem = Memory(32).apply { write(0, entropy, 0, 32) }
+        val ps = settings?.toNative()
+        val confirmed = ResultUnwrapper.unwrapHandle(
+            ffi.dash_sdk_document_put_to_platform_and_wait(
+                sdkHandle, documentHandle, dataContractId, documentTypeName, entropyMem,
+                signingKeyHandle, signer.handle, null, ps?.pointer, null
+            )
+        )
+        Reference.reachabilityFence(entropyMem)
+        Reference.reachabilityFence(signer)
+        Reference.reachabilityFence(ps)
+        confirmed
+    }
+
+    /**
+     * Replace a document on platform and wait for confirmation. Network call — requires a live node.
+     *
+     * @param documentHandle the updated document to broadcast
+     * @param signingKeyHandle IdentityPublicKeyHandle that signs the transition
+     * @param signer external signer; keep alive across the call
+     * @return the confirmed DocumentHandle; the caller owns it and must free it with [destroyDocument]
+     */
+    suspend fun replaceOnPlatform(
+        documentHandle: Pointer,
+        dataContractId: String,
+        documentTypeName: String,
+        signingKeyHandle: Pointer,
+        signer: Signer,
+        settings: PutSettings? = null
+    ): Pointer = withContext(Dispatchers.IO) {
+        val ps = settings?.toNative()
+        val confirmed = ResultUnwrapper.unwrapHandle(
+            ffi.dash_sdk_document_replace_on_platform_and_wait(
+                sdkHandle, documentHandle, dataContractId, documentTypeName,
+                signingKeyHandle, signer.handle, null, ps?.pointer, null
+            )
+        )
+        Reference.reachabilityFence(signer)
+        Reference.reachabilityFence(ps)
+        confirmed
+    }
+
+    /**
+     * Delete a document and wait for confirmation. Network call — requires a live node.
+     *
+     * @param documentId document ID (base58)
+     * @param ownerId owner identity ID (base58)
+     * @param signingKeyHandle IdentityPublicKeyHandle that signs the transition
+     * @param signer external signer; keep alive across the call
+     * @return the FFI result data [Pointer] (opaque; on the delete path the caller does not own a handle)
+     */
+    suspend fun deleteDocument(
+        documentId: String,
+        ownerId: String,
+        dataContractId: String,
+        documentTypeName: String,
+        signingKeyHandle: Pointer,
+        signer: Signer,
+        settings: PutSettings? = null
+    ): Pointer = withContext(Dispatchers.IO) {
+        val ps = settings?.toNative()
+        val result = ResultUnwrapper.unwrap(
+            ffi.dash_sdk_document_delete_and_wait(
+                sdkHandle, documentId, ownerId, dataContractId, documentTypeName,
+                signingKeyHandle, signer.handle, null, ps?.pointer, null
+            )
+        )
+        Reference.reachabilityFence(signer)
+        Reference.reachabilityFence(ps)
+        result
+    }
+
+    /**
+     * Transfer a document to another identity and wait for confirmation. Network call.
+     *
+     * @param documentHandle the document to transfer
+     * @param recipientId recipient identity ID (base58)
+     * @param signingKeyHandle IdentityPublicKeyHandle that signs the transition
+     * @param signer external signer; keep alive across the call
+     * @return the confirmed DocumentHandle; the caller owns it and must free it with [destroyDocument]
+     */
+    suspend fun transferToIdentity(
+        documentHandle: Pointer,
+        recipientId: String,
+        dataContractId: String,
+        documentTypeName: String,
+        signingKeyHandle: Pointer,
+        signer: Signer,
+        settings: PutSettings? = null
+    ): Pointer = withContext(Dispatchers.IO) {
+        val ps = settings?.toNative()
+        val confirmed = ResultUnwrapper.unwrapHandle(
+            ffi.dash_sdk_document_transfer_to_identity_and_wait(
+                sdkHandle, documentHandle, recipientId, dataContractId, documentTypeName,
+                signingKeyHandle, signer.handle, null, ps?.pointer, null
+            )
+        )
+        Reference.reachabilityFence(signer)
+        Reference.reachabilityFence(ps)
+        confirmed
+    }
+
+    /**
+     * Purchase a document at [price] and wait for confirmation. Network call.
+     *
+     * @param documentHandle the document to purchase
+     * @param price purchase price in credits
+     * @param purchaserId purchaser identity ID (base58)
+     * @param signingKeyHandle IdentityPublicKeyHandle that signs the transition
+     * @param signer external signer; keep alive across the call
+     * @return the confirmed DocumentHandle; the caller owns it and must free it with [destroyDocument]
+     */
+    suspend fun purchase(
+        documentHandle: Pointer,
+        dataContractId: String,
+        documentTypeName: String,
+        price: ULong,
+        purchaserId: String,
+        signingKeyHandle: Pointer,
+        signer: Signer,
+        settings: PutSettings? = null
+    ): Pointer = withContext(Dispatchers.IO) {
+        val ps = settings?.toNative()
+        val confirmed = ResultUnwrapper.unwrapHandle(
+            ffi.dash_sdk_document_purchase_and_wait(
+                sdkHandle, documentHandle, dataContractId, documentTypeName, price.toLong(),
+                purchaserId, signingKeyHandle, signer.handle, null, ps?.pointer, null
+            )
+        )
+        Reference.reachabilityFence(signer)
+        Reference.reachabilityFence(ps)
+        confirmed
+    }
+
+    /**
+     * Update a document's listed price and wait for confirmation. Network call.
+     *
+     * @param documentHandle the document whose price changes
+     * @param price new price in credits
+     * @param signingKeyHandle IdentityPublicKeyHandle that signs the transition
+     * @param signer external signer; keep alive across the call
+     * @return the confirmed DocumentHandle; the caller owns it and must free it with [destroyDocument]
+     */
+    suspend fun updatePrice(
+        documentHandle: Pointer,
+        dataContractId: String,
+        documentTypeName: String,
+        price: ULong,
+        signingKeyHandle: Pointer,
+        signer: Signer,
+        settings: PutSettings? = null
+    ): Pointer = withContext(Dispatchers.IO) {
+        val ps = settings?.toNative()
+        val confirmed = ResultUnwrapper.unwrapHandle(
+            ffi.dash_sdk_document_update_price_of_document_and_wait(
+                sdkHandle, documentHandle, dataContractId, documentTypeName, price.toLong(),
+                signingKeyHandle, signer.handle, null, ps?.pointer, null
+            )
+        )
+        Reference.reachabilityFence(signer)
+        Reference.reachabilityFence(ps)
+        confirmed
+    }
+
+    /**
+     * Free a DocumentHandle produced by [createDocument], [makeHandle], or any `_and_wait`
+     * write result. Uses `dash_sdk_document_free` (the header pairs both
+     * `dash_sdk_document_free` and `dash_sdk_document_handle_destroy` with these handles —
+     * both are `void(DocumentHandle*)`; this service standardises on the former).
+     */
+    fun destroyDocument(documentHandle: Pointer) =
+        ffi.dash_sdk_document_free(documentHandle)
 
     /**
      * Read a [DashSDKDocumentInfo][DashSDKDocumentInfoNative] off a DocumentHandle.

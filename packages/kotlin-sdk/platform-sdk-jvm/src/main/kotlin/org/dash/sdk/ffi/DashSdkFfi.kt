@@ -497,6 +497,181 @@ interface DashSdkFfi : Library {
     fun dash_sdk_document_info_free(info: Pointer)
 
     // -------------------------------------------------------------------------
+    // Document write-path (state transitions) — external-signer pattern.
+    // The leading SDKHandle, signing key (IdentityPublicKeyHandle*) and SignerHandle*
+    // are passed as opaque [Pointer]s. The optional token_payment_info and
+    // state_transition_creation_options are NULL (not modeled); put_settings is the
+    // shared DashSDKPutSettings pointer (null = FFI defaults). All return a
+    // [DashSDKResultNative]; the `_and_wait` variants' data is a confirmed DocumentHandle.
+    // -------------------------------------------------------------------------
+
+    /**
+     * Create a new document (process-local; builds a DocumentHandle, no broadcast). Header:
+     * `dash_sdk_document_create(SDKHandle*, const DashSDKDocumentCreateParams*)`.
+     * Returns a [DashSDKResult] whose data is a heap [DashSDKDocumentCreateResultNative]
+     * (a DocumentHandle + 32 bytes of entropy). Free that result with
+     * [dash_sdk_document_create_result_free].
+     */
+    fun dash_sdk_document_create(
+        sdk_handle: Pointer,
+        params: DashSDKDocumentCreateParamsNative
+    ): DashSDKResultNative
+
+    /** Free a [DashSDKDocumentCreateResultNative] returned by [dash_sdk_document_create]. */
+    fun dash_sdk_document_create_result_free(result: Pointer)
+
+    /**
+     * Build a DocumentHandle from explicit parameters (process-local; no broadcast). Header:
+     * `dash_sdk_document_make_handle(const DashSDKDocumentHandleParams*)`.
+     * Returns a [DashSDKResult] whose data is a heap DocumentHandle (free with
+     * [dash_sdk_document_free] / [dash_sdk_document_handle_destroy]).
+     */
+    fun dash_sdk_document_make_handle(
+        params: DashSDKDocumentHandleParamsNative
+    ): DashSDKResultNative
+
+    /**
+     * Mutate a DocumentHandle's properties from a JSON object. Header:
+     * `struct DashSDKError *dash_sdk_document_set_properties(DocumentHandle*, const char*)`.
+     * Returns a `DashSDKError *` (null on success); free a non-null error with
+     * [dash_sdk_error_free].
+     */
+    fun dash_sdk_document_set_properties(
+        document_handle: Pointer,
+        properties_json: String
+    ): Pointer?
+
+    /**
+     * Free a DocumentHandle. Header: `void dash_sdk_document_free(DocumentHandle*)`.
+     * Pairs with handles produced by [dash_sdk_document_create] / [dash_sdk_document_make_handle]
+     * and the `_and_wait` write results.
+     */
+    fun dash_sdk_document_free(document_handle: Pointer)
+
+    /**
+     * Destroy a DocumentHandle. Header: `void dash_sdk_document_handle_destroy(DocumentHandle*)`.
+     * Functional sibling of [dash_sdk_document_free] (both take a `DocumentHandle*` and return
+     * `void`); the service uses [dash_sdk_document_free] uniformly.
+     */
+    fun dash_sdk_document_handle_destroy(document_handle: Pointer)
+
+    /**
+     * Put a document to platform and wait for confirmation. Header:
+     * `dash_sdk_document_put_to_platform_and_wait(SDKHandle*, DocumentHandle*, data_contract_id,
+     * document_type_name, const uint8_t (*entropy)[32], IdentityPublicKeyHandle*, SignerHandle*,
+     * DashSDKTokenPaymentInfo*, DashSDKPutSettings*, DashSDKStateTransitionCreationOptions*)`.
+     * [entropy] is a 32-byte buffer. Returns a [DashSDKResult] with a confirmed DocumentHandle.
+     */
+    fun dash_sdk_document_put_to_platform_and_wait(
+        sdk_handle: Pointer,
+        document_handle: Pointer,
+        data_contract_id: String,
+        document_type_name: String,
+        entropy: Pointer,
+        identity_public_key_handle: Pointer,
+        signer_handle: Pointer,
+        token_payment_info: Pointer?,
+        put_settings: Pointer?,
+        state_transition_creation_options: Pointer?
+    ): DashSDKResultNative
+
+    /**
+     * Replace a document on platform and wait for confirmation. Header:
+     * `dash_sdk_document_replace_on_platform_and_wait(SDKHandle*, DocumentHandle*, data_contract_id,
+     * document_type_name, IdentityPublicKeyHandle*, SignerHandle*, ...)`.
+     * Returns a [DashSDKResult] with a confirmed DocumentHandle.
+     */
+    fun dash_sdk_document_replace_on_platform_and_wait(
+        sdk_handle: Pointer,
+        document_handle: Pointer,
+        data_contract_id: String,
+        document_type_name: String,
+        identity_public_key_handle: Pointer,
+        signer_handle: Pointer,
+        token_payment_info: Pointer?,
+        put_settings: Pointer?,
+        state_transition_creation_options: Pointer?
+    ): DashSDKResultNative
+
+    /**
+     * Delete a document and wait for confirmation. Header:
+     * `dash_sdk_document_delete_and_wait(SDKHandle*, document_id, owner_id, data_contract_id,
+     * document_type_name, IdentityPublicKeyHandle*, SignerHandle*, ...)`.
+     * Returns a [DashSDKResult].
+     */
+    fun dash_sdk_document_delete_and_wait(
+        sdk_handle: Pointer,
+        document_id: String,
+        owner_id: String,
+        data_contract_id: String,
+        document_type_name: String,
+        identity_public_key_handle: Pointer,
+        signer_handle: Pointer,
+        token_payment_info: Pointer?,
+        put_settings: Pointer?,
+        state_transition_creation_options: Pointer?
+    ): DashSDKResultNative
+
+    /**
+     * Transfer a document to another identity and wait for confirmation. Header:
+     * `dash_sdk_document_transfer_to_identity_and_wait(SDKHandle*, DocumentHandle*, recipient_id,
+     * data_contract_id, document_type_name, IdentityPublicKeyHandle*, SignerHandle*, ...)`.
+     * Returns a [DashSDKResult] with a confirmed DocumentHandle.
+     */
+    fun dash_sdk_document_transfer_to_identity_and_wait(
+        sdk_handle: Pointer,
+        document_handle: Pointer,
+        recipient_id: String,
+        data_contract_id: String,
+        document_type_name: String,
+        identity_public_key_handle: Pointer,
+        signer_handle: Pointer,
+        token_payment_info: Pointer?,
+        put_settings: Pointer?,
+        state_transition_creation_options: Pointer?
+    ): DashSDKResultNative
+
+    /**
+     * Purchase a document at a given price and wait for confirmation. Header:
+     * `dash_sdk_document_purchase_and_wait(SDKHandle*, DocumentHandle*, data_contract_id,
+     * document_type_name, uint64_t price, purchaser_id, IdentityPublicKeyHandle*, SignerHandle*, ...)`.
+     * Returns a [DashSDKResult] with a confirmed DocumentHandle.
+     */
+    fun dash_sdk_document_purchase_and_wait(
+        sdk_handle: Pointer,
+        document_handle: Pointer,
+        data_contract_id: String,
+        document_type_name: String,
+        price: Long,
+        purchaser_id: String,
+        identity_public_key_handle: Pointer,
+        signer_handle: Pointer,
+        token_payment_info: Pointer?,
+        put_settings: Pointer?,
+        state_transition_creation_options: Pointer?
+    ): DashSDKResultNative
+
+    /**
+     * Update a document's price and wait for confirmation. Header:
+     * `dash_sdk_document_update_price_of_document_and_wait(SDKHandle*, DocumentHandle*,
+     * data_contract_id, document_type_name, uint64_t price, IdentityPublicKeyHandle*,
+     * SignerHandle*, ...)`.
+     * Returns a [DashSDKResult] with a confirmed DocumentHandle.
+     */
+    fun dash_sdk_document_update_price_of_document_and_wait(
+        sdk_handle: Pointer,
+        document_handle: Pointer,
+        data_contract_id: String,
+        document_type_name: String,
+        price: Long,
+        identity_public_key_handle: Pointer,
+        signer_handle: Pointer,
+        token_payment_info: Pointer?,
+        put_settings: Pointer?,
+        state_transition_creation_options: Pointer?
+    ): DashSDKResultNative
+
+    // -------------------------------------------------------------------------
     // DPNS queries
     // -------------------------------------------------------------------------
 
@@ -1356,6 +1531,80 @@ class DashSDKDocumentInfoNative : Structure {
     @JvmField var data_fields_count: Long = 0
     /** Pointer to the `DashSDKDocumentField[]` array (opaque; not read here). */
     @JvmField var data_fields: Pointer? = null
+
+    constructor() : super()
+    constructor(p: Pointer) : super(p)
+}
+
+/**
+ * Maps to `struct DashSDKDocumentCreateParams` in rs-sdk-ffi.h — passed **by pointer** to
+ * [DashSdkFfi.dash_sdk_document_create].
+ *
+ * C 64-bit layout (auditor-verified via cc: size=32, offsets 0/8/16/24; four `const char*`):
+ *   data_contract_id @0 (8) + document_type @8 (8) + owner_identity_id @16 (8)
+ *   + properties_json @24 (8) = 32 bytes.
+ */
+@Structure.FieldOrder("data_contract_id", "document_type", "owner_identity_id", "properties_json")
+class DashSDKDocumentCreateParamsNative : Structure() {
+    /** Data contract ID (base58). */
+    @JvmField var data_contract_id: String? = null
+    /** Document type name. */
+    @JvmField var document_type: String? = null
+    /** Owner identity ID (base58). */
+    @JvmField var owner_identity_id: String? = null
+    /** JSON object of document properties. */
+    @JvmField var properties_json: String? = null
+}
+
+/**
+ * Maps to `struct DashSDKDocumentHandleParams` in rs-sdk-ffi.h — passed **by pointer** to
+ * [DashSdkFfi.dash_sdk_document_make_handle].
+ *
+ * C 64-bit layout (auditor-verified via cc: size=48, offsets 0/8/16/24/32/40): five
+ * `const char*` then a `uint64_t revision` (0 means no revision).
+ */
+@Structure.FieldOrder(
+    "id",
+    "data_contract_id",
+    "document_type",
+    "owner_identity_id",
+    "properties_json",
+    "revision"
+)
+class DashSDKDocumentHandleParamsNative : Structure() {
+    /** Document ID (base58). */
+    @JvmField var id: String? = null
+    /** Data contract ID (base58). */
+    @JvmField var data_contract_id: String? = null
+    /** Document type name. */
+    @JvmField var document_type: String? = null
+    /** Owner identity ID (base58). */
+    @JvmField var owner_identity_id: String? = null
+    /** JSON object of document properties. */
+    @JvmField var properties_json: String? = null
+    /** Optional revision number (0 = no revision). */
+    @JvmField var revision: Long = 0
+}
+
+/**
+ * Maps to `struct DashSDKDocumentCreateResult` in rs-sdk-ffi.h — the heap payload pointed to
+ * by the `data` field of the [DashSDKResultNative] returned from
+ * [DashSdkFfi.dash_sdk_document_create].
+ *
+ * C 64-bit layout (auditor-verified via cc: size=40):
+ *   document_handle: DocumentHandle* @0 (8) + entropy: uint8_t[32] @8 (32) = 40 bytes.
+ *
+ * Construct over the result `data` pointer, [read], copy out [document_handle] + [entropy],
+ * then free the backing with [DashSdkFfi.dash_sdk_document_create_result_free]. Do not touch
+ * [document_handle] after freeing — the handle ownership transfers to the caller before free
+ * (the service reads it out first).
+ */
+@Structure.FieldOrder("document_handle", "entropy")
+class DashSDKDocumentCreateResultNative : Structure {
+    /** Handle to the created document. */
+    @JvmField var document_handle: Pointer? = null
+    /** Entropy used for document-ID generation (exactly 32 bytes). */
+    @JvmField var entropy: ByteArray = ByteArray(32)
 
     constructor() : super()
     constructor(p: Pointer) : super(p)
