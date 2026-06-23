@@ -222,6 +222,42 @@ interface DashSdkFfi : Library {
     fun dash_sdk_identity_parse_json(json_str: String): DashSDKResultNative
 
     /**
+     * Build a standalone identity public key from raw components (process-local; no network).
+     * Returns a [DashSDKResult] with an `IdentityPublicKey` handle; free it with
+     * [dash_sdk_identity_public_key_destroy]. [key_id] is a C `uint32_t`; [key_type],
+     * [purpose], [security_level] are DPP discriminant bytes; [public_key_data] is a
+     * [com.sun.jna.Memory] of [public_key_data_len] bytes; [disabled_at] is a u64 (0 = enabled).
+     */
+    fun dash_sdk_identity_public_key_create_from_data(
+        key_id: Int,
+        key_type: Byte,
+        purpose: Byte,
+        security_level: Byte,
+        public_key_data: Pointer,
+        public_key_data_len: NativeLong,
+        read_only: Boolean,
+        disabled_at: Long
+    ): DashSDKResultNative
+
+    /**
+     * Build an identity handle from its components (process-local; no network).
+     * Returns a [DashSDKResult] with an identity handle; free it with [dash_sdk_identity_destroy].
+     * [identity_id] is a [com.sun.jna.Memory] of 32 bytes; [public_keys] is a [com.sun.jna.Memory]
+     * holding a contiguous array of [DashSDKPublicKeyDataNative] structs (length [public_keys_count]);
+     * [balance] and [revision] are u64.
+     *
+     * For registration the [identity_id] is a placeholder — the IdentityCreate transition
+     * derives the real on-chain id from the asset-lock proof (see IDENTITY_REGISTRATION_DESIGN.md §0.5).
+     */
+    fun dash_sdk_identity_create_from_components(
+        identity_id: Pointer,
+        public_keys: Pointer,
+        public_keys_count: NativeLong,
+        balance: Long,
+        revision: Long
+    ): DashSDKResultNative
+
+    /**
      * Get a public key from an identity handle by its key ID.
      * Returns a [DashSDKResult] with [DashSDKResultDataType.PUBLIC_KEY_HANDLE];
      * caller must free the handle with [dash_sdk_identity_public_key_destroy].
@@ -754,6 +790,50 @@ fun interface DestroyCallback : Callback {
  * Usage: construct over the returned pointer, [read], copy [signature_len] bytes out of
  * [signature], then release the pointer with [DashSdkFfi.dash_sdk_signature_free].
  */
+/**
+ * Maps to `struct DashSDKPublicKeyData` in rs-sdk-ffi.h — one element of the array passed
+ * to [DashSdkFfi.dash_sdk_identity_create_from_components].
+ *
+ * C 64-bit layout (JNA inserts the alignment padding automatically):
+ *   id:             u8        @0  (1)
+ *   purpose:        u8        @1  (1)
+ *   security_level: u8        @2  (1)
+ *   key_type:       u8        @3  (1)
+ *   read_only:      bool      @4  (1) + 3 pad
+ *   data:           u8*       @8  (8)
+ *   data_len:       uintptr_t @16 (8)
+ *   disabled_at:    u64       @24 (8)
+ *   = 32 bytes
+ *
+ * Build a contiguous array via `DashSDKPublicKeyDataNative().toArray(n)`, fill each row
+ * (with [data] pointing at a pinned [com.sun.jna.Memory] kept alive across the call) and
+ * call [write] on each before passing `rows[0].pointer`. Field discriminants follow DPP
+ * `repr(u8)` enums (KeyType 0=ECDSA_SECP256K1; Purpose 0=AUTHENTICATION;
+ * SecurityLevel 0=MASTER,1=CRITICAL,2=HIGH,3=MEDIUM).
+ */
+@Structure.FieldOrder("id", "purpose", "security_level", "key_type", "read_only", "data", "data_len", "disabled_at")
+class DashSDKPublicKeyDataNative : Structure {
+    /** Key ID (0-255). */
+    @JvmField var id: Byte = 0
+    /** DPP Purpose discriminant. */
+    @JvmField var purpose: Byte = 0
+    /** DPP SecurityLevel discriminant. */
+    @JvmField var security_level: Byte = 0
+    /** DPP KeyType discriminant. */
+    @JvmField var key_type: Byte = 0
+    /** Whether the key is read-only. */
+    @JvmField var read_only: Boolean = false
+    /** Pointer to the public-key bytes (borrowed for the call). */
+    @JvmField var data: Pointer? = null
+    /** Length of [data]. */
+    @JvmField var data_len: NativeLong = NativeLong(0)
+    /** Disabled-at timestamp (0 = enabled). */
+    @JvmField var disabled_at: Long = 0
+
+    constructor() : super()
+    constructor(p: Pointer) : super(p)
+}
+
 @Structure.FieldOrder("signature", "signature_len")
 class DashSDKSignatureNative : Structure {
     /** Signature bytes (heap). */

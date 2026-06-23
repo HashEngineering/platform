@@ -1,15 +1,19 @@
 package org.dash.sdk.services
 
 import com.sun.jna.Memory
+import com.sun.jna.NativeLong
 import com.sun.jna.Pointer
+import java.lang.ref.Reference
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.dash.sdk.ffi.DashSDKErrorCode
 import org.dash.sdk.ffi.DashSDKIdentityInfoNative
+import org.dash.sdk.ffi.DashSDKPublicKeyDataNative
 import org.dash.sdk.ffi.DashSdkFfi
 import org.dash.sdk.ffi.ResultUnwrapper
 import org.dash.sdk.models.DashSDKException
 import org.dash.sdk.models.Identity
+import org.dash.sdk.models.IdentityPublicKeyParams
 
 /**
  * High-level service for Dash Platform identity operations.
@@ -196,6 +200,93 @@ class IdentityService internal constructor(private val sdkHandle: Pointer) {
     }
 
     /**
+     * Build a standalone identity public-key handle from raw components (process-local).
+     * Caller owns the handle and must free it with [destroyPublicKey].
+     *
+     * @param params the key's components (id/type/purpose/security level/data)
+     */
+    fun createPublicKey(params: IdentityPublicKeyParams): Pointer {
+        val dataMem = Memory(params.data.size.toLong())
+        dataMem.write(0, params.data, 0, params.data.size)
+        return ResultUnwrapper.unwrapHandle(
+            ffi.dash_sdk_identity_public_key_create_from_data(
+                params.keyId,
+                params.keyType.toByte(),
+                params.purpose.toByte(),
+                params.securityLevel.toByte(),
+                dataMem,
+                NativeLong(params.data.size.toLong()),
+                params.readOnly,
+                params.disabledAt
+            )
+        )
+    }
+
+    /**
+     * Build an identity handle from its components (process-local; no network).
+     * Caller owns the handle and must free it with [destroyIdentity].
+     *
+     * For registration the [identityId] is a placeholder — the IdentityCreate transition
+     * derives the real on-chain id from the asset-lock proof. Only the keys matter here.
+     *
+     * @param identityId 32-byte identity ID (placeholder for registration)
+     * @param publicKeys the identity's public keys
+     * @param balance starting balance in credits (0 for a new identity)
+     * @param revision starting revision (0 for a new identity)
+     * @throws IllegalArgumentException if [identityId] is not 32 bytes or [publicKeys] is empty
+     */
+    suspend fun createFromComponents(
+        identityId: ByteArray,
+        publicKeys: List<IdentityPublicKeyParams>,
+        balance: ULong = 0uL,
+        revision: ULong = 0uL,
+    ): Pointer = withContext(Dispatchers.IO) {
+        require(identityId.size == 32) { "identityId must be 32 bytes, was ${identityId.size}" }
+        require(publicKeys.isNotEmpty()) { "publicKeys must not be empty" }
+
+        val idMem = Memory(32)
+        idMem.write(0, identityId, 0, 32)
+
+        // Pin each key's data buffer; the struct rows borrow these pointers, so the
+        // Memory must stay referenced until the FFI call returns.
+        val dataBuffers = publicKeys.map { pk ->
+            Memory(pk.data.size.toLong()).apply { write(0, pk.data, 0, pk.data.size) }
+        }
+
+        @Suppress("UNCHECKED_CAST")
+        val rows = DashSDKPublicKeyDataNative().toArray(publicKeys.size) as Array<DashSDKPublicKeyDataNative>
+        publicKeys.forEachIndexed { i, pk ->
+            rows[i].apply {
+                id = pk.keyId.toByte()
+                purpose = pk.purpose.toByte()
+                security_level = pk.securityLevel.toByte()
+                key_type = pk.keyType.toByte()
+                read_only = pk.readOnly
+                data = dataBuffers[i]
+                data_len = NativeLong(pk.data.size.toLong())
+                disabled_at = pk.disabledAt
+                write()
+            }
+        }
+
+        val handle = ResultUnwrapper.unwrapHandle(
+            ffi.dash_sdk_identity_create_from_components(
+                idMem,
+                rows[0].pointer,
+                NativeLong(publicKeys.size.toLong()),
+                balance.toLong(),
+                revision.toLong()
+            )
+        )
+        // Keep the native buffers reachable until the FFI call has returned — the rows
+        // borrow pointers into idMem / dataBuffers, and `rows` owns the contiguous backing.
+        Reference.reachabilityFence(idMem)
+        Reference.reachabilityFence(dataBuffers)
+        Reference.reachabilityFence(rows)
+        handle
+    }
+
+    /**
      * Get a public key handle from an identity handle by key ID.
      * Caller owns the handle and must free it with [destroyPublicKey].
      */
@@ -236,6 +327,13 @@ class IdentityService internal constructor(private val sdkHandle: Pointer) {
      * out, and frees it — no JSON involved (the previous binding wrongly treated the
      * struct pointer as a JSON-string result).
      */
+    /**
+     * Read the [Identity] info (id, balance, revision, key count) from an identity handle —
+     * e.g. one produced by [createFromComponents], [parseJson], or [fetchHandle].
+     * Process-local; does not free the handle.
+     */
+    fun getInfo(identityHandle: Pointer): Identity = parseIdentityInfo(identityHandle)
+
     private fun parseIdentityInfo(identityHandle: Pointer): Identity {
         val infoPtr = ffi.dash_sdk_identity_get_info(identityHandle)
             ?: throw DashSDKException(DashSDKErrorCode.INTERNAL_ERROR, "identity_get_info returned null")
