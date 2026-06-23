@@ -1,16 +1,156 @@
-ok, # Identity Registration — Kotlin SDK Design Spike
+# Identity Registration — Kotlin SDK Design
 
-**Status:** design-only (no code committed). Read-only spike against the
-authoritative C headers under `native/include/` and the Swift precedent in
-`packages/swift-sdk`.
+**Status:** design (no code yet). Based on the authoritative C headers under
+`native/include/` and the Swift precedent in `packages/swift-sdk`.
 
-**Scope:** how `register_identity` lands in the Kotlin SDK end-to-end — which
-FFI entry point, the new callback surface, the `KeystoreSigner`, and the
-unified-side `registerIdentity` wrapper.
+This document now describes **two tracks**:
 
-**Lands in:** `unified-sdk-jvm` / `unified-sdk-android` (porting-plan Phase 6),
-**not** `platform-sdk-jvm`. The flow needs `key-wallet-ffi` (mnemonic / funding)
-alongside `platform-wallet-ffi`; `platform-sdk-jvm` stays pure-read.
+- **§0 — v1 plan (rs-sdk-ffi only).** The track we are implementing. Registration
+  is done entirely through `rs-sdk-ffi` — the library `platform-sdk-jvm` already
+  links — with **no `platform-wallet-ffi` and no unified dependency**. The caller
+  supplies a ready-made asset-lock proof; the SDK builds the identity and broadcasts
+  the IdentityCreate transition with an external signer. **Lands in `platform-sdk-jvm`**
+  (folded into `IdentityService` + a top-level `Signer`).
+- **§1–§5 — funding future (Phase 6, deferred).** The full "wallet funds the asset
+  lock → register" one-shot via `platform_wallet_register_identity_with_funding_signer`.
+  That track needs `platform-wallet-ffi` + `key-wallet-ffi` and therefore lands in
+  `unified-sdk-jvm`. Kept below as the forward design; **not** in scope now.
+
+All symbols named in §0 are nm-verified as exported by the read-path
+`librs_sdk_ffi` — binding them keeps `platform-sdk-jvm` loadable against the
+read-path library (no phantom-binding trap).
+
+---
+
+## 0. v1 implementation plan — rs-sdk-ffi only (in scope)
+
+### 0.1 Why this is reachable without platform-wallet
+
+The funding piece (turning wallet UTXOs into an asset lock) is the *only* thing
+`platform-wallet-ffi` contributed. `rs-sdk-ffi`'s put-to-platform entry points take
+the **asset-lock proof as raw inputs**, so the caller supplies it and we never touch
+the wallet crates:
+
+```c
+struct DashSDKResult dash_sdk_identity_put_to_platform_with_instant_lock_and_wait(
+    struct SDKHandle *sdk_handle, const struct IdentityHandle *identity_handle,
+    const uint8_t *instant_lock_bytes, uintptr_t instant_lock_len,
+    const uint8_t *transaction_bytes, uintptr_t transaction_len,
+    uint32_t output_index,
+    const uint8_t (*private_key)[32],          // asset-lock output key, passed DIRECTLY
+    const struct SignerHandle *signer_handle,  // signs the IdentityCreate transition
+    const struct DashSDKPutSettings *put_settings);
+```
+
+Two simplifications vs the unified design (§1–§5):
+- **No `MnemonicResolver`.** It only fed platform-wallet's funding signer. Here the
+  asset-lock key is passed as raw `private_key[32]`. Drop the resolver entirely.
+- **Signer is the only new JNA callback surface.** It signs the state transition
+  with the identity keys — nothing else crosses a callback boundary.
+
+### 0.2 The flow (3 native calls)
+
+```
+1. dash_sdk_identity_public_key_create_from_data(key_id, key_type, purpose,
+       security_level, pubkey_data, len, read_only, disabled_at)        → per key
+2. dash_sdk_identity_create_from_components(placeholderId[32],
+       DashSDKPublicKeyData[], count, balance=0, revision=0)            → IdentityHandle
+       // placeholderId is a don't-care — the transition derives the real id
+       // from the asset-lock proof (see §0.5). Only the keys matter here.
+3. dash_sdk_identity_put_to_platform_with_instant_lock_and_wait(
+       sdk, identityHandle, instantLockBytes, txBytes, outputIndex,
+       assetLockPrivKey[32], signerHandle, putSettings|NULL)            → confirmed IdentityHandle
+       // read the real on-chain id from the returned handle via identity_get_info
+```
+
+Caller-supplied inputs (everything the wallet would otherwise produce):
+identity public keys (pre-derived), the asset-lock proof (instant-lock bytes +
+funding tx bytes + output index + the 32-byte asset-lock output key), and a
+`Signer` that can sign with the identity private keys.
+
+### 0.3 Placement (decided)
+
+Folds into `platform-sdk-jvm`: a `register*` suspend method on the existing
+`IdentityService`, plus a top-level `Signer` / `KeystoreSigner` and an abstract
+`IdentityKeyStore`. Note this intentionally overrides the `platform-sdk-jvm/CLAUDE.md`
+line *"signing/broadcast belong in `:unified-sdk-jvm`"* — that rule assumed signing
+needs the unified lib, which §0.1 disproves. Update that CLAUDE.md note when the
+code lands: signing/registration **via rs-sdk-ffi** is allowed here; only
+**wallet-funded** registration stays unified.
+
+### 0.4 Phasing
+
+**Phase A — Signer infrastructure** *(new JNA callback ground; offline-testable)*
+- Bind: `dash_sdk_signer_create`, `_create_with_ctx`, `_destroy`, `_sign`,
+  `_create_from_private_key`, `_can_sign`, `dash_sdk_sign_async_completion`,
+  `dash_sdk_signature_free`.
+- JNA `Callback` interfaces: `SignCompletionCallback`
+  `(completion_ctx, sig*, sig_len, err*)`, `SignAsyncCallback`
+  `(signer, pubkey*, len, key_type, data*, data_len, completion_ctx, completion)`,
+  `CanSignCallback` `(signer, pubkey*, len, key_type) -> bool`, `DestroyCallback`.
+- `KeystoreSigner` (see §3 — unchanged; it is already rs-sdk-ffi-based). v1 signs by
+  round-tripping `create_from_private_key` → `sign` → `destroy`. Hold the three
+  `Callback`s as `private val` fields so JNA does not GC the native trampolines;
+  prefer `dash_sdk_signer_create` (no ctx). Pin a named daemon
+  `CallbackThreadInitializer` (callback can fire from any Tokio worker thread).
+- `IdentityKeyStore` abstract interface; ship a simple in-memory impl for tests/console.
+  Encrypted backing still **deferred** (§3.x).
+- **Offline tests** (real native, no node, like the utils/token tests): sign
+  round-trip; `can_sign`; `dash_sdk_validate_private_key_for_public_key`;
+  `dash_sdk_public_key_data_from_private_key_data`.
+
+**Phase B — Identity object construction** *(offline-testable)*
+- Bind: `dash_sdk_identity_public_key_create_from_data`,
+  `dash_sdk_identity_create_from_components`.
+- Struct (→ `jna-struct-auditor`): `DashSDKPublicKeyData` (8 fields: `id`, `purpose`,
+  `security_level`, `key_type` as `u8`; `read_only` bool; `data*` + `data_len`;
+  `disabled_at` u64). Field discriminants follow DPP `repr(u8)` enums
+  (KeyType 0=ECDSA_SECP256K1, Purpose 0=AUTHENTICATION, SecurityLevel 0=MASTER…).
+- **Offline tests**: build keys → `create_from_components` → existing
+  `dash_sdk_identity_get_info` round-trip asserts the handle is well-formed.
+
+**Phase C — Registration broadcast** *(needs a node + real asset lock; native-gated)*
+- Bind: `dash_sdk_identity_put_to_platform_with_instant_lock` (+`_and_wait`),
+  `_with_chain_lock`.
+- Struct: `DashSDKPutSettings` (9 fields; pass `NULL` for defaults in v1).
+- `IdentityService.registerWithInstantLock(...)` wrapper: build pubkeys → identity
+  handle → put. Marshalling exercised in tests; end-to-end requires a funded
+  asset lock so it stays native-/node-gated.
+
+**Phase D — siblings (later, same pattern, all rs-sdk-ffi):** topup
+(`dash_sdk_identity_topup_with_instant_lock`), credit transfer, withdraw.
+
+### 0.5 Resolved / open questions
+
+- **identity_id derivation — RESOLVED (verified in Rust).** The caller does **not**
+  derive the id. The `IdentityCreateTransition` derives it from the asset-lock proof:
+  `let identity_id = asset_lock_proof.create_identifier()?`
+  (`rs-dpp .../identity_create_transition/v0/v0_methods.rs:50`), and a dpp unit test
+  asserts *"identity_id is from the proof, NOT the identity itself … the transition's
+  identity_id may differ from identity.id()"* (`v0/mod.rs:348-352`). So the 32-byte id
+  passed to `create_from_components` is a **don't-care placeholder** for registration
+  (the identity's *keys* are what matter). To get the real on-chain id back, use
+  `put_..._and_wait`, which returns the confirmed `IdentityHandle` — read its id via
+  the existing `dash_sdk_identity_get_info`. (rs-sdk-ffi exposes no standalone
+  `create_identifier`-from-outpoint helper, so the wait variant is the path to the id.)
+- **PutSettings NULL** — header says each `0` field = "use default" and `convert_put_settings`
+  handles a null pointer, so passing `NULL` is the v1 default. (Worth a quick confirm
+  when binding.)
+- **Key storage backing** — still deferred (§3.x); in-memory `IdentityKeyStore` is
+  enough to land + test Phases A–C.
+
+### 0.6 Out of scope (the no-unified-deps constraint)
+
+platform-wallet funding (asset-lock construction from UTXOs), `MnemonicResolver`,
+`key-wallet-ffi`, and anything in `unified-sdk-*`. The caller provides the asset-lock
+proof. The wallet-funded one-shot is the §1–§5 future.
+
+---
+
+# Appendix — funding future (Phase 6, deferred; needs platform-wallet + unified)
+
+The sections below are the forward design for the wallet-funded one-shot. They are
+**not** in the v1 scope above and depend on `platform-wallet-ffi` / `key-wallet-ffi`.
 
 ---
 
