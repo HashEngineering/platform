@@ -9,11 +9,15 @@ import kotlinx.coroutines.withContext
 import org.dash.sdk.ffi.DashSDKErrorCode
 import org.dash.sdk.ffi.DashSDKIdentityInfoNative
 import org.dash.sdk.ffi.DashSDKPublicKeyDataNative
+import org.dash.sdk.ffi.DashSDKPutSettingsNative
+import org.dash.sdk.ffi.DashSDKTransferCreditsResultNative
 import org.dash.sdk.ffi.DashSdkFfi
 import org.dash.sdk.ffi.ResultUnwrapper
 import org.dash.sdk.models.DashSDKException
 import org.dash.sdk.models.Identity
 import org.dash.sdk.models.IdentityPublicKeyParams
+import org.dash.sdk.models.PutSettings
+import org.dash.sdk.models.TransferCreditsResult
 import org.dash.sdk.signing.Signer
 
 /**
@@ -310,6 +314,7 @@ class IdentityService internal constructor(private val sdkHandle: Pointer) {
         outputIndex: Int,
         assetLockPrivateKey: ByteArray,
         signer: Signer,
+        settings: PutSettings? = null,
     ): Identity = withContext(Dispatchers.IO) {
         require(instantLockBytes.isNotEmpty()) { "instantLockBytes must not be empty" }
         require(transactionBytes.isNotEmpty()) { "transactionBytes must not be empty" }
@@ -322,6 +327,7 @@ class IdentityService internal constructor(private val sdkHandle: Pointer) {
         val ilMem = Memory(instantLockBytes.size.toLong()).apply { write(0, instantLockBytes, 0, instantLockBytes.size) }
         val txMem = Memory(transactionBytes.size.toLong()).apply { write(0, transactionBytes, 0, transactionBytes.size) }
         val keyMem = Memory(32)
+        val ps = nativePutSettings(settings)
         try {
             keyMem.write(0, assetLockPrivateKey, 0, 32)
             val confirmed = ResultUnwrapper.unwrapHandle(
@@ -329,13 +335,14 @@ class IdentityService internal constructor(private val sdkHandle: Pointer) {
                     sdkHandle, identityHandle,
                     ilMem, NativeLong(instantLockBytes.size.toLong()),
                     txMem, NativeLong(transactionBytes.size.toLong()),
-                    outputIndex, keyMem, signer.handle, null
+                    outputIndex, keyMem, signer.handle, ps?.pointer
                 )
             )
             Reference.reachabilityFence(ilMem)
             Reference.reachabilityFence(txMem)
             Reference.reachabilityFence(keyMem)
             Reference.reachabilityFence(signer)
+            Reference.reachabilityFence(ps)
             try {
                 getInfo(confirmed)
             } finally {
@@ -363,6 +370,7 @@ class IdentityService internal constructor(private val sdkHandle: Pointer) {
         outPoint: ByteArray,
         assetLockPrivateKey: ByteArray,
         signer: Signer,
+        settings: PutSettings? = null,
     ): Identity = withContext(Dispatchers.IO) {
         require(outPoint.size == 36) { "outPoint must be 36 bytes (txid + vout), was ${outPoint.size}" }
         require(assetLockPrivateKey.size == 32) {
@@ -372,17 +380,19 @@ class IdentityService internal constructor(private val sdkHandle: Pointer) {
         val identityHandle = createFromComponents(ByteArray(32), publicKeys)
         val outPointMem = Memory(36).apply { write(0, outPoint, 0, 36) }
         val keyMem = Memory(32)
+        val ps = nativePutSettings(settings)
         try {
             keyMem.write(0, assetLockPrivateKey, 0, 32)
             val confirmed = ResultUnwrapper.unwrapHandle(
                 ffi.dash_sdk_identity_put_to_platform_with_chain_lock_and_wait(
                     sdkHandle, identityHandle, coreChainLockedHeight, outPointMem,
-                    keyMem, signer.handle, null
+                    keyMem, signer.handle, ps?.pointer
                 )
             )
             Reference.reachabilityFence(outPointMem)
             Reference.reachabilityFence(keyMem)
             Reference.reachabilityFence(signer)
+            Reference.reachabilityFence(ps)
             try {
                 getInfo(confirmed)
             } finally {
@@ -391,6 +401,151 @@ class IdentityService internal constructor(private val sdkHandle: Pointer) {
         } finally {
             keyMem.clear() // scrub the asset-lock key
             destroyIdentity(identityHandle)
+        }
+    }
+
+    /**
+     * Top up an existing identity's balance from an InstantSend-locked asset lock, and wait
+     * for confirmation. Network call — requires a live node. No identity signer is needed; the
+     * asset-lock output key authorises the top-up.
+     *
+     * @param identityHandle handle for the identity being topped up (e.g. from [fetchHandle])
+     * @param instantLockBytes serialized InstantLock
+     * @param transactionBytes serialized funding transaction
+     * @param outputIndex index of the asset-lock output
+     * @param assetLockPrivateKey 32-byte asset-lock output key
+     * @return the identity's info after the top-up (updated balance)
+     */
+    suspend fun topUpWithInstantLock(
+        identityHandle: Pointer,
+        instantLockBytes: ByteArray,
+        transactionBytes: ByteArray,
+        outputIndex: Int,
+        assetLockPrivateKey: ByteArray,
+        settings: PutSettings? = null,
+    ): Identity = withContext(Dispatchers.IO) {
+        require(instantLockBytes.isNotEmpty()) { "instantLockBytes must not be empty" }
+        require(transactionBytes.isNotEmpty()) { "transactionBytes must not be empty" }
+        require(assetLockPrivateKey.size == 32) {
+            "assetLockPrivateKey must be 32 bytes, was ${assetLockPrivateKey.size}"
+        }
+        val ilMem = Memory(instantLockBytes.size.toLong()).apply { write(0, instantLockBytes, 0, instantLockBytes.size) }
+        val txMem = Memory(transactionBytes.size.toLong()).apply { write(0, transactionBytes, 0, transactionBytes.size) }
+        val keyMem = Memory(32)
+        val ps = nativePutSettings(settings)
+        try {
+            keyMem.write(0, assetLockPrivateKey, 0, 32)
+            val confirmed = ResultUnwrapper.unwrapHandle(
+                ffi.dash_sdk_identity_topup_with_instant_lock_and_wait(
+                    sdkHandle, identityHandle,
+                    ilMem, NativeLong(instantLockBytes.size.toLong()),
+                    txMem, NativeLong(transactionBytes.size.toLong()),
+                    outputIndex, keyMem, ps?.pointer
+                )
+            )
+            Reference.reachabilityFence(ilMem)
+            Reference.reachabilityFence(txMem)
+            Reference.reachabilityFence(keyMem)
+            Reference.reachabilityFence(ps)
+            try {
+                getInfo(confirmed)
+            } finally {
+                destroyIdentity(confirmed)
+            }
+        } finally {
+            keyMem.clear()
+        }
+    }
+
+    /**
+     * Transfer credits from one identity to another. Network call — requires a live node.
+     *
+     * @param fromIdentityHandle handle for the sending identity (e.g. from [fetchHandle])
+     * @param toIdentityId base58 recipient identity ID
+     * @param amount credits to transfer
+     * @param publicKeyId id of the sender's key that signs the transition
+     * @param signer signs the transition with the sender's key; keep alive across the call
+     * @return both parties' final balances
+     */
+    suspend fun transferCredits(
+        fromIdentityHandle: Pointer,
+        toIdentityId: String,
+        amount: ULong,
+        publicKeyId: Int,
+        signer: Signer,
+        settings: PutSettings? = null,
+    ): TransferCreditsResult = withContext(Dispatchers.IO) {
+        val ps = nativePutSettings(settings)
+        val resultPtr = ResultUnwrapper.unwrapHandle(
+            ffi.dash_sdk_identity_transfer_credits(
+                sdkHandle, fromIdentityHandle, toIdentityId, amount.toLong(), publicKeyId,
+                signer.handle, ps?.pointer
+            )
+        )
+        Reference.reachabilityFence(signer)
+        Reference.reachabilityFence(ps)
+        try {
+            val result = DashSDKTransferCreditsResultNative(resultPtr)
+            result.read()
+            TransferCreditsResult(
+                senderBalance = result.sender_balance,
+                receiverBalance = result.receiver_balance
+            )
+        } finally {
+            ffi.dash_sdk_transfer_credits_result_free(resultPtr)
+        }
+    }
+
+    /**
+     * Withdraw credits from an identity to a Core [address]. Network call — requires a live node.
+     *
+     * @param identityHandle handle for the withdrawing identity (e.g. from [fetchHandle])
+     * @param address destination Core address
+     * @param amount credits to withdraw
+     * @param coreFeePerByte Core fee per byte (0 = default)
+     * @param publicKeyId id of the key that signs the transition
+     * @param signer signs the transition; keep alive across the call
+     * @return the identity's new balance after the withdrawal
+     */
+    suspend fun withdraw(
+        identityHandle: Pointer,
+        address: String,
+        amount: ULong,
+        coreFeePerByte: Int,
+        publicKeyId: Int,
+        signer: Signer,
+        settings: PutSettings? = null,
+    ): ULong = withContext(Dispatchers.IO) {
+        val ps = nativePutSettings(settings)
+        val balanceStr = ResultUnwrapper.unwrapString(
+            ffi.dash_sdk_identity_withdraw(
+                sdkHandle, identityHandle, address, amount.toLong(), coreFeePerByte, publicKeyId,
+                signer.handle, ps?.pointer
+            )
+        )
+        Reference.reachabilityFence(signer)
+        Reference.reachabilityFence(ps)
+        balanceStr.trim().toULong()
+    }
+
+    /**
+     * Marshal [settings] into a native [DashSDKPutSettingsNative] (or null for all-defaults).
+     * The returned struct must be kept reachable until the FFI call returns (callers
+     * [Reference.reachabilityFence] it).
+     */
+    private fun nativePutSettings(settings: PutSettings?): DashSDKPutSettingsNative? {
+        if (settings == null) return null
+        return DashSDKPutSettingsNative().apply {
+            connect_timeout_ms = settings.connectTimeoutMs
+            timeout_ms = settings.timeoutMs
+            retries = settings.retries
+            ban_failed_address = if (settings.banFailedAddress) 1 else 0
+            identity_nonce_stale_time_s = settings.identityNonceStaleTimeS
+            user_fee_increase = settings.userFeeIncrease.toShort()
+            allow_signing_with_any_security_level = if (settings.allowSigningWithAnySecurityLevel) 1 else 0
+            allow_signing_with_any_purpose = if (settings.allowSigningWithAnyPurpose) 1 else 0
+            wait_timeout_ms = settings.waitTimeoutMs
+            write()
         }
     }
 

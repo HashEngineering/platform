@@ -299,6 +299,62 @@ interface DashSdkFfi : Library {
     ): DashSDKResultNative
 
     /**
+     * Top up an existing identity's balance from an InstantSend-locked asset lock, and wait
+     * for confirmation. No identity signer needed — the asset-lock key authorises the top-up.
+     * Returns a [DashSDKResult] with the confirmed identity handle (free with
+     * [dash_sdk_identity_destroy]). Args mirror
+     * [dash_sdk_identity_put_to_platform_with_instant_lock_and_wait] minus the signer.
+     */
+    fun dash_sdk_identity_topup_with_instant_lock_and_wait(
+        sdk_handle: Pointer,
+        identity_handle: Pointer,
+        instant_lock_bytes: Pointer,
+        instant_lock_len: NativeLong,
+        transaction_bytes: Pointer,
+        transaction_len: NativeLong,
+        output_index: Int,
+        private_key: Pointer,
+        put_settings: Pointer?
+    ): DashSDKResultNative
+
+    /**
+     * Transfer credits from one identity to another. Returns a [DashSDKResult] with a
+     * `*mut DashSDKTransferCreditsResult` (see [DashSDKTransferCreditsResultNative]); free it
+     * with [dash_sdk_transfer_credits_result_free]. [to_identity_id] is the base58 recipient id;
+     * [public_key_id] selects the signing key; [signer_handle] signs the transition;
+     * [put_settings] may be null for defaults.
+     */
+    fun dash_sdk_identity_transfer_credits(
+        sdk_handle: Pointer,
+        from_identity_handle: Pointer,
+        to_identity_id: String,
+        amount: Long,
+        public_key_id: Int,
+        signer_handle: Pointer,
+        put_settings: Pointer?
+    ): DashSDKResultNative
+
+    /** Free a [DashSDKTransferCreditsResult] from [dash_sdk_identity_transfer_credits]. */
+    fun dash_sdk_transfer_credits_result_free(result: Pointer)
+
+    /**
+     * Withdraw credits from an identity to a Core [address]. Returns a [DashSDKResult] with the
+     * new balance as a C string. [amount] is in credits; [core_fee_per_byte] (0 = default);
+     * [public_key_id] selects the signing key; [signer_handle] signs the transition;
+     * [put_settings] may be null for defaults.
+     */
+    fun dash_sdk_identity_withdraw(
+        sdk_handle: Pointer,
+        identity_handle: Pointer,
+        address: String,
+        amount: Long,
+        core_fee_per_byte: Int,
+        public_key_id: Int,
+        signer_handle: Pointer,
+        put_settings: Pointer?
+    ): DashSDKResultNative
+
+    /**
      * Get a public key from an identity handle by its key ID.
      * Returns a [DashSDKResult] with [DashSDKResultDataType.PUBLIC_KEY_HANDLE];
      * caller must free the handle with [dash_sdk_identity_public_key_destroy].
@@ -870,6 +926,69 @@ class DashSDKPublicKeyDataNative : Structure {
     @JvmField var data_len: NativeLong = NativeLong(0)
     /** Disabled-at timestamp (0 = enabled). */
     @JvmField var disabled_at: Long = 0
+
+    constructor() : super()
+    constructor(p: Pointer) : super(p)
+}
+
+/**
+ * Maps to `struct DashSDKPutSettings` in rs-sdk-ffi.h — optional tuning for the put-to-platform
+ * entry points. Pass its [pointer] (after [write]) or null for all-defaults (every `0` field
+ * means "use default").
+ *
+ * C 64-bit layout (JNA inserts the alignment padding):
+ *   connect_timeout_ms:                    u64  @0  (8)
+ *   timeout_ms:                            u64  @8  (8)
+ *   retries:                               u32  @16 (4)
+ *   ban_failed_address:                    bool @20 (1) + 3 pad
+ *   identity_nonce_stale_time_s:           u64  @24 (8)
+ *   user_fee_increase:                     u16  @32 (2)
+ *   allow_signing_with_any_security_level: bool @34 (1)
+ *   allow_signing_with_any_purpose:        bool @35 (1) + 4 pad
+ *   wait_timeout_ms:                       u64  @40 (8)
+ *   = 48 bytes
+ *
+ * The three `bool`s are mapped as [Byte] (not `Boolean`): `user_fee_increase` (u16) sits
+ * immediately before two of them, so the 4-byte width JNA gives `Boolean` would push those
+ * fields past their 1-byte C offsets. Write 0/1.
+ */
+@Structure.FieldOrder(
+    "connect_timeout_ms",
+    "timeout_ms",
+    "retries",
+    "ban_failed_address",
+    "identity_nonce_stale_time_s",
+    "user_fee_increase",
+    "allow_signing_with_any_security_level",
+    "allow_signing_with_any_purpose",
+    "wait_timeout_ms"
+)
+class DashSDKPutSettingsNative : Structure {
+    @JvmField var connect_timeout_ms: Long = 0
+    @JvmField var timeout_ms: Long = 0
+    @JvmField var retries: Int = 0
+    @JvmField var ban_failed_address: Byte = 0
+    @JvmField var identity_nonce_stale_time_s: Long = 0
+    @JvmField var user_fee_increase: Short = 0
+    @JvmField var allow_signing_with_any_security_level: Byte = 0
+    @JvmField var allow_signing_with_any_purpose: Byte = 0
+    @JvmField var wait_timeout_ms: Long = 0
+
+    constructor() : super()
+    constructor(p: Pointer) : super(p)
+}
+
+/**
+ * Maps to `struct DashSDKTransferCreditsResult` in rs-sdk-ffi.h — the by-pointer return of
+ * [DashSdkFfi.dash_sdk_identity_transfer_credits]. 64-bit layout: `sender_balance: u64 (8)` +
+ * `receiver_balance: u64 (8)` = 16 bytes. Release with [DashSdkFfi.dash_sdk_transfer_credits_result_free].
+ */
+@Structure.FieldOrder("sender_balance", "receiver_balance")
+class DashSDKTransferCreditsResultNative : Structure {
+    /** Sender's final balance after the transfer. */
+    @JvmField var sender_balance: Long = 0
+    /** Receiver's final balance after the transfer. */
+    @JvmField var receiver_balance: Long = 0
 
     constructor() : super()
     constructor(p: Pointer) : super(p)
