@@ -31,6 +31,16 @@ class DataContractService internal constructor(private val sdkHandle: Pointer) {
     }
 
     /**
+     * Fetch multiple data contracts in one call.
+     *
+     * @param contractIds comma-separated list of base58-encoded 32-byte contract IDs
+     * @return JSON string mapping contract IDs to their data contracts
+     */
+    suspend fun fetchMany(contractIds: String): String = withContext(Dispatchers.IO) {
+        ResultUnwrapper.unwrapString(ffi.dash_sdk_data_contracts_fetch_many(sdkHandle, contractIds))
+    }
+
+    /**
      * Fetch and hold an opaque DataContractHandle for use in document queries.
      * The caller is responsible for calling [releaseHandle] when done.
      *

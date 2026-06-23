@@ -1,5 +1,6 @@
 package org.dash.sdk.services
 
+import com.sun.jna.Memory
 import com.sun.jna.Pointer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -153,6 +154,33 @@ class IdentityService internal constructor(private val sdkHandle: Pointer) {
                 ffi.dash_sdk_identities_fetch_token_infos(sdkHandle, identityIds, tokenId)
             )
         }
+
+    /**
+     * Fetch balances for multiple identities; returns a JSON string (identity IDs → balances).
+     *
+     * The FFI takes a contiguous array of 32-byte ID buffers (`const uint8_t (*)[32]`) plus a
+     * count. Each [ByteArray] in [identityIds] must be exactly 32 bytes; they are packed into
+     * one contiguous native buffer and the COUNT is passed as the length.
+     *
+     * @param identityIds list of raw 32-byte identity IDs
+     * @throws IllegalArgumentException if any ID is not exactly 32 bytes
+     */
+    suspend fun fetchBalances(identityIds: List<ByteArray>): String = withContext(Dispatchers.IO) {
+        require(identityIds.isNotEmpty()) { "identityIds must not be empty" }
+        identityIds.forEachIndexed { i, id ->
+            require(id.size == 32) { "identity ID at index $i must be 32 bytes, was ${id.size}" }
+        }
+        // Pack count * 32 bytes contiguously: `const uint8_t (*)[32]` is a pointer to a flat
+        // array of fixed 32-byte blocks. Memory is freed when it goes out of scope (GC), which
+        // is safe — the FFI only reads it for the duration of the call.
+        val buffer = Memory(identityIds.size.toLong() * 32L)
+        identityIds.forEachIndexed { i, id ->
+            buffer.write(i.toLong() * 32L, id, 0, 32)
+        }
+        ResultUnwrapper.unwrapString(
+            ffi.dash_sdk_identities_fetch_balances(sdkHandle, buffer, identityIds.size.toLong())
+        )
+    }
 
     /** Resolve a name to an identity; returns a JSON string. */
     suspend fun resolveName(name: String): String = withContext(Dispatchers.IO) {

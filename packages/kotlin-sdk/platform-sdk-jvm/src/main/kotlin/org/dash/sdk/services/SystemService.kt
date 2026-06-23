@@ -69,4 +69,18 @@ class SystemService internal constructor(private val sdkHandle: Pointer) {
             ffi.dash_sdk_protocol_version_get_upgrade_vote_status(sdkHandle, startProTxHash, count)
         )
     }
+
+    /**
+     * Fetch raw GroveDB path elements for a low-level state query.
+     *
+     * @param pathJson JSON array of the GroveDB path segments
+     * @param keysJson JSON array of the keys to read at that path
+     * @return JSON array string of the elements (or null if not found)
+     */
+    suspend fun pathElements(pathJson: String, keysJson: String): String =
+        withContext(Dispatchers.IO) {
+            ResultUnwrapper.unwrapString(
+                ffi.dash_sdk_system_get_path_elements(sdkHandle, pathJson, keysJson)
+            )
+        }
 }

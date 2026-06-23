@@ -194,6 +194,19 @@ interface DashSdkFfi : Library {
     ): DashSDKResultNative
 
     /**
+     * Fetch balances for multiple identities. Header:
+     * `dash_sdk_identities_fetch_balances(const SDKHandle *, const uint8_t (*identity_ids)[32], uintptr_t identity_ids_len)`.
+     * [identity_ids] is a pointer to a contiguous array of 32-byte ID buffers (one
+     * [com.sun.jna.Memory] of `count * 32` bytes); [identity_ids_len] is the COUNT of IDs
+     * (not byte length). Returns a [DashSDKResult] with a JSON string (identity IDs → balances).
+     */
+    fun dash_sdk_identities_fetch_balances(
+        sdk_handle: Pointer,
+        identity_ids: Pointer,
+        identity_ids_len: Long
+    ): DashSDKResultNative
+
+    /**
      * Resolve a name to an identity.
      * Returns a [DashSDKResult] with a JSON string.
      */
@@ -251,6 +264,14 @@ interface DashSdkFfi : Library {
      * Returns a [DashSDKResult] with [DashSDKResultDataType.String].
      */
     fun dash_sdk_data_contract_fetch_json(handle: Pointer, contract_id_hex: String): DashSDKResultNative
+
+    /**
+     * Fetch multiple data contracts by their IDs. Header:
+     * `dash_sdk_data_contracts_fetch_many(const SDKHandle *, const char *contract_ids)`.
+     * [contract_ids] is a comma-separated list (or JSON array) of Base58 contract IDs.
+     * Returns a [DashSDKResult] with a JSON string (contract IDs → data contracts).
+     */
+    fun dash_sdk_data_contracts_fetch_many(sdk_handle: Pointer, contract_ids: String): DashSDKResultNative
 
     /**
      * Fetch a data contract's revision history. Returns a [DashSDKResult] with a JSON string.
@@ -460,6 +481,19 @@ interface DashSdkFfi : Library {
 
     /** Current quorums info. Returns a JSON string result. */
     fun dash_sdk_system_get_current_quorums_info(handle: Pointer): DashSDKResultNative
+
+    /**
+     * Fetch GroveDB path elements. Header:
+     * `dash_sdk_system_get_path_elements(const SDKHandle *, const char *path_json, const char *keys_json)`.
+     * [path_json] is a JSON array of path elements (hex-encoded byte arrays); [keys_json] is
+     * a JSON array of keys (hex-encoded byte arrays).
+     * Returns a [DashSDKResult] with a JSON array string of elements (or null if not found).
+     */
+    fun dash_sdk_system_get_path_elements(
+        handle: Pointer,
+        path_json: String,
+        keys_json: String
+    ): DashSDKResultNative
 
     /**
      * Total credits currently in platform. Returns a uint64 result.
