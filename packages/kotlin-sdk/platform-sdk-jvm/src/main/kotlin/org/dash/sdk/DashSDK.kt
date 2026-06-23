@@ -12,6 +12,7 @@ import org.dash.sdk.services.DocumentService
 import org.dash.sdk.services.DpnsService
 import org.dash.sdk.services.IdentityService
 import org.dash.sdk.services.SystemService
+import org.dash.sdk.services.TokenService
 
 /**
  * Main entry point for the Dash Platform Android SDK.
@@ -52,6 +53,9 @@ class DashSDK private constructor(
 
     /** System / status / protocol-version read queries. */
     val system: SystemService = SystemService(handle)
+
+    /** Token read queries (balances, info, prices, supply, distributions). */
+    val token: TokenService = TokenService(handle)
 
     /** Release native resources. Safe to call multiple times. */
     override fun close() {

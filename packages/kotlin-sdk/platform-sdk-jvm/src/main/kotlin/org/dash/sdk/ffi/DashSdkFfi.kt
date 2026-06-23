@@ -354,6 +354,87 @@ interface DashSdkFfi : Library {
     fun dash_sdk_dpns_search(handle: Pointer, prefix: String, limit: Int): DashSDKResultNative
 
     // -------------------------------------------------------------------------
+    // Token queries (read-path; return DashSDKResult carrying a JSON / base58 string)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Derive the canonical platform token ID for `(contract_id, position)`.
+     * Pure helper — no SDK handle, no network. [position] is a C `uint16_t`
+     * (unsigned 16-bit), passed in an Int.
+     * Returns a [DashSDKResult] with a base58-encoded token-ID string.
+     */
+    fun dash_sdk_calculate_token_id(contract_id: String, position: Int): DashSDKResultNative
+
+    /**
+     * Get a token's contract info (contract ID and token position).
+     * Returns a [DashSDKResult] with a JSON string (or null if not found).
+     */
+    fun dash_sdk_token_get_contract_info(handle: Pointer, token_id: String): DashSDKResultNative
+
+    /**
+     * Get direct purchase prices for a comma-separated list of token IDs.
+     * Returns a [DashSDKResult] with a JSON string (token IDs → pricing info).
+     */
+    fun dash_sdk_token_get_direct_purchase_prices(handle: Pointer, token_ids: String): DashSDKResultNative
+
+    /**
+     * Get token balances for a single identity over a comma-separated list of token IDs.
+     * Returns a [DashSDKResult] with a JSON string (token IDs → balances).
+     */
+    fun dash_sdk_token_get_identity_balances(
+        handle: Pointer,
+        identity_id: String,
+        token_ids: String
+    ): DashSDKResultNative
+
+    /**
+     * Get token information for a single identity over a comma-separated list of token IDs.
+     * Returns a [DashSDKResult] with a JSON string (token IDs → info).
+     */
+    fun dash_sdk_token_get_identity_infos(
+        handle: Pointer,
+        identity_id: String,
+        token_ids: String
+    ): DashSDKResultNative
+
+    /**
+     * Get the last perpetual-distribution claim for [identity_id] on [token_id].
+     * Returns a [DashSDKResult] with a JSON string.
+     */
+    fun dash_sdk_token_get_perpetual_distribution_last_claim(
+        handle: Pointer,
+        token_id: String,
+        identity_id: String
+    ): DashSDKResultNative
+
+    /**
+     * Get pre-programmed distributions for a token.
+     * [start_time_ms] is a C `uint64_t` (0 = no start time); [start_recipient] may be null;
+     * [limit] is a C `uint32_t` (unsigned 32-bit; 0 = default limit).
+     * Returns a [DashSDKResult] with a JSON array string (or null if not found).
+     */
+    fun dash_sdk_token_get_pre_programmed_distributions(
+        handle: Pointer,
+        token_id: String,
+        start_time_ms: Long,
+        start_recipient: String?,
+        start_recipient_included: Boolean,
+        limit: Int
+    ): DashSDKResultNative
+
+    /**
+     * Get statuses for a comma-separated list of token IDs.
+     * Returns a [DashSDKResult] with a JSON string (token IDs → status info).
+     */
+    fun dash_sdk_token_get_statuses(handle: Pointer, token_ids: String): DashSDKResultNative
+
+    /**
+     * Get the total supply of a token.
+     * Returns a [DashSDKResult] with a JSON string (or null if not found).
+     */
+    fun dash_sdk_token_get_total_supply(handle: Pointer, token_id: String): DashSDKResultNative
+
+    // -------------------------------------------------------------------------
     // System / status / protocol-version queries (read-path; return DashSDKResult)
     // -------------------------------------------------------------------------
 
