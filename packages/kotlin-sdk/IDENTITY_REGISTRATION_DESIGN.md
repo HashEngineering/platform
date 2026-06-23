@@ -72,7 +72,7 @@ funding tx bytes + output index + the 32-byte asset-lock output key), and a
 
 Folds into `platform-sdk-jvm`: a `register*` suspend method on the existing
 `IdentityService`, plus a top-level `Signer` / `KeystoreSigner` and an abstract
-`IdentityKeyStore`. Note this intentionally overrides the `platform-sdk-jvm/CLAUDE.md`
+`SigningKeyStore`. Note this intentionally overrides the `platform-sdk-jvm/CLAUDE.md`
 line *"signing/broadcast belong in `:unified-sdk-jvm`"* — that rule assumed signing
 needs the unified lib, which §0.1 disproves. Update that CLAUDE.md note when the
 code lands: signing/registration **via rs-sdk-ffi** is allowed here; only
@@ -80,7 +80,8 @@ code lands: signing/registration **via rs-sdk-ffi** is allowed here; only
 
 ### 0.4 Phasing
 
-**Phase A — Signer infrastructure** *(new JNA callback ground; offline-testable)*
+**Phase A — Signer infrastructure** ✅ DONE (uncommitted) *(new JNA callback ground; offline-testable)*
+Implemented in `platform-sdk-jvm`: signer/crypto bindings + `SignAsyncCallback`/`CanSignCallback`/`DestroyCallback` + `DashSDKSignatureNative` in `DashSdkFfi.kt`; `org.dash.sdk.signing` package (`Signer`, `KeystoreSigner`, `SigningKeyStore`, `InMemorySigningKeyStore`); crypto helpers `publicKeyFromPrivateKey`/`validatePrivateKeyForPublicKey` on `UtilsService`. `SignerTest` (5) green offline — `can_sign` round-trips the callback trampoline, `sign` exercises the v1 primitive. Plan as built:
 - Bind: `dash_sdk_signer_create`, `_create_with_ctx`, `_destroy`, `_sign`,
   `_create_from_private_key`, `_can_sign`, `dash_sdk_sign_async_completion`,
   `dash_sdk_signature_free`.
@@ -93,7 +94,7 @@ code lands: signing/registration **via rs-sdk-ffi** is allowed here; only
   `Callback`s as `private val` fields so JNA does not GC the native trampolines;
   prefer `dash_sdk_signer_create` (no ctx). Pin a named daemon
   `CallbackThreadInitializer` (callback can fire from any Tokio worker thread).
-- `IdentityKeyStore` abstract interface; ship a simple in-memory impl for tests/console.
+- `SigningKeyStore` abstract interface; ship a simple in-memory impl for tests/console.
   Encrypted backing still **deferred** (§3.x).
 - **Offline tests** (real native, no node, like the utils/token tests): sign
   round-trip; `can_sign`; `dash_sdk_validate_private_key_for_public_key`;
@@ -136,7 +137,7 @@ code lands: signing/registration **via rs-sdk-ffi** is allowed here; only
 - **PutSettings NULL** — header says each `0` field = "use default" and `convert_put_settings`
   handles a null pointer, so passing `NULL` is the v1 default. (Worth a quick confirm
   when binding.)
-- **Key storage backing** — still deferred (§3.x); in-memory `IdentityKeyStore` is
+- **Key storage backing** — still deferred (§3.x); in-memory `SigningKeyStore` is
   enough to land + test Phases A–C.
 
 ### 0.6 Out of scope (the no-unified-deps constraint)
@@ -245,7 +246,7 @@ Kotlin v1 mirror (illustrative — not committed):
 
 ```kotlin
 class KeystoreSigner(
-    private val keyStore: IdentityKeyStore,   // abstract; backing decided later
+    private val keyStore: SigningKeyStore,   // abstract; backing decided later
     private val network: Network,
 ) : AutoCloseable {
 
@@ -278,7 +279,7 @@ class KeystoreSigner(
 
 ### Key storage — DEFERRED (decided later)
 
-`IdentityKeyStore` stays an abstract interface in this design; the concrete
+`SigningKeyStore` stays an abstract interface in this design; the concrete
 backing is intentionally unresolved. Constraints that will shape it:
 
 - There is **no secp256k1 hardware path on the JVM/Android.** Android Keystore is
@@ -357,7 +358,7 @@ Rust-side persist-callback option is chosen, which folds derive+persist into one
   path is surfaced
 - `PersistKeyArgs` (h:297) if the persist-callback option wins
 
-**New Kotlin classes:** `KeystoreSigner`, `MnemonicResolver`, `IdentityKeyStore`
+**New Kotlin classes:** `KeystoreSigner`, `MnemonicResolver`, `SigningKeyStore`
 (abstract; android/jvm impls deferred), `IdentityPubkey` model, `RegisteredIdentity`.
 
 **Escape hatch (Level-1):** `platform_wallet_resume_identity_with_existing_asset_lock_signer`
