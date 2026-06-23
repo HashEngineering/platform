@@ -100,7 +100,14 @@ Implemented in `platform-sdk-jvm`: signer/crypto bindings + `SignAsyncCallback`/
   round-trip; `can_sign`; `dash_sdk_validate_private_key_for_public_key`;
   `dash_sdk_public_key_data_from_private_key_data`.
 
-**Phase B — Identity object construction** *(offline-testable)*
+**Phase B — Identity object construction** ✅ DONE (uncommitted) *(offline-testable)*
+Implemented in `platform-sdk-jvm`: bound `identity_public_key_create_from_data` +
+`identity_create_from_components` and added the `DashSDKPublicKeyDataNative` struct
+(jna-struct-auditor verified: 32-byte layout, correct offsets/padding). `IdentityService`
+gained `createPublicKey`, `createFromComponents` (placeholder id; pinned key buffers +
+struct array held across the call via `Reference.reachabilityFence`), and a public
+`getInfo(handle)`; new `IdentityPublicKeyParams` model. `IdentityCreateTest` (3) green
+offline — create→get_info round-trips the key count (1 and 2 keys). Plan as built:
 - Bind: `dash_sdk_identity_public_key_create_from_data`,
   `dash_sdk_identity_create_from_components`.
 - Struct (→ `jna-struct-auditor`): `DashSDKPublicKeyData` (8 fields: `id`, `purpose`,
