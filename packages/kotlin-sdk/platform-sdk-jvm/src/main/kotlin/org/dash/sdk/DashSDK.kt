@@ -7,9 +7,12 @@ import org.dash.sdk.ffi.DashSdkFfi
 import org.dash.sdk.ffi.NativeLoader
 import org.dash.sdk.models.DashSDKException
 import org.dash.sdk.models.Network
+import org.dash.sdk.services.ContestedResourceService
 import org.dash.sdk.services.DataContractService
 import org.dash.sdk.services.DocumentService
 import org.dash.sdk.services.DpnsService
+import org.dash.sdk.services.EvonodeService
+import org.dash.sdk.services.GroupService
 import org.dash.sdk.services.IdentityService
 import org.dash.sdk.services.SystemService
 import org.dash.sdk.services.TokenService
@@ -57,6 +60,15 @@ class DashSDK private constructor(
 
     /** Token read queries (balances, info, prices, supply, distributions). */
     val token: TokenService = TokenService(handle)
+
+    /** Contested-resource and voting read queries (DPNS-style name contests, vote polls). */
+    val contestedResource: ContestedResourceService = ContestedResourceService(handle)
+
+    /** Group read queries (multi-party group actions on a data contract). */
+    val group: GroupService = GroupService(handle)
+
+    /** Evonode read queries (proposed epoch blocks). */
+    val evonode: EvonodeService = EvonodeService(handle)
 
     /** Process-local utilities (base58/hex, platform-address encoding, proof formatting). */
     val utils: UtilsService = UtilsService()

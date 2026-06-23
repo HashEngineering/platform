@@ -509,6 +509,251 @@ interface DashSdkFfi : Library {
     /** Search DPNS names by prefix. Returns JSON array result. */
     fun dash_sdk_dpns_search(handle: Pointer, prefix: String, limit: Int): DashSDKResultNative
 
+    /**
+     * Get all contested DPNS usernames. [limit] is a C `uint32_t` (unsigned 32-bit);
+     * [start_after] is a nullable cursor (label to page after). Returns a JSON string result.
+     */
+    fun dash_sdk_dpns_get_all_contested_usernames(
+        handle: Pointer,
+        limit: Int,
+        start_after: String?
+    ): DashSDKResultNative
+
+    /**
+     * Get all contested DPNS usernames where [identity_id] is a contender.
+     * [limit] is a C `uint32_t`. Returns a JSON string result.
+     */
+    fun dash_sdk_dpns_get_contested_usernames_by_identity(
+        handle: Pointer,
+        identity_id: String,
+        limit: Int
+    ): DashSDKResultNative
+
+    /**
+     * Get the vote state for a contested DPNS username [label]. [limit] is a C `uint32_t`.
+     * Returns a JSON string result.
+     */
+    fun dash_sdk_dpns_get_contested_vote_state(
+        handle: Pointer,
+        label: String,
+        limit: Int
+    ): DashSDKResultNative
+
+    /**
+     * Get all contested DPNS usernames that [identity_id] has voted on. [limit] is a C
+     * `uint32_t`; [offset] is a C `uint16_t` (unsigned 16-bit). Returns a JSON string result.
+     */
+    fun dash_sdk_dpns_get_identity_votes(
+        handle: Pointer,
+        identity_id: String,
+        limit: Int,
+        offset: Int
+    ): DashSDKResultNative
+
+    /**
+     * Get the DPNS usernames owned by [identity_id]. [limit] is a C `uint32_t`.
+     * Returns a JSON string result.
+     */
+    fun dash_sdk_dpns_get_usernames(
+        handle: Pointer,
+        identity_id: String,
+        limit: Int
+    ): DashSDKResultNative
+
+    /**
+     * Validate a DPNS [name] and return a human-readable validation message.
+     * Process-local — no SDK handle, no network. Returns a [DashSDKResult] with a C string.
+     */
+    fun dash_sdk_dpns_get_validation_message(name: String): DashSDKResultNative
+
+    /**
+     * Normalize a DPNS [name] (case-folding / homoglyph normalization).
+     * Process-local — no SDK handle, no network. Returns a [DashSDKResult] with a C string.
+     */
+    fun dash_sdk_dpns_normalize_username(name: String): DashSDKResultNative
+
+    /**
+     * Check whether [name] is a valid DPNS username. Process-local — no SDK handle.
+     * Returns a RAW `int32_t` (NOT a [DashSDKResult]): -1 on null/error, 0 invalid, 1 valid.
+     * Do not route through [ResultUnwrapper]; callers interpret `== 1`.
+     */
+    fun dash_sdk_dpns_is_valid_username(name: String): Int
+
+    /**
+     * Check whether [name] is a contested DPNS username. Process-local — no SDK handle.
+     * Returns a RAW `int32_t` (NOT a [DashSDKResult]): -1 on null/error, 0 not-contested,
+     * 1 contested. Do not route through [ResultUnwrapper]; callers interpret `== 1`.
+     */
+    fun dash_sdk_dpns_is_contested_username(name: String): Int
+
+    /**
+     * Get current DPNS contests (active vote polls) ending within [start_time]..[end_time]
+     * (ms). [limit] is a C `uint16_t` (unsigned 16-bit). Header:
+     * `struct DashSDKNameTimestampList *dash_sdk_dpns_get_current_contests(const SDKHandle *, uint64_t, uint64_t, uint16_t)`.
+     * Returns a heap pointer to a [DashSDKNameTimestampListNative] (or null) — read it, then
+     * free with [dash_sdk_name_timestamp_list_free]. (NOT a DashSDKResult.)
+     */
+    fun dash_sdk_dpns_get_current_contests(
+        handle: Pointer,
+        start_time: Long,
+        end_time: Long,
+        limit: Int
+    ): Pointer?
+
+    /** Free a [DashSDKNameTimestampListNative] returned by [dash_sdk_dpns_get_current_contests]. */
+    fun dash_sdk_name_timestamp_list_free(list: Pointer)
+
+    // -------------------------------------------------------------------------
+    // Contested-resource + voting queries (read-path; return DashSDKResult JSON string)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Get the contested-resource votes cast by [identity_id]. [limit]/[offset] are C
+     * `uint32_t` (unsigned 32-bit); [order_ascending] orders by resource. JSON string result.
+     */
+    fun dash_sdk_contested_resource_get_identity_votes(
+        handle: Pointer,
+        identity_id: String,
+        limit: Int,
+        offset: Int,
+        order_ascending: Boolean
+    ): DashSDKResultNative
+
+    /**
+     * Get contested resources for an index. [start_index_values_json]/[end_index_values_json]
+     * are JSON-array cursors; [count] is a C `uint32_t`. JSON string result.
+     */
+    fun dash_sdk_contested_resource_get_resources(
+        handle: Pointer,
+        contract_id: String,
+        document_type_name: String,
+        index_name: String,
+        start_index_values_json: String,
+        end_index_values_json: String,
+        count: Int,
+        order_ascending: Boolean
+    ): DashSDKResultNative
+
+    /**
+     * Get the vote state for a contested resource. [result_type] is a C `uint8_t`
+     * (0=documents, 1=vote-tally, …); [count] is a C `uint32_t`. JSON string result.
+     */
+    fun dash_sdk_contested_resource_get_vote_state(
+        handle: Pointer,
+        contract_id: String,
+        document_type_name: String,
+        index_name: String,
+        index_values_json: String,
+        result_type: Byte,
+        allow_include_locked_and_abstaining_vote_tally: Boolean,
+        count: Int
+    ): DashSDKResultNative
+
+    /**
+     * Get the voters for a contestant on a contested resource. [count] is a C `uint32_t`.
+     * JSON string result.
+     */
+    fun dash_sdk_contested_resource_get_voters_for_identity(
+        handle: Pointer,
+        contract_id: String,
+        document_type_name: String,
+        index_name: String,
+        index_values_json: String,
+        contestant_id: String,
+        count: Int,
+        order_ascending: Boolean
+    ): DashSDKResultNative
+
+    /**
+     * Get vote polls by end date. [start_time_ms]/[end_time_ms] are C `uint64_t`;
+     * [limit]/[offset] are C `uint32_t`. JSON string result.
+     */
+    fun dash_sdk_voting_get_vote_polls_by_end_date(
+        handle: Pointer,
+        start_time_ms: Long,
+        start_time_included: Boolean,
+        end_time_ms: Long,
+        end_time_included: Boolean,
+        limit: Int,
+        offset: Int,
+        ascending: Boolean
+    ): DashSDKResultNative
+
+    // -------------------------------------------------------------------------
+    // Group queries (read-path; return DashSDKResult JSON string)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Get info for a group at [group_contract_position] in a contract. [group_contract_position]
+     * is a C `uint16_t` (unsigned 16-bit). JSON string result.
+     */
+    fun dash_sdk_group_get_info(
+        handle: Pointer,
+        contract_id: String,
+        group_contract_position: Int
+    ): DashSDKResultNative
+
+    /**
+     * Get infos for all groups in a contract. [start_at_position] is a nullable cursor;
+     * [limit] is a C `uint32_t`. JSON string result.
+     */
+    fun dash_sdk_group_get_infos(
+        handle: Pointer,
+        start_at_position: String?,
+        limit: Int
+    ): DashSDKResultNative
+
+    /**
+     * Get group actions. [group_contract_position] is a C `uint16_t`; [status] is a C `uint8_t`;
+     * [start_at_action_id] is a nullable cursor; [limit] is a C `uint16_t`. JSON string result.
+     */
+    fun dash_sdk_group_get_actions(
+        handle: Pointer,
+        contract_id: String,
+        group_contract_position: Int,
+        status: Byte,
+        start_at_action_id: String?,
+        limit: Int
+    ): DashSDKResultNative
+
+    /**
+     * Get the signers of a group action. [group_contract_position] is a C `uint16_t`;
+     * [status] is a C `uint8_t`. JSON string result.
+     */
+    fun dash_sdk_group_get_action_signers(
+        handle: Pointer,
+        contract_id: String,
+        group_contract_position: Int,
+        status: Byte,
+        action_id: String
+    ): DashSDKResultNative
+
+    // -------------------------------------------------------------------------
+    // Evonode queries (read-path; return DashSDKResult JSON string)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Get proposed epoch blocks for a set of evonode IDs. [epoch] is a C `uint32_t`;
+     * [ids_json] is a JSON array of evonode (proTxHash) IDs. JSON string result.
+     */
+    fun dash_sdk_evonode_get_proposed_epoch_blocks_by_ids(
+        handle: Pointer,
+        epoch: Int,
+        ids_json: String
+    ): DashSDKResultNative
+
+    /**
+     * Get proposed epoch blocks over a range. [epoch]/[limit] are C `uint32_t`;
+     * [start_after] and [start_at] are nullable cursors. JSON string result.
+     */
+    fun dash_sdk_evonode_get_proposed_epoch_blocks_by_range(
+        handle: Pointer,
+        epoch: Int,
+        limit: Int,
+        start_after: String?,
+        start_at: String?
+    ): DashSDKResultNative
+
     // -------------------------------------------------------------------------
     // Token queries (read-path; return DashSDKResult carrying a JSON / base58 string)
     // -------------------------------------------------------------------------
@@ -1125,6 +1370,53 @@ class DashSDKDataContractFetchResultNative : Structure(), Structure.ByValue {
     @JvmField var serialized_data_len: Long = 0
     /** Heap-allocated [DashSDKError] (null on success). */
     @JvmField var error: Pointer? = null
+}
+
+/**
+ * Maps to `struct DashSDKNameTimestamp` in rs-sdk-ffi.h — one element of the array pointed at
+ * by [DashSDKNameTimestampListNative.entries].
+ *
+ * C 64-bit layout (auditor-verified via cc offsetof; both fields naturally 8-aligned):
+ *   name:     char*    @0 (8)
+ *   end_time: uint64_t @8 (8)
+ *   = 16 bytes
+ *
+ * The heap `name` string and the whole array are owned by the parent list and freed by
+ * [DashSdkFfi.dash_sdk_name_timestamp_list_free] — do not touch [name] after that.
+ */
+@Structure.FieldOrder("name", "end_time")
+class DashSDKNameTimestampNative : Structure {
+    /** The contested name (heap `char*`; owned by the parent list). */
+    @JvmField var name: String? = null
+    /** End timestamp in milliseconds. */
+    @JvmField var end_time: Long = 0
+
+    constructor() : super()
+    constructor(p: Pointer) : super(p)
+}
+
+/**
+ * Maps to `struct DashSDKNameTimestampList` in rs-sdk-ffi.h — the by-pointer return of
+ * [DashSdkFfi.dash_sdk_dpns_get_current_contests].
+ *
+ * C 64-bit layout (auditor-verified via cc offsetof; both fields naturally 8-aligned):
+ *   entries: DashSDKNameTimestamp* @0 (8)
+ *   count:   uintptr_t             @8 (8)
+ *   = 16 bytes
+ *
+ * Usage: construct over the returned pointer, [read], iterate [count] contiguous
+ * [DashSDKNameTimestampNative] rows off [entries], then release the whole list with
+ * [DashSdkFfi.dash_sdk_name_timestamp_list_free] — do not touch any field after freeing.
+ */
+@Structure.FieldOrder("entries", "count")
+class DashSDKNameTimestampListNative : Structure {
+    /** Pointer to a contiguous `DashSDKNameTimestamp[count]` array (heap; owned by this list). */
+    @JvmField var entries: Pointer? = null
+    /** Number of entries in [entries]. */
+    @JvmField var count: Long = 0
+
+    constructor() : super()
+    constructor(p: Pointer) : super(p)
 }
 
 /**

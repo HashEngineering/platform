@@ -3,12 +3,20 @@ package org.dash.sdk.services
 import com.sun.jna.Pointer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.dash.sdk.ffi.DashSDKNameTimestampListNative
+import org.dash.sdk.ffi.DashSDKNameTimestampNative
 import org.dash.sdk.ffi.DashSdkFfi
 import org.dash.sdk.ffi.ResultUnwrapper
+import org.dash.sdk.models.ContestedName
 
 /**
  * High-level service for Dash Platform Naming Service (DPNS) operations.
  * Mirrors SwiftDashSDK/DPP/DPPIdentity.swift name resolution helpers.
+ *
+ * Every method is a 1:1 wrapper over a single `rs-sdk-ffi` call (marshal in → call →
+ * marshal out). Network queries are `suspend` on [Dispatchers.IO]; the validation helpers
+ * ([getValidationMessage], [normalizeUsername], [isValidUsername], [isContestedUsername])
+ * are process-local (no SDK handle, no network) and synchronous.
  */
 class DpnsService internal constructor(private val sdkHandle: Pointer) {
 
@@ -55,4 +63,135 @@ class DpnsService internal constructor(private val sdkHandle: Pointer) {
             Regex(""""([^"]+)"""").findAll(json).map { it.groupValues[1] }.toList()
         }.getOrDefault(emptyList())
     }
+
+    /**
+     * Get all contested DPNS usernames as a JSON string.
+     *
+     * @param limit max results (C uint32; 0 = server default)
+     * @param startAfter optional cursor (label to page after); null for the first page
+     */
+    suspend fun getAllContestedUsernames(limit: Int = 0, startAfter: String? = null): String =
+        withContext(Dispatchers.IO) {
+            ResultUnwrapper.unwrapString(
+                ffi.dash_sdk_dpns_get_all_contested_usernames(sdkHandle, limit, startAfter)
+            )
+        }
+
+    /**
+     * Get all contested DPNS usernames where [identityId] is a contender, as a JSON string.
+     *
+     * @param identityId base58-encoded identity ID
+     * @param limit max results (C uint32; 0 = server default)
+     */
+    suspend fun getContestedUsernamesByIdentity(identityId: String, limit: Int = 0): String =
+        withContext(Dispatchers.IO) {
+            ResultUnwrapper.unwrapString(
+                ffi.dash_sdk_dpns_get_contested_usernames_by_identity(sdkHandle, identityId, limit)
+            )
+        }
+
+    /**
+     * Get the vote state for a contested DPNS username [label], as a JSON string.
+     *
+     * @param label contested label (without ".dash" suffix)
+     * @param limit max results (C uint32; 0 = server default)
+     */
+    suspend fun getContestedVoteState(label: String, limit: Int = 0): String =
+        withContext(Dispatchers.IO) {
+            ResultUnwrapper.unwrapString(
+                ffi.dash_sdk_dpns_get_contested_vote_state(sdkHandle, label, limit)
+            )
+        }
+
+    /**
+     * Get the contested DPNS usernames [identityId] has voted on, as a JSON string.
+     *
+     * @param identityId base58-encoded identity ID
+     * @param limit max results (C uint32; 0 = server default)
+     * @param offset pagination offset (C uint16, unsigned 16-bit)
+     */
+    suspend fun getIdentityVotes(identityId: String, limit: Int = 0, offset: Int = 0): String =
+        withContext(Dispatchers.IO) {
+            ResultUnwrapper.unwrapString(
+                ffi.dash_sdk_dpns_get_identity_votes(sdkHandle, identityId, limit, offset)
+            )
+        }
+
+    /**
+     * Get the DPNS usernames owned by [identityId], as a JSON string.
+     *
+     * @param identityId base58-encoded identity ID
+     * @param limit max results (C uint32; 0 = server default)
+     */
+    suspend fun getUsernames(identityId: String, limit: Int = 0): String =
+        withContext(Dispatchers.IO) {
+            ResultUnwrapper.unwrapString(
+                ffi.dash_sdk_dpns_get_usernames(sdkHandle, identityId, limit)
+            )
+        }
+
+    /**
+     * Get a human-readable validation message for a DPNS [name]. Process-local — no network.
+     *
+     * @param name DPNS label or fully-qualified name to validate
+     */
+    fun getValidationMessage(name: String): String =
+        ResultUnwrapper.unwrapString(ffi.dash_sdk_dpns_get_validation_message(name))
+
+    /**
+     * Normalize a DPNS [name] (case-folding / homoglyph normalization). Process-local — no network.
+     *
+     * @param name DPNS label to normalize
+     */
+    fun normalizeUsername(name: String): String =
+        ResultUnwrapper.unwrapString(ffi.dash_sdk_dpns_normalize_username(name))
+
+    /**
+     * Whether [name] is a valid DPNS username. Process-local — no network.
+     *
+     * Backed by an FFI function returning a raw `int32_t` (-1 error, 0 invalid, 1 valid),
+     * so this never throws — returns true only for an explicit `1`.
+     */
+    fun isValidUsername(name: String): Boolean =
+        ffi.dash_sdk_dpns_is_valid_username(name) == 1
+
+    /**
+     * Whether [name] is a contested DPNS username. Process-local — no network.
+     *
+     * Backed by an FFI function returning a raw `int32_t` (-1 error, 0 not-contested,
+     * 1 contested), so this never throws — returns true only for an explicit `1`.
+     */
+    fun isContestedUsername(name: String): Boolean =
+        ffi.dash_sdk_dpns_is_contested_username(name) == 1
+
+    /**
+     * Get current DPNS contests (active vote polls) ending within [startTime]..[endTime] (ms).
+     *
+     * Backed by a function returning a native `DashSDKNameTimestampList *`; this reads the
+     * entries into a [List] of [ContestedName] and frees the native list.
+     *
+     * @param startTime range start, ms since epoch
+     * @param endTime range end, ms since epoch
+     * @param limit max results (C uint16, unsigned 16-bit; 0 = server default)
+     */
+    suspend fun getCurrentContests(startTime: Long, endTime: Long, limit: Int = 0): List<ContestedName> =
+        withContext(Dispatchers.IO) {
+            val listPtr = ffi.dash_sdk_dpns_get_current_contests(sdkHandle, startTime, endTime, limit)
+                ?: return@withContext emptyList()
+            try {
+                val list = DashSDKNameTimestampListNative(listPtr).apply { read() }
+                val count = list.count.toInt()
+                val entriesPtr = list.entries
+                if (count <= 0 || entriesPtr == null) {
+                    emptyList()
+                } else {
+                    val first = DashSDKNameTimestampNative(entriesPtr).apply { read() }
+                    @Suppress("UNCHECKED_CAST")
+                    val rows = first.toArray(count) as Array<DashSDKNameTimestampNative>
+                    rows.map { ContestedName(name = it.name ?: "", endTime = it.end_time) }
+                }
+            } finally {
+                ffi.dash_sdk_name_timestamp_list_free(listPtr)
+            }
+        }
 }
