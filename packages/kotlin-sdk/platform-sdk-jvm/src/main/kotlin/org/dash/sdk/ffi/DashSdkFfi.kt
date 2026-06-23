@@ -521,6 +521,55 @@ interface DashSdkFfi : Library {
         count: Int
     ): DashSDKResultNative
 
+    // -------------------------------------------------------------------------
+    // Pure utilities (no SDK handle, no network — process-local)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Convert a base58 string to hex. Header:
+     * `struct DashSDKResult dash_sdk_utils_base58_to_hex(const char *base58_string)`.
+     * Returns a [DashSDKResult] with a hex-encoded C string.
+     */
+    fun dash_sdk_utils_base58_to_hex(base58_string: String): DashSDKResultNative
+
+    /**
+     * Convert a hex string to base58. Header:
+     * `struct DashSDKResult dash_sdk_utils_hex_to_base58(const char *hex_string)`.
+     * Returns a [DashSDKResult] with a base58-encoded C string.
+     */
+    fun dash_sdk_utils_hex_to_base58(hex_string: String): DashSDKResultNative
+
+    /**
+     * Validate whether [string] is valid base58. Header:
+     * `uint8_t dash_sdk_utils_is_valid_base58(const char *string)`.
+     * Returns a RAW `uint8_t` (1 = valid, 0 = invalid) — NOT a [DashSDKResult]; do not route
+     * through [ResultUnwrapper]. Mapped as [Byte]; callers interpret `!= 0`.
+     */
+    fun dash_sdk_utils_is_valid_base58(string: String): Byte
+
+    /**
+     * Encode a P2PKH scriptPubKey as a bech32m platform address (DIP-18). Header:
+     * `struct DashSDKResult dash_sdk_encode_platform_address(const uint8_t *script_pubkey, uint32_t script_len, FFINetwork network)`.
+     * [script_pubkey] is a [com.sun.jna.Memory] holding [script_len] raw bytes (a 25-byte
+     * P2PKH script); [script_len] is a C `uint32_t` (unsigned 32-bit). [network] is the
+     * `FFINetwork` enum value (see [FFINetwork]; differs from [DashSDKNetwork]).
+     * Returns a [DashSDKResult] with the bech32m address as a C string.
+     */
+    fun dash_sdk_encode_platform_address(
+        script_pubkey: Pointer,
+        script_len: Int,
+        network: Int
+    ): DashSDKResultNative
+
+    /**
+     * Format a raw GroveDB proof as a human-readable string. Header:
+     * `struct DashSDKResult dash_sdk_format_grovedb_proof(const uint8_t *proof_bytes, uint32_t proof_len)`.
+     * [proof_bytes] is a [com.sun.jna.Memory] holding [proof_len] raw bytes; [proof_len] is a
+     * C `uint32_t` (unsigned 32-bit).
+     * Returns a [DashSDKResult] with a tree-structured visualization as a C string.
+     */
+    fun dash_sdk_format_grovedb_proof(proof_bytes: Pointer, proof_len: Int): DashSDKResultNative
+
     // Note: the library exposes no error-accessor functions. A DashSDKError is read by
     // its struct fields directly — `code` (C int @0) and `message` (char* @POINTER_SIZE) —
     // see ResultUnwrapper / DashSDK.create. Only dash_sdk_error_free is exported.
@@ -787,4 +836,15 @@ object DashSDKNetwork {
     const val REGTEST = 2
     const val DEVNET = 3
     const val LOCAL = 4
+}
+
+// FFINetwork enum (dash-network.h `typedef enum FFINetwork`). This is a DISTINCT enum
+// from DashSDKNetwork above: here Devnet=2 and Regtest=3 (swapped relative to
+// DashSDKNetwork), and there is no Local variant. Used by functions whose header types the
+// network parameter as `FFINetwork` (e.g. dash_sdk_encode_platform_address).
+object FFINetwork {
+    const val MAINNET = 0
+    const val TESTNET = 1
+    const val DEVNET = 2
+    const val REGTEST = 3
 }
