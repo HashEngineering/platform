@@ -9,10 +9,10 @@ import kotlinx.coroutines.withContext
 import org.dash.sdk.ffi.DashSDKErrorCode
 import org.dash.sdk.ffi.DashSDKIdentityInfoNative
 import org.dash.sdk.ffi.DashSDKPublicKeyDataNative
-import org.dash.sdk.ffi.DashSDKPutSettingsNative
 import org.dash.sdk.ffi.DashSDKTransferCreditsResultNative
 import org.dash.sdk.ffi.DashSdkFfi
 import org.dash.sdk.ffi.ResultUnwrapper
+import org.dash.sdk.ffi.toNative
 import org.dash.sdk.models.DashSDKException
 import org.dash.sdk.models.Identity
 import org.dash.sdk.models.IdentityPublicKeyParams
@@ -327,7 +327,7 @@ class IdentityService internal constructor(private val sdkHandle: Pointer) {
         val ilMem = Memory(instantLockBytes.size.toLong()).apply { write(0, instantLockBytes, 0, instantLockBytes.size) }
         val txMem = Memory(transactionBytes.size.toLong()).apply { write(0, transactionBytes, 0, transactionBytes.size) }
         val keyMem = Memory(32)
-        val ps = nativePutSettings(settings)
+        val ps = settings?.toNative()
         try {
             keyMem.write(0, assetLockPrivateKey, 0, 32)
             val confirmed = ResultUnwrapper.unwrapHandle(
@@ -380,7 +380,7 @@ class IdentityService internal constructor(private val sdkHandle: Pointer) {
         val identityHandle = createFromComponents(ByteArray(32), publicKeys)
         val outPointMem = Memory(36).apply { write(0, outPoint, 0, 36) }
         val keyMem = Memory(32)
-        val ps = nativePutSettings(settings)
+        val ps = settings?.toNative()
         try {
             keyMem.write(0, assetLockPrivateKey, 0, 32)
             val confirmed = ResultUnwrapper.unwrapHandle(
@@ -432,7 +432,7 @@ class IdentityService internal constructor(private val sdkHandle: Pointer) {
         val ilMem = Memory(instantLockBytes.size.toLong()).apply { write(0, instantLockBytes, 0, instantLockBytes.size) }
         val txMem = Memory(transactionBytes.size.toLong()).apply { write(0, transactionBytes, 0, transactionBytes.size) }
         val keyMem = Memory(32)
-        val ps = nativePutSettings(settings)
+        val ps = settings?.toNative()
         try {
             keyMem.write(0, assetLockPrivateKey, 0, 32)
             val confirmed = ResultUnwrapper.unwrapHandle(
@@ -475,7 +475,7 @@ class IdentityService internal constructor(private val sdkHandle: Pointer) {
         signer: Signer,
         settings: PutSettings? = null,
     ): TransferCreditsResult = withContext(Dispatchers.IO) {
-        val ps = nativePutSettings(settings)
+        val ps = settings?.toNative()
         val resultPtr = ResultUnwrapper.unwrapHandle(
             ffi.dash_sdk_identity_transfer_credits(
                 sdkHandle, fromIdentityHandle, toIdentityId, amount.toLong(), publicKeyId,
@@ -516,7 +516,7 @@ class IdentityService internal constructor(private val sdkHandle: Pointer) {
         signer: Signer,
         settings: PutSettings? = null,
     ): ULong = withContext(Dispatchers.IO) {
-        val ps = nativePutSettings(settings)
+        val ps = settings?.toNative()
         val balanceStr = ResultUnwrapper.unwrapString(
             ffi.dash_sdk_identity_withdraw(
                 sdkHandle, identityHandle, address, amount.toLong(), coreFeePerByte, publicKeyId,
@@ -533,21 +533,6 @@ class IdentityService internal constructor(private val sdkHandle: Pointer) {
      * The returned struct must be kept reachable until the FFI call returns (callers
      * [Reference.reachabilityFence] it).
      */
-    private fun nativePutSettings(settings: PutSettings?): DashSDKPutSettingsNative? {
-        if (settings == null) return null
-        return DashSDKPutSettingsNative().apply {
-            connect_timeout_ms = settings.connectTimeoutMs
-            timeout_ms = settings.timeoutMs
-            retries = settings.retries
-            ban_failed_address = if (settings.banFailedAddress) 1 else 0
-            identity_nonce_stale_time_s = settings.identityNonceStaleTimeS
-            user_fee_increase = settings.userFeeIncrease.toShort()
-            allow_signing_with_any_security_level = if (settings.allowSigningWithAnySecurityLevel) 1 else 0
-            allow_signing_with_any_purpose = if (settings.allowSigningWithAnyPurpose) 1 else 0
-            wait_timeout_ms = settings.waitTimeoutMs
-            write()
-        }
-    }
 
     /**
      * Get a public key handle from an identity handle by key ID.
