@@ -120,7 +120,7 @@ offline — create→get_info round-trips the key count (1 and 2 keys). Plan as 
 **Phase C — Registration broadcast** ✅ DONE (uncommitted) *(needs a node + real asset lock)*
 Implemented in `platform-sdk-jvm`: bound `identity_put_to_platform_with_instant_lock_and_wait`
 + `..._with_chain_lock_and_wait` (the wait variants return the confirmed identity handle;
-`put_settings` passed as null = defaults, so `DashSDKPutSettings` is not modelled yet).
+`put_settings` accepts null = defaults, or a `PutSettings` (modelled in Phase D)).
 `IdentityService.registerWithInstantLock(...)` / `registerWithChainLock(...)` build the
 identity (placeholder id), pack the asset-lock proof + 32-byte key, pass the `Signer`
 handle, broadcast-and-wait, then return the confirmed `Identity` (real on-chain id via
@@ -131,13 +131,29 @@ network I/O, so this pins the marshalling path offline. End-to-end broadcast nee
 asset lock + node. Plan as built:
 - Bind: `dash_sdk_identity_put_to_platform_with_instant_lock` (+`_and_wait`),
   `_with_chain_lock`.
-- Struct: `DashSDKPutSettings` (9 fields; pass `NULL` for defaults in v1).
+- Struct: `DashSDKPutSettings` (9 fields) — modelled in Phase D as `PutSettings`; pass
+  `NULL`/omit for defaults.
 - `IdentityService.registerWithInstantLock(...)` wrapper: build pubkeys → identity
   handle → put. Marshalling exercised in tests; end-to-end requires a funded
   asset lock so it stays native-/node-gated.
 
-**Phase D — siblings (later, same pattern, all rs-sdk-ffi):** topup
-(`dash_sdk_identity_topup_with_instant_lock`), credit transfer, withdraw.
+**Phase D — siblings** ✅ DONE (uncommitted) *(all rs-sdk-ffi, same signer+put pattern)*
+Implemented in `platform-sdk-jvm`:
+- `topUpWithInstantLock` (`topup_with_instant_lock_and_wait`; no identity signer — the
+  asset-lock key authorises; returns updated `Identity`).
+- `transferCredits` (`transfer_credits`; signer + `public_key_id`; returns
+  `TransferCreditsResult` {sender,receiver balances} via the audited
+  `DashSDKTransferCreditsResultNative`).
+- `withdraw` (`identity_withdraw`; signer; returns new balance).
+- Tunable settings: `PutSettings` model + `DashSDKPutSettingsNative` (48-byte struct,
+  bools mapped as `Byte` for correct packing — jna-struct-auditor verified) threaded as an
+  optional `settings` param through `register*` / topup / transfer / withdraw.
+`IdentityCreditsTest` (4) green offline: each op fails at input validation (proof / id /
+address) before any network I/O, surfacing `DashSDKException`, which pins the marshalling
+(incl. the settings struct).
+
+**Deferred:** `transfer_credits_to_addresses` (needs the extra `DashSDKAddressTransferOutput`
+struct); end-to-end broadcast against a node.
 
 ### 0.5 Resolved / open questions
 
