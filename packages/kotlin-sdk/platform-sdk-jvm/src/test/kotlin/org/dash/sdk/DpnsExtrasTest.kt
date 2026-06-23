@@ -104,4 +104,33 @@ class DpnsExtrasTest {
             // the test only guards against a native crash / double-free.
         }
     }
+
+    /**
+     * getContestedNonResolvedUsernames reads a nested `DashSDKContestedNamesList`
+     * (name + contest_info + contenders) and frees it. Offline it returns empty / throws;
+     * the test guards against a native crash or double-free across the nested-struct read.
+     */
+    @Test
+    fun getContestedNonResolvedUsernamesDoesNotCrash() {
+        DashSDK.create(network = Network.TESTNET, dapiAddresses = null).use { sdk ->
+            runCatching {
+                runBlocking { sdk.dpns.getContestedNonResolvedUsernames(limit = 5) }
+            }
+        }
+    }
+
+    /** Sibling of the above, scoped to one identity. Same offline no-crash guarantee. */
+    @Test
+    fun getNonResolvedContestsForIdentityDoesNotCrash() {
+        DashSDK.create(network = Network.TESTNET, dapiAddresses = null).use { sdk ->
+            runCatching {
+                runBlocking {
+                    sdk.dpns.getNonResolvedContestsForIdentity(
+                        identityId = "GWRSAVFMjXx8HpQFaNJMqBV7MBgMK4br5UESsB4S31Ec",
+                        limit = 5
+                    )
+                }
+            }
+        }
+    }
 }

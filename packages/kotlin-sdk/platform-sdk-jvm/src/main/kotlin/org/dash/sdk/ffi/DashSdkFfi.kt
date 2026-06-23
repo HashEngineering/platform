@@ -603,6 +603,32 @@ interface DashSdkFfi : Library {
     /** Free a [DashSDKNameTimestampListNative] returned by [dash_sdk_dpns_get_current_contests]. */
     fun dash_sdk_name_timestamp_list_free(list: Pointer)
 
+    /**
+     * All unresolved contested DPNS usernames with full contest state. Header:
+     * `struct DashSDKContestedNamesList *dash_sdk_dpns_get_contested_non_resolved_usernames(const SDKHandle *, uint32_t)`.
+     * Returns a heap pointer to a [DashSDKContestedNamesListNative] (or null) — read it, then
+     * free with [dash_sdk_contested_names_list_free]. (NOT a DashSDKResult.)
+     */
+    fun dash_sdk_dpns_get_contested_non_resolved_usernames(handle: Pointer, limit: Int): Pointer?
+
+    /**
+     * Unresolved contested usernames an identity contends in, with full contest state. Header:
+     * `struct DashSDKContestedNamesList *dash_sdk_dpns_get_non_resolved_contests_for_identity(const SDKHandle *, const char *, uint32_t)`.
+     * Returns a heap pointer to a [DashSDKContestedNamesListNative] (or null); free with
+     * [dash_sdk_contested_names_list_free].
+     */
+    fun dash_sdk_dpns_get_non_resolved_contests_for_identity(
+        handle: Pointer,
+        identity_id: String,
+        limit: Int
+    ): Pointer?
+
+    /**
+     * Free a [DashSDKContestedNamesListNative] (and its nested contenders) returned by the two
+     * contested-non-resolved-usernames queries.
+     */
+    fun dash_sdk_contested_names_list_free(list: Pointer)
+
     // -------------------------------------------------------------------------
     // Contested-resource + voting queries (read-path; return DashSDKResult JSON string)
     // -------------------------------------------------------------------------
@@ -1413,6 +1439,98 @@ class DashSDKNameTimestampListNative : Structure {
     /** Pointer to a contiguous `DashSDKNameTimestamp[count]` array (heap; owned by this list). */
     @JvmField var entries: Pointer? = null
     /** Number of entries in [entries]. */
+    @JvmField var count: Long = 0
+
+    constructor() : super()
+    constructor(p: Pointer) : super(p)
+}
+
+/**
+ * Maps to `struct DashSDKContender` in rs-sdk-ffi.h — one element of the array pointed at by
+ * [DashSDKContestInfoNative.contenders].
+ *
+ * C 64-bit layout: `identity_id: char* @0 (8)` + `vote_count: u32 @8 (4)` + 4 pad = 16 bytes.
+ * Owned by the parent contested-names list; freed by [DashSdkFfi.dash_sdk_contested_names_list_free].
+ */
+@Structure.FieldOrder("identity_id", "vote_count")
+class DashSDKContenderNative : Structure {
+    /** Base58 identity ID of the contender (heap `char*`; owned by the parent list). */
+    @JvmField var identity_id: String? = null
+    /** Vote count for this contender. */
+    @JvmField var vote_count: Int = 0
+
+    constructor() : super()
+    constructor(p: Pointer) : super(p)
+}
+
+/**
+ * Maps to `struct DashSDKContestInfo` in rs-sdk-ffi.h — embedded **by value** in
+ * [DashSDKContestedNameNative].
+ *
+ * C 64-bit layout:
+ *   contenders:      DashSDKContender* @0  (8)
+ *   contender_count: uintptr_t         @8  (8)
+ *   abstain_votes:   u32               @16 (4)
+ *   lock_votes:      u32               @20 (4)
+ *   end_time:        u64               @24 (8)
+ *   has_winner:      bool              @32 (1) + 7 pad
+ *   = 40 bytes
+ *
+ * `has_winner` is mapped as [Byte] (read `!= 0`). It is the last field before the struct's
+ * 8-byte alignment padding, so a `Boolean` (JNA 4 bytes) would also leave the struct at 40 —
+ * but `Byte` matches the C `bool` width exactly.
+ */
+@Structure.FieldOrder("contenders", "contender_count", "abstain_votes", "lock_votes", "end_time", "has_winner")
+class DashSDKContestInfoNative : Structure {
+    /** Pointer to a contiguous `DashSDKContender[contender_count]` array (heap; owned by the list). */
+    @JvmField var contenders: Pointer? = null
+    /** Number of contenders in [contenders]. */
+    @JvmField var contender_count: Long = 0
+    /** Abstain vote tally (0 if none). */
+    @JvmField var abstain_votes: Int = 0
+    /** Lock vote tally (0 if none). */
+    @JvmField var lock_votes: Int = 0
+    /** End time in milliseconds since epoch. */
+    @JvmField var end_time: Long = 0
+    /** Whether there is a winner (0/1). */
+    @JvmField var has_winner: Byte = 0
+
+    constructor() : super()
+    constructor(p: Pointer) : super(p)
+}
+
+/**
+ * Maps to `struct DashSDKContestedName` in rs-sdk-ffi.h — one element of the array pointed at
+ * by [DashSDKContestedNamesListNative.names].
+ *
+ * C 64-bit layout: `name: char* @0 (8)` + `contest_info: DashSDKContestInfo @8 (40, by value)`
+ * = 48 bytes. [contest_info] is an embedded (by-value) struct, read inline on [read].
+ */
+@Structure.FieldOrder("name", "contest_info")
+class DashSDKContestedNameNative : Structure {
+    /** The contested name (heap `char*`; owned by the parent list). */
+    @JvmField var name: String? = null
+    /** Embedded contest state (by value). */
+    @JvmField var contest_info: DashSDKContestInfoNative = DashSDKContestInfoNative()
+
+    constructor() : super()
+    constructor(p: Pointer) : super(p)
+}
+
+/**
+ * Maps to `struct DashSDKContestedNamesList` in rs-sdk-ffi.h — the by-pointer return of
+ * `dash_sdk_dpns_get_contested_non_resolved_usernames` /
+ * `dash_sdk_dpns_get_non_resolved_contests_for_identity`.
+ *
+ * C 64-bit layout: `names: DashSDKContestedName* @0 (8)` + `count: uintptr_t @8 (8)` = 16 bytes.
+ * Read [count] contiguous [DashSDKContestedNameNative] rows off [names], then release the whole
+ * hierarchy with [DashSdkFfi.dash_sdk_contested_names_list_free].
+ */
+@Structure.FieldOrder("names", "count")
+class DashSDKContestedNamesListNative : Structure {
+    /** Pointer to a contiguous `DashSDKContestedName[count]` array (heap; owned by this list). */
+    @JvmField var names: Pointer? = null
+    /** Number of names in [names]. */
     @JvmField var count: Long = 0
 
     constructor() : super()

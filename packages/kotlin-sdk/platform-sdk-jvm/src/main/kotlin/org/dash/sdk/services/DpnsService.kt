@@ -3,11 +3,17 @@ package org.dash.sdk.services
 import com.sun.jna.Pointer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.dash.sdk.ffi.DashSDKContenderNative
+import org.dash.sdk.ffi.DashSDKContestedNameNative
+import org.dash.sdk.ffi.DashSDKContestedNamesListNative
 import org.dash.sdk.ffi.DashSDKNameTimestampListNative
 import org.dash.sdk.ffi.DashSDKNameTimestampNative
 import org.dash.sdk.ffi.DashSdkFfi
 import org.dash.sdk.ffi.ResultUnwrapper
+import org.dash.sdk.models.ContestInfo
 import org.dash.sdk.models.ContestedName
+import org.dash.sdk.models.Contender
+import org.dash.sdk.models.CurrentContest
 
 /**
  * High-level service for Dash Platform Naming Service (DPNS) operations.
@@ -168,13 +174,13 @@ class DpnsService internal constructor(private val sdkHandle: Pointer) {
      * Get current DPNS contests (active vote polls) ending within [startTime]..[endTime] (ms).
      *
      * Backed by a function returning a native `DashSDKNameTimestampList *`; this reads the
-     * entries into a [List] of [ContestedName] and frees the native list.
+     * entries into a [List] of [CurrentContest] and frees the native list.
      *
      * @param startTime range start, ms since epoch
      * @param endTime range end, ms since epoch
      * @param limit max results (C uint16, unsigned 16-bit; 0 = server default)
      */
-    suspend fun getCurrentContests(startTime: Long, endTime: Long, limit: Int = 0): List<ContestedName> =
+    suspend fun getCurrentContests(startTime: Long, endTime: Long, limit: Int = 0): List<CurrentContest> =
         withContext(Dispatchers.IO) {
             val listPtr = ffi.dash_sdk_dpns_get_current_contests(sdkHandle, startTime, endTime, limit)
                 ?: return@withContext emptyList()
@@ -188,10 +194,81 @@ class DpnsService internal constructor(private val sdkHandle: Pointer) {
                     val first = DashSDKNameTimestampNative(entriesPtr).apply { read() }
                     @Suppress("UNCHECKED_CAST")
                     val rows = first.toArray(count) as Array<DashSDKNameTimestampNative>
-                    rows.map { ContestedName(name = it.name ?: "", endTime = it.end_time) }
+                    rows.map { CurrentContest(name = it.name ?: "", endTime = it.end_time) }
                 }
             } finally {
                 ffi.dash_sdk_name_timestamp_list_free(listPtr)
             }
         }
+
+    /**
+     * All contested DPNS usernames that have not yet resolved, with full contest state
+     * (contenders + vote tallies). Backed by a function returning a native
+     * `DashSDKContestedNamesList *`; reads the entries into a [List] of [ContestedName] and
+     * frees the native list.
+     *
+     * @param limit max results (0 = server default)
+     */
+    suspend fun getContestedNonResolvedUsernames(limit: Int = 0): List<ContestedName> =
+        withContext(Dispatchers.IO) {
+            readContestedNamesList(
+                ffi.dash_sdk_dpns_get_contested_non_resolved_usernames(sdkHandle, limit)
+            )
+        }
+
+    /**
+     * Unresolved contested usernames an identity is a contender in, with full contest state.
+     * Same shape as [getContestedNonResolvedUsernames].
+     *
+     * @param identityId base58 identity ID
+     * @param limit max results (0 = server default)
+     */
+    suspend fun getNonResolvedContestsForIdentity(identityId: String, limit: Int = 0): List<ContestedName> =
+        withContext(Dispatchers.IO) {
+            readContestedNamesList(
+                ffi.dash_sdk_dpns_get_non_resolved_contests_for_identity(sdkHandle, identityId, limit)
+            )
+        }
+
+    /**
+     * Read a native `DashSDKContestedNamesList *` ([listPtr]) into Kotlin models and free it.
+     * Each element embeds a [DashSDKContestInfoNative] by value, which in turn points at a
+     * contiguous `DashSDKContender[]`. Returns empty for a null/empty list.
+     */
+    private fun readContestedNamesList(listPtr: Pointer?): List<ContestedName> {
+        if (listPtr == null) return emptyList()
+        try {
+            val list = DashSDKContestedNamesListNative(listPtr).apply { read() }
+            val count = list.count.toInt()
+            val namesPtr = list.names
+            if (count <= 0 || namesPtr == null) return emptyList()
+            @Suppress("UNCHECKED_CAST")
+            val rows = (DashSDKContestedNameNative(namesPtr).apply { read() }
+                .toArray(count) as Array<DashSDKContestedNameNative>)
+            return rows.map { row ->
+                val info = row.contest_info
+                val contenders = readContenders(info.contenders, info.contender_count.toInt())
+                ContestedName(
+                    name = row.name ?: "",
+                    contestInfo = ContestInfo(
+                        contenders = contenders,
+                        abstainVotes = info.abstain_votes,
+                        lockVotes = info.lock_votes,
+                        endTime = info.end_time,
+                        hasWinner = info.has_winner.toInt() != 0,
+                    )
+                )
+            }
+        } finally {
+            ffi.dash_sdk_contested_names_list_free(listPtr)
+        }
+    }
+
+    private fun readContenders(contendersPtr: Pointer?, contenderCount: Int): List<Contender> {
+        if (contenderCount <= 0 || contendersPtr == null) return emptyList()
+        @Suppress("UNCHECKED_CAST")
+        val rows = (DashSDKContenderNative(contendersPtr).apply { read() }
+            .toArray(contenderCount) as Array<DashSDKContenderNative>)
+        return rows.map { Contender(identityId = it.identity_id ?: "", voteCount = it.vote_count) }
+    }
 }
