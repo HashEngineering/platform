@@ -76,4 +76,39 @@ class UtilsService internal constructor() {
             ffi.dash_sdk_format_grovedb_proof(buffer, proof.size)
         )
     }
+
+    /**
+     * Derive the public-key bytes (hex) for a private key. Process-local — no network.
+     *
+     * @param privateKeyHex hex-encoded 32-byte ECDSA private scalar
+     * @param keyType DPP KeyType discriminant (0 = ECDSA_SECP256K1)
+     * @param network network whose key encoding to use
+     * @return hex-encoded public-key bytes
+     */
+    fun publicKeyFromPrivateKey(
+        privateKeyHex: String,
+        keyType: Int = 0,
+        network: Network = Network.TESTNET,
+    ): String = ResultUnwrapper.unwrapString(
+        ffi.dash_sdk_public_key_data_from_private_key_data(privateKeyHex, keyType.toByte(), network.ffiNetworkValue)
+    )
+
+    /**
+     * Validate that a private key corresponds to a public key. Process-local — no network.
+     *
+     * @param privateKeyHex hex-encoded private scalar
+     * @param publicKeyHex hex-encoded public key
+     * @param keyType DPP KeyType discriminant (0 = ECDSA_SECP256K1)
+     * @return the FFI's status string
+     */
+    fun validatePrivateKeyForPublicKey(
+        privateKeyHex: String,
+        publicKeyHex: String,
+        keyType: Int = 0,
+        network: Network = Network.TESTNET,
+    ): String = ResultUnwrapper.unwrapString(
+        ffi.dash_sdk_validate_private_key_for_public_key(
+            privateKeyHex, publicKeyHex, keyType.toByte(), network.ffiNetworkValue
+        )
+    )
 }

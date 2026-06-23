@@ -1,7 +1,9 @@
 package org.dash.sdk.ffi
 
+import com.sun.jna.Callback
 import com.sun.jna.Library
 import com.sun.jna.Native
+import com.sun.jna.NativeLong
 import com.sun.jna.Pointer
 import com.sun.jna.Structure
 import com.sun.jna.ptr.IntByReference
@@ -570,6 +572,119 @@ interface DashSdkFfi : Library {
      */
     fun dash_sdk_format_grovedb_proof(proof_bytes: Pointer, proof_len: Int): DashSDKResultNative
 
+    // -------------------------------------------------------------------------
+    // Signing — external-signer infrastructure (rs-sdk-ffi; no platform-wallet/unified)
+    //
+    // All `uintptr_t` lengths below are bound as [NativeLong] (pointer-width on every
+    // target ABI). The callback trampolines (Rust → JVM) are held alive by the owning
+    // Kotlin signer; see org.dash.sdk.signing.KeystoreSigner.
+    // -------------------------------------------------------------------------
+
+    /**
+     * Create an external signer backed by Kotlin [Callback] trampolines. Returns a raw
+     * `*mut SignerHandle` (NOT a [DashSDKResult]); null on failure. Free with
+     * [dash_sdk_signer_destroy]. Header:
+     * `struct SignerHandle *dash_sdk_signer_create(SignAsyncCallback, CanSignCallback, DestroyCallback)`.
+     *
+     * The three callback objects MUST be kept strongly referenced for the life of the
+     * returned handle — JNA frees the native trampoline when the Callback is GC'd.
+     */
+    fun dash_sdk_signer_create(
+        sign_async_callback: SignAsyncCallback,
+        can_sign_callback: CanSignCallback,
+        destroy_callback: DestroyCallback
+    ): Pointer?
+
+    /**
+     * Sibling to [dash_sdk_signer_create] taking an opaque `ctx` forwarded to every
+     * callback. Kotlin callbacks capture state directly, so [dash_sdk_signer_create]
+     * (no ctx) is preferred; bound for completeness.
+     */
+    fun dash_sdk_signer_create_with_ctx(
+        ctx: Pointer?,
+        sign_async_callback: SignAsyncCallback,
+        can_sign_callback: CanSignCallback,
+        destroy_callback: DestroyCallback
+    ): Pointer?
+
+    /** Destroy a signer handle from [dash_sdk_signer_create] / [dash_sdk_signer_create_from_private_key]. */
+    fun dash_sdk_signer_destroy(handle: Pointer)
+
+    /**
+     * Synchronous key-availability check. Routes through the signer's `can_sign` vtable
+     * entry (i.e. invokes the owning signer's [CanSignCallback] for vtable signers).
+     * [pubkey_bytes] is a [com.sun.jna.Memory] of [pubkey_len] bytes; [key_type] is the
+     * DPP KeyType discriminant byte.
+     */
+    fun dash_sdk_signer_can_sign(
+        signer: Pointer,
+        pubkey_bytes: Pointer,
+        pubkey_len: NativeLong,
+        key_type: Byte
+    ): Boolean
+
+    /**
+     * Create a throwaway signer from a raw private key (v1 sign primitive). Returns a
+     * [DashSDKResult] whose `data` is a `*mut SignerHandle`. [private_key] is a
+     * [com.sun.jna.Memory] of [private_key_len] (32) bytes; [network] is the `FFINetwork`
+     * value (see [FFINetwork]).
+     */
+    fun dash_sdk_signer_create_from_private_key(
+        private_key: Pointer,
+        private_key_len: NativeLong,
+        network: Int
+    ): DashSDKResultNative
+
+    /**
+     * Sign [data] with a signer handle. Returns a [DashSDKResult] whose `data` is a
+     * `*mut DashSDKSignature` (see [DashSDKSignatureNative]); free it with
+     * [dash_sdk_signature_free]. [data] is a [com.sun.jna.Memory] of [data_len] bytes.
+     */
+    fun dash_sdk_signer_sign(signer_handle: Pointer, data: Pointer, data_len: NativeLong): DashSDKResultNative
+
+    /** Free a [DashSDKSignature] returned by [dash_sdk_signer_sign]. */
+    fun dash_sdk_signature_free(signature: Pointer)
+
+    /**
+     * Deliver a signature (or error) back to the SDK for an in-flight async sign request.
+     * [completion_ctx] MUST be the exact pointer handed to the [SignAsyncCallback].
+     * On success pass [signature] (a [com.sun.jna.Memory]) + [signature_len] and null
+     * [error_message]; on failure pass null/0 and a non-null [error_message].
+     */
+    fun dash_sdk_sign_async_completion(
+        completion_ctx: Pointer?,
+        signature: Pointer?,
+        signature_len: NativeLong,
+        error_message: String?
+    )
+
+    // -------------------------------------------------------------------------
+    // Crypto helpers (process-local; no SDK handle)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Derive the public-key bytes (hex) for a private key. Header:
+     * `DashSDKResult dash_sdk_public_key_data_from_private_key_data(const char *private_key_hex, uint8_t key_type, FFINetwork network)`.
+     * Returns a [DashSDKResult] with a hex C string. [key_type] is the DPP KeyType byte.
+     */
+    fun dash_sdk_public_key_data_from_private_key_data(
+        private_key_hex: String,
+        key_type: Byte,
+        network: Int
+    ): DashSDKResultNative
+
+    /**
+     * Validate that a private key corresponds to a public key. Header:
+     * `DashSDKResult dash_sdk_validate_private_key_for_public_key(const char *private_key_hex, const char *public_key_hex, uint8_t key_type, FFINetwork network)`.
+     * Returns a [DashSDKResult] with a status C string.
+     */
+    fun dash_sdk_validate_private_key_for_public_key(
+        private_key_hex: String,
+        public_key_hex: String,
+        key_type: Byte,
+        network: Int
+    ): DashSDKResultNative
+
     // Note: the library exposes no error-accessor functions. A DashSDKError is read by
     // its struct fields directly — `code` (C int @0) and `message` (char* @POINTER_SIZE) —
     // see ResultUnwrapper / DashSDK.create. Only dash_sdk_error_free is exported.
@@ -583,8 +698,72 @@ interface DashSdkFfi : Library {
 }
 
 // ---------------------------------------------------------------------------
+// JNA Callback mappings for the signer function-pointer typedefs in rs-sdk-ffi.h
+//
+// Each is a single-method [Callback] (JNA builds one native trampoline per instance).
+// The owning signer MUST keep its callback instances strongly referenced for the life
+// of the SignerHandle, or JNA will free the trampoline and the native side will crash.
+// ---------------------------------------------------------------------------
+
+/**
+ * `typedef void (*SignAsyncCallback)(const void *signer, const uint8_t *pubkey_bytes,
+ * uintptr_t pubkey_len, uint8_t key_type, const uint8_t *data, uintptr_t data_len,
+ * void *completion_ctx, SignCompletionCallback completion)`.
+ *
+ * Implementations look up the private key for [pubkeyBytes], sign [data], and deliver the
+ * result via [DashSdkFfi.dash_sdk_sign_async_completion] using [completionCtx] (the raw
+ * [completion] pointer is left opaque — the completion helper drives it). May fire from
+ * any native worker thread.
+ */
+fun interface SignAsyncCallback : Callback {
+    fun invoke(
+        signer: Pointer?,
+        pubkeyBytes: Pointer?,
+        pubkeyLen: NativeLong,
+        keyType: Byte,
+        data: Pointer?,
+        dataLen: NativeLong,
+        completionCtx: Pointer?,
+        completion: Pointer?
+    )
+}
+
+/**
+ * `typedef bool (*CanSignCallback)(const void *signer, const uint8_t *pubkey_bytes,
+ * uintptr_t pubkey_len, uint8_t key_type)`. Synchronous availability check.
+ */
+fun interface CanSignCallback : Callback {
+    fun invoke(signer: Pointer?, pubkeyBytes: Pointer?, pubkeyLen: NativeLong, keyType: Byte): Boolean
+}
+
+/** `typedef void (*DestroyCallback)(void *signer)`. Invoked once when the handle is destroyed. */
+fun interface DestroyCallback : Callback {
+    fun invoke(signer: Pointer?)
+}
+
+// ---------------------------------------------------------------------------
 // JNA Structure mappings for C structs in dash_sdk_ffi.h
 // ---------------------------------------------------------------------------
+
+/**
+ * Maps to `struct DashSDKSignature` in rs-sdk-ffi.h — the by-pointer return of
+ * [DashSdkFfi.dash_sdk_signer_sign].
+ *
+ * 64-bit layout: `signature: uint8_t* (8)` + `signature_len: uintptr_t (8)` = 16 bytes.
+ *
+ * Usage: construct over the returned pointer, [read], copy [signature_len] bytes out of
+ * [signature], then release the pointer with [DashSdkFfi.dash_sdk_signature_free].
+ */
+@Structure.FieldOrder("signature", "signature_len")
+class DashSDKSignatureNative : Structure {
+    /** Signature bytes (heap). */
+    @JvmField var signature: Pointer? = null
+    /** Length of [signature] (compact-recoverable ECDSA is 65 bytes). */
+    @JvmField var signature_len: NativeLong = NativeLong(0)
+
+    constructor() : super()
+    constructor(p: Pointer) : super(p)
+}
 
 /**
  * Maps to `struct DashSDKIdentityInfo` in rs-sdk-ffi.h — the by-pointer return of
