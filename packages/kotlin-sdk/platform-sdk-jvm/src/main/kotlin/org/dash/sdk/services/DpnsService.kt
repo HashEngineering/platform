@@ -1,6 +1,7 @@
 package org.dash.sdk.services
 
 import com.sun.jna.Pointer
+import java.lang.ref.Reference
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.dash.sdk.ffi.DashSDKContenderNative
@@ -8,12 +9,15 @@ import org.dash.sdk.ffi.DashSDKContestedNameNative
 import org.dash.sdk.ffi.DashSDKContestedNamesListNative
 import org.dash.sdk.ffi.DashSDKNameTimestampListNative
 import org.dash.sdk.ffi.DashSDKNameTimestampNative
+import org.dash.sdk.ffi.DpnsRegistrationResultNative
 import org.dash.sdk.ffi.DashSdkFfi
 import org.dash.sdk.ffi.ResultUnwrapper
 import org.dash.sdk.models.ContestInfo
 import org.dash.sdk.models.ContestedName
 import org.dash.sdk.models.Contender
 import org.dash.sdk.models.CurrentContest
+import org.dash.sdk.models.DpnsRegistrationResult
+import org.dash.sdk.signing.Signer
 
 /**
  * High-level service for Dash Platform Naming Service (DPNS) operations.
@@ -270,5 +274,40 @@ class DpnsService internal constructor(private val sdkHandle: Pointer) {
         val rows = (DashSDKContenderNative(contendersPtr).apply { read() }
             .toArray(contenderCount) as Array<DashSDKContenderNative>)
         return rows.map { Contender(identityId = it.identity_id ?: "", voteCount = it.vote_count) }
+    }
+
+    /**
+     * Register a DPNS username (preorder + domain) in one operation. Network call — requires
+     * a live node. The SDK generates entropy and submits both documents in order.
+     *
+     * @param label the username label, e.g. "alice"
+     * @param identityHandle handle for the registering identity (e.g. from
+     *   [IdentityService.fetchHandle] / [IdentityService.createFromComponents])
+     * @param signingKeyHandle an `IdentityPublicKeyHandle` for the signing key (e.g. from
+     *   [IdentityService.getPublicKeyById])
+     * @param signer signs the preorder/domain documents; keep alive across the call
+     * @return the created documents + full domain name
+     * @throws org.dash.sdk.models.DashSDKException on failure
+     */
+    suspend fun registerName(
+        label: String,
+        identityHandle: Pointer,
+        signingKeyHandle: Pointer,
+        signer: Signer,
+    ): DpnsRegistrationResult = withContext(Dispatchers.IO) {
+        val resultPtr = ResultUnwrapper.unwrapHandle(
+            ffi.dash_sdk_dpns_register_name(sdkHandle, label, identityHandle, signingKeyHandle, signer.handle)
+        )
+        Reference.reachabilityFence(signer)
+        try {
+            val r = DpnsRegistrationResultNative(resultPtr).apply { read() }
+            DpnsRegistrationResult(
+                preorderDocumentJson = r.preorder_document_json ?: "",
+                domainDocumentJson = r.domain_document_json ?: "",
+                fullDomainName = r.full_domain_name ?: "",
+            )
+        } finally {
+            ffi.dash_sdk_dpns_registration_result_free(resultPtr)
+        }
     }
 }

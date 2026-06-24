@@ -804,6 +804,26 @@ interface DashSdkFfi : Library {
      */
     fun dash_sdk_contested_names_list_free(list: Pointer)
 
+    /**
+     * Register a DPNS username (preorder + domain) in one operation. Header:
+     * `struct DashSDKResult dash_sdk_dpns_register_name(const SDKHandle *, const char *label,
+     * const void *identity, const void *identity_public_key, const void *signer)`.
+     * [identity] is a raw `IdentityHandle`, [identity_public_key] a raw `IdentityPublicKeyHandle`
+     * (the signing key), [signer] a raw `SignerHandle` — all `Pointer`. Returns a
+     * [DashSDKResult] whose data is a `DpnsRegistrationResult *` (see
+     * [DpnsRegistrationResultNative]); free with [dash_sdk_dpns_registration_result_free].
+     */
+    fun dash_sdk_dpns_register_name(
+        handle: Pointer,
+        label: String,
+        identity: Pointer,
+        identity_public_key: Pointer,
+        signer: Pointer
+    ): DashSDKResultNative
+
+    /** Free a [DpnsRegistrationResultNative] returned by [dash_sdk_dpns_register_name]. */
+    fun dash_sdk_dpns_registration_result_free(result: Pointer)
+
     // -------------------------------------------------------------------------
     // Contested-resource + voting queries (read-path; return DashSDKResult JSON string)
     // -------------------------------------------------------------------------
@@ -1659,6 +1679,27 @@ class DashSDKDataContractFetchResultNative : Structure(), Structure.ByValue {
  * The heap `name` string and the whole array are owned by the parent list and freed by
  * [DashSdkFfi.dash_sdk_name_timestamp_list_free] — do not touch [name] after that.
  */
+/**
+ * Maps to `struct DpnsRegistrationResult` in rs-sdk-ffi.h — the by-pointer return of
+ * [DashSdkFfi.dash_sdk_dpns_register_name].
+ *
+ * C 64-bit layout: three `char*` at offsets 0/8/16 = 24 bytes. The heap strings are owned by
+ * the result; release the whole struct with [DashSdkFfi.dash_sdk_dpns_registration_result_free]
+ * — do not touch the fields after freeing.
+ */
+@Structure.FieldOrder("preorder_document_json", "domain_document_json", "full_domain_name")
+class DpnsRegistrationResultNative : Structure {
+    /** JSON of the preorder document (heap `char*`). */
+    @JvmField var preorder_document_json: String? = null
+    /** JSON of the domain document (heap `char*`). */
+    @JvmField var domain_document_json: String? = null
+    /** The full domain name, e.g. "alice.dash" (heap `char*`). */
+    @JvmField var full_domain_name: String? = null
+
+    constructor() : super()
+    constructor(p: Pointer) : super(p)
+}
+
 @Structure.FieldOrder("name", "end_time")
 class DashSDKNameTimestampNative : Structure {
     /** The contested name (heap `char*`; owned by the parent list). */
