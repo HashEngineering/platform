@@ -1,6 +1,7 @@
 package org.dash.sdk.services
 
 import com.sun.jna.Pointer
+import java.lang.ref.Reference
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.dash.sdk.ffi.DashSDKErrorCode
@@ -9,6 +10,7 @@ import org.dash.sdk.ffi.ResultUnwrapper
 import org.dash.sdk.models.DataContract
 import org.dash.sdk.models.DataContractFetchResult
 import org.dash.sdk.models.DashSDKException
+import org.dash.sdk.signing.Signer
 
 /**
  * High-level service for Dash Platform data contract operations.
@@ -136,4 +138,34 @@ class DataContractService internal constructor(private val sdkHandle: Pointer) {
                 ffi.dash_sdk_string_free(ptr)
             }
         }
+
+    /**
+     * Broadcast a data contract to platform and wait for confirmation. Network call —
+     * requires a live node. Returns the confirmed contract handle (free with [releaseHandle]).
+     *
+     * **Limitation:** rs-sdk-ffi has no data-contract *builder* — the only source of a
+     * [contractHandle] is [fetchHandle] (an existing on-chain contract). So this can re-put a
+     * fetched contract, but it cannot *create* a new contract from a schema. Creating a contract
+     * from a documents/tokens schema requires platform-wallet (`create_data_contract_with_signer`,
+     * unified flavor); see DASHPAY_WALLET_INTEGRATION.md.
+     *
+     * @param contractHandle a [DataContractHandle][fetchHandle]
+     * @param signingKeyHandle an `IdentityPublicKeyHandle` for the signing key
+     *   (e.g. from [IdentityService.getPublicKeyById])
+     * @param signer signs the transition; keep alive across the call
+     * @throws DashSDKException on failure
+     */
+    suspend fun putToPlatform(
+        contractHandle: Pointer,
+        signingKeyHandle: Pointer,
+        signer: Signer,
+    ): Pointer = withContext(Dispatchers.IO) {
+        val confirmed = ResultUnwrapper.unwrapHandle(
+            ffi.dash_sdk_data_contract_put_to_platform_and_wait(
+                sdkHandle, contractHandle, signingKeyHandle, signer.handle
+            )
+        )
+        Reference.reachabilityFence(signer)
+        confirmed
+    }
 }

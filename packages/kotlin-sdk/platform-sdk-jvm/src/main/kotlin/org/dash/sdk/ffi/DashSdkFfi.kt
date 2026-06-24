@@ -409,6 +409,22 @@ interface DashSdkFfi : Library {
     fun dash_sdk_data_contracts_fetch_many(sdk_handle: Pointer, contract_ids: String): DashSDKResultNative
 
     /**
+     * Broadcast a data contract to platform and wait for confirmation. Header:
+     * `struct DashSDKResult dash_sdk_data_contract_put_to_platform_and_wait(SDKHandle*,
+     * const DataContractHandle*, const IdentityPublicKeyHandle*, const SignerHandle*)`.
+     * [data_contract_handle] is an existing handle (rs-sdk-ffi has no contract *builder* — the
+     * only source is [dash_sdk_data_contract_fetch]); [identity_public_key_handle] is the signing
+     * key; [signer_handle] signs the transition. Returns a [DashSDKResult] with the confirmed
+     * `DataContractHandle` (free with [dash_sdk_data_contract_destroy]).
+     */
+    fun dash_sdk_data_contract_put_to_platform_and_wait(
+        sdk_handle: Pointer,
+        data_contract_handle: Pointer,
+        identity_public_key_handle: Pointer,
+        signer_handle: Pointer
+    ): DashSDKResultNative
+
+    /**
      * Fetch a data contract's revision history. Returns a [DashSDKResult] with a JSON string.
      * @param start_at_ms only history entries at/after this timestamp (ms); 0 = from genesis.
      */
