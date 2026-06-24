@@ -9,6 +9,59 @@ will pick up phases incrementally.
 
 ---
 
+## 0. Progress log
+
+### 2026-06-23 — `rs-sdk-ffi` surface complete (read **and** write), all in `platform-sdk-jvm`
+
+**Phase 1a is done and went well beyond its original "finish the reads" scope.** The entire
+`rs-sdk-ffi` surface reachable from the read-path library is now bound in `platform-sdk-jvm`
+(JNA + services + models + native-gated tests, ~69 host tests green):
+
+- **Reads (complete):** identity, data-contract, document, system/status/protocol-version,
+  tokens, DPNS (incl. contested-resource / voting / groups / evonode), batch reads, and
+  process-local utils (base58/hex, platform-address encode, grovedb-proof format, pubkey-from-priv).
+- **Writes (complete, via an external signer — no platform-wallet):**
+  - **Signer infrastructure** — `org.dash.sdk.signing`: `Signer` / `KeystoreSigner` +
+    `SigningKeyStore` (abstract; in-memory impl) over `dash_sdk_signer_*` JNA callbacks.
+    See `IDENTITY_REGISTRATION_DESIGN.md`.
+  - **Identity** — register (instant-lock / chain-lock, caller supplies the asset-lock proof),
+    top-up, credit transfer, withdraw; tunable `PutSettings`.
+  - **Documents** — create / make-handle / put / replace / delete / transfer / purchase /
+    update-price (DashPay contacts & profiles are documents → reachable here).
+  - **DPNS** — `registerName` (preorder + domain).
+  - **Tokens** — mint / burn / transfer / freeze / unfreeze / claim / set-price / purchase /
+    destroy-frozen-funds / emergency-action / config-update (11 ops + ~14 param structs).
+  - **Data contract** — `putToPlatform` (re-put a *fetched* handle only — see limitation).
+
+**Architectural refinement to §5/§6 (important):** `platform-sdk-jvm` is **not** "pure read
+path." The rule that decides placement is **which library exports the symbol**, not
+read-vs-write. The signer, identity registration, document/token/DPNS writes are all exported
+by the read-path `librs_sdk_ffi`, so they live in `platform-sdk-jvm` (and the module's
+`CLAUDE.md` was updated to say so). Only **unified-exported** symbols go to `unified-sdk-jvm`.
+
+**What is NOT reachable from `rs-sdk-ffi` (confirmed; needs platform-wallet → unified):**
+- **Data-contract *creation*** from a schema — there is no contract builder in `rs-sdk-ffi`;
+  `put` only re-puts a handle obtained from `fetch`. Needs `platform_wallet_create_data_contract_with_signer`.
+- **Identity *update*** (add/disable keys) — no `rs-sdk-ffi` entry point; `platform_wallet_update_identity_with_signer` only.
+- **Wallet-funded** registration/top-up (building the asset lock from UTXOs), DashPay
+  contact-request encryption, shielded — all unified.
+
+**Design docs added (read these before the unified work):**
+- `IDENTITY_REGISTRATION_DESIGN.md` — the rs-sdk-ffi-only registration design + the signer.
+- `DASHPAY_WALLET_INTEGRATION.md` — **the recommended path for the DashJ-backed DashPay
+  Wallet**: keep DashJ as the Core wallet, run `platform-wallet` watch-only (SPV off) fed via
+  the restore/persistence callbacks, route funding through the rs-sdk-ffi proof-in path, and
+  use platform-wallet only for non-funding Platform features. Includes the verified
+  one-time-hydration limitation and the minimal watch-only persistence-callback set.
+
+**Net effect on the phase plan:** Phase 1a is complete and absorbed the rs-sdk-ffi slice of
+what §-Phase-7 called "wallet-aware surface." Phases 1/3/4/5/6 (unified lib, Room, Keystore,
+KeyWallet, PlatformWallet) are still net-new and unchanged in shape — but note the signer
+callback bridge (planned for Phase 4) is **already implemented** for the rs-sdk-ffi path and
+should be reused/extended, not re-derived.
+
+---
+
 ## 1. Goal & scope
 
 Port three things from `swift-sdk` to `kotlin-sdk`, preserving behavior and the
@@ -293,17 +346,20 @@ the one below.
   CameraX/ML-Kit to `libs.versions.toml`.
 - Write `kotlin-sdk/CLAUDE.md` (architectural rule, §3) and a Kotlin `BUILD_GUIDE_FOR_AI.md`.
 
-### Phase 1a — Complete `rs-sdk-ffi` JNA bindings (platform-sdk only)
+### Phase 1a — Complete `rs-sdk-ffi` JNA bindings (platform-sdk only)  ✅ DONE (2026-06-23 — see §0)
 Module: **`platform-sdk-jvm`** · Header: `native/include/rs-sdk-ffi/rs-sdk-ffi.h` · Lib: `rs_sdk_ffi`.
-The natural first slice — a strict subset of Phase 1, needing none of the unified library,
-callbacks, Room, or Keystore. The existing `DashSdkFfi.kt` binds ~21 of the **216** exported
-`dash_sdk_*` functions; finish the rest.
-- Full JNA `interface` + `repr(C)` `Structure` surface for all `dash_sdk_*` entry points,
-  keyed off the header (not a guessed prefix). Extend `ResultUnwrapper` / `DashSDKException`
-  for the new result types; `SDKError` → Kotlin `sealed class`.
-- **No** callbacks, wallet/shielded symbols, or the unified lib — those are Phase 1.
-- Verify: `./build_platform_local.sh && ./gradlew :platform-sdk-jvm:test` against `librs_sdk_ffi`.
-  Keep `console` building as the regression anchor.
+The natural first slice — needed none of the unified library, Room, or Keystore. Delivered
+**both** the read-path and the write-path surface reachable from `rs_sdk_ffi`.
+- ✅ Full JNA `interface` + `repr(C)` `Structure` surface for the `dash_sdk_*` read entry points,
+  keyed off the header; `ResultUnwrapper` / `DashSDKException` extended (`unwrapVoid` added for
+  the no-payload writes). (`SDKError` → sealed class not yet done — JSON still surfaced as strings.)
+- ✅ **Revised scope:** the signer callbacks (`dash_sdk_signer_*`, originally slated for Phase 4)
+  and all `rs-sdk-ffi` write ops (identity register/top-up/transfer/withdraw, documents, tokens,
+  DPNS register, contract re-put) **also landed here** — they're read-path-lib symbols. See §0.
+- Verified: `./build_platform_local.sh && ./gradlew :platform-sdk-jvm:test` against `librs_sdk_ffi`
+  (~69 host tests, native-gated). `console` still builds (regression anchor).
+- Remaining tail (low priority): `SDKError` sealed class; migrate regex JSON → `kotlinx.serialization`
+  (Phase 2); fire-and-forget (non-`_and_wait`) write variants.
 
 ### Phase 1 — Unified FFI bindings & result/error infrastructure
 Module: **`unified-sdk-jvm`** (builds on Phase 1a via `api(:platform-sdk-jvm)`).
@@ -336,6 +392,11 @@ Swift refs: `Persistence/` (29 `@Model`), `DashModelContainer`, `DataContractPar
 ### Phase 4 — Security & callback bridges
 Module: **`unified-sdk-android`** (Keystore/biometric impl) + **`unified-sdk-jvm`** (callback wiring from Phase 1).
 Swift refs: `Security/` (`KeychainManager`, `KeychainInspector`), `FFI/KeychainSigner`, `FFI/MnemonicResolverAndPersister`, `Core/Wallet/WalletStorage`.
+> **Partially delivered early (§0, 2026-06-23):** the `dash_sdk_signer_*` callback bridge is
+> already implemented in **`platform-sdk-jvm`** as `org.dash.sdk.signing.{Signer,KeystoreSigner,
+> SigningKeyStore}` (it's a read-path-lib symbol). Reuse/extend it here; the concrete Android
+> Keystore-backed `SigningKeyStore` impl + biometric gate + mnemonic-resolver/persister
+> callbacks remain Phase-4 work.
 - Android Keystore-backed `KeystoreManager` (store/retrieve private key bytes, special MN keys).
 - Biometric gate via `BiometricPrompt`.
 - `KeystoreSigner` implementing the Rust signer callback (locate pubkey row → fetch scalar →
