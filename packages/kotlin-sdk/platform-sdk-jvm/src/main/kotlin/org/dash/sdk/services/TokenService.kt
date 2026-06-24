@@ -6,8 +6,14 @@ import java.lang.ref.Reference
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.dash.sdk.ffi.DashSDKTokenBurnParamsNative
+import org.dash.sdk.ffi.DashSDKTokenClaimParamsNative
+import org.dash.sdk.ffi.DashSDKTokenConfigUpdateParamsNative
+import org.dash.sdk.ffi.DashSDKTokenDestroyFrozenFundsParamsNative
+import org.dash.sdk.ffi.DashSDKTokenEmergencyActionParamsNative
 import org.dash.sdk.ffi.DashSDKTokenFreezeParamsNative
 import org.dash.sdk.ffi.DashSDKTokenMintParamsNative
+import org.dash.sdk.ffi.DashSDKTokenPurchaseParamsNative
+import org.dash.sdk.ffi.DashSDKTokenSetPriceParamsNative
 import org.dash.sdk.ffi.DashSDKTokenTransferParamsNative
 import org.dash.sdk.ffi.DashSdkFfi
 import org.dash.sdk.ffi.ResultUnwrapper
@@ -352,6 +358,301 @@ class TokenService internal constructor(private val sdkHandle: Pointer) {
     ): Unit = withContext(Dispatchers.IO) {
         val params = freezeParams(tokenContractId, targetIdentityId, tokenPosition, publicNote)
         callFreeze(transitionOwnerId, params, signingKeyHandle, signer, settings, unfreeze = true)
+    }
+
+    /**
+     * Claim a token distribution and wait for confirmation.
+     *
+     * @param transitionOwnerId 32-byte owner identity ID (raw bytes)
+     * @param tokenContractId data contract ID (Base58)
+     * @param distributionType distribution type (0 = PreProgrammed, 1 = Perpetual)
+     * @param signingKeyHandle IdentityPublicKeyHandle that signs the transition
+     * @param signer external signer; kept alive across the call
+     * @param tokenPosition token position within the contract (default 0)
+     * @param publicNote optional public note
+     * @throws IllegalArgumentException if [transitionOwnerId] is not 32 bytes
+     */
+    suspend fun claim(
+        transitionOwnerId: ByteArray,
+        tokenContractId: String,
+        distributionType: Int,
+        signingKeyHandle: Pointer,
+        signer: Signer,
+        tokenPosition: Int = 0,
+        publicNote: String? = null,
+        settings: PutSettings? = null
+    ): Unit = withContext(Dispatchers.IO) {
+        val ownerMem = transitionOwnerId.toIdMemory("transitionOwnerId")
+        val params = DashSDKTokenClaimParamsNative().apply {
+            token_contract_id = tokenContractId
+            token_position = tokenPosition.toShort()
+            distribution_type = distributionType
+            public_note = publicNote
+            write()
+        }
+        val ps = settings?.toNative()
+        try {
+            ResultUnwrapper.unwrapVoid(
+                ffi.dash_sdk_token_claim(
+                    sdkHandle, ownerMem, params, signingKeyHandle, signer.handle, ps?.pointer, null
+                )
+            )
+        } finally {
+            Reference.reachabilityFence(ownerMem)
+            Reference.reachabilityFence(params)
+            Reference.reachabilityFence(signer)
+            Reference.reachabilityFence(ps)
+        }
+    }
+
+    /**
+     * Set a single flat direct-purchase price for a token and wait for confirmation.
+     *
+     * @param transitionOwnerId 32-byte owner identity ID (raw bytes)
+     * @param tokenContractId data contract ID (Base58)
+     * @param singlePrice flat price in credits for all amounts
+     * @param signingKeyHandle IdentityPublicKeyHandle that signs the transition
+     * @param signer external signer; kept alive across the call
+     * @param tokenPosition token position within the contract (default 0)
+     * @param publicNote optional public note
+     * @throws IllegalArgumentException if [transitionOwnerId] is not 32 bytes
+     */
+    suspend fun setSinglePrice(
+        transitionOwnerId: ByteArray,
+        tokenContractId: String,
+        singlePrice: Long,
+        signingKeyHandle: Pointer,
+        signer: Signer,
+        tokenPosition: Int = 0,
+        publicNote: String? = null,
+        settings: PutSettings? = null
+    ): Unit = withContext(Dispatchers.IO) {
+        val ownerMem = transitionOwnerId.toIdMemory("transitionOwnerId")
+        val params = DashSDKTokenSetPriceParamsNative().apply {
+            token_contract_id = tokenContractId
+            token_position = tokenPosition.toShort()
+            pricing_type = 0 // SinglePrice
+            single_price = singlePrice
+            price_entries = null
+            price_entries_count = 0
+            public_note = publicNote
+            write()
+        }
+        val ps = settings?.toNative()
+        try {
+            ResultUnwrapper.unwrapVoid(
+                ffi.dash_sdk_token_set_price(
+                    sdkHandle, ownerMem, params, signingKeyHandle, signer.handle, ps?.pointer, null
+                )
+            )
+        } finally {
+            Reference.reachabilityFence(ownerMem)
+            Reference.reachabilityFence(params)
+            Reference.reachabilityFence(signer)
+            Reference.reachabilityFence(ps)
+        }
+    }
+
+    /**
+     * Purchase tokens directly at the agreed price and wait for confirmation.
+     *
+     * @param transitionOwnerId 32-byte buyer identity ID (raw bytes)
+     * @param tokenContractId data contract ID (Base58)
+     * @param amount amount of tokens to purchase
+     * @param totalAgreedPrice total agreed price in credits
+     * @param signingKeyHandle IdentityPublicKeyHandle that signs the transition
+     * @param signer external signer; kept alive across the call
+     * @param tokenPosition token position within the contract (default 0)
+     * @throws IllegalArgumentException if [transitionOwnerId] is not 32 bytes
+     */
+    suspend fun purchase(
+        transitionOwnerId: ByteArray,
+        tokenContractId: String,
+        amount: Long,
+        totalAgreedPrice: Long,
+        signingKeyHandle: Pointer,
+        signer: Signer,
+        tokenPosition: Int = 0,
+        settings: PutSettings? = null
+    ): Unit = withContext(Dispatchers.IO) {
+        val ownerMem = transitionOwnerId.toIdMemory("transitionOwnerId")
+        val params = DashSDKTokenPurchaseParamsNative().apply {
+            token_contract_id = tokenContractId
+            token_position = tokenPosition.toShort()
+            this.amount = amount
+            total_agreed_price = totalAgreedPrice
+            write()
+        }
+        val ps = settings?.toNative()
+        try {
+            ResultUnwrapper.unwrapVoid(
+                ffi.dash_sdk_token_purchase(
+                    sdkHandle, ownerMem, params, signingKeyHandle, signer.handle, ps?.pointer, null
+                )
+            )
+        } finally {
+            Reference.reachabilityFence(ownerMem)
+            Reference.reachabilityFence(params)
+            Reference.reachabilityFence(signer)
+            Reference.reachabilityFence(ps)
+        }
+    }
+
+    /**
+     * Destroy a frozen identity's token funds and wait for confirmation.
+     *
+     * @param transitionOwnerId 32-byte owner identity ID (raw bytes)
+     * @param tokenContractId data contract ID (Base58)
+     * @param frozenIdentityId 32-byte frozen identity ID whose funds to destroy (raw bytes)
+     * @param signingKeyHandle IdentityPublicKeyHandle that signs the transition
+     * @param signer external signer; kept alive across the call
+     * @param tokenPosition token position within the contract (default 0)
+     * @param publicNote optional public note
+     * @throws IllegalArgumentException if [transitionOwnerId] or [frozenIdentityId] is not 32 bytes
+     */
+    suspend fun destroyFrozenFunds(
+        transitionOwnerId: ByteArray,
+        tokenContractId: String,
+        frozenIdentityId: ByteArray,
+        signingKeyHandle: Pointer,
+        signer: Signer,
+        tokenPosition: Int = 0,
+        publicNote: String? = null,
+        settings: PutSettings? = null
+    ): Unit = withContext(Dispatchers.IO) {
+        val ownerMem = transitionOwnerId.toIdMemory("transitionOwnerId")
+        val frozenMem = frozenIdentityId.toIdMemory("frozenIdentityId")
+        val params = DashSDKTokenDestroyFrozenFundsParamsNative().apply {
+            token_contract_id = tokenContractId
+            token_position = tokenPosition.toShort()
+            frozen_identity_id = frozenMem
+            public_note = publicNote
+            write()
+        }
+        val ps = settings?.toNative()
+        try {
+            ResultUnwrapper.unwrapVoid(
+                ffi.dash_sdk_token_destroy_frozen_funds(
+                    sdkHandle, ownerMem, params, signingKeyHandle, signer.handle, ps?.pointer, null
+                )
+            )
+        } finally {
+            Reference.reachabilityFence(ownerMem)
+            Reference.reachabilityFence(frozenMem)
+            Reference.reachabilityFence(params)
+            Reference.reachabilityFence(signer)
+            Reference.reachabilityFence(ps)
+        }
+    }
+
+    /**
+     * Perform a token emergency action (pause/resume) and wait for confirmation.
+     *
+     * @param transitionOwnerId 32-byte owner identity ID (raw bytes)
+     * @param tokenContractId data contract ID (Base58)
+     * @param action emergency action (0 = Pause, 1 = Resume)
+     * @param signingKeyHandle IdentityPublicKeyHandle that signs the transition
+     * @param signer external signer; kept alive across the call
+     * @param tokenPosition token position within the contract (default 0)
+     * @param publicNote optional public note
+     * @throws IllegalArgumentException if [transitionOwnerId] is not 32 bytes
+     */
+    suspend fun emergencyAction(
+        transitionOwnerId: ByteArray,
+        tokenContractId: String,
+        action: Int,
+        signingKeyHandle: Pointer,
+        signer: Signer,
+        tokenPosition: Int = 0,
+        publicNote: String? = null,
+        settings: PutSettings? = null
+    ): Unit = withContext(Dispatchers.IO) {
+        val ownerMem = transitionOwnerId.toIdMemory("transitionOwnerId")
+        val params = DashSDKTokenEmergencyActionParamsNative().apply {
+            token_contract_id = tokenContractId
+            token_position = tokenPosition.toShort()
+            this.action = action
+            public_note = publicNote
+            write()
+        }
+        val ps = settings?.toNative()
+        try {
+            ResultUnwrapper.unwrapVoid(
+                ffi.dash_sdk_token_emergency_action(
+                    sdkHandle, ownerMem, params, signingKeyHandle, signer.handle, ps?.pointer, null
+                )
+            )
+        } finally {
+            Reference.reachabilityFence(ownerMem)
+            Reference.reachabilityFence(params)
+            Reference.reachabilityFence(signer)
+            Reference.reachabilityFence(ps)
+        }
+    }
+
+    /**
+     * Update a contract's token configuration and wait for confirmation. The update is
+     * described by [updateType]; only the field(s) the type requires need be set (the rest
+     * are ignored by the FFI). See `DashSDKTokenConfigUpdateType` in the header.
+     *
+     * @param transitionOwnerId 32-byte owner identity ID (raw bytes)
+     * @param tokenContractId data contract ID (Base58)
+     * @param updateType the configuration update type (enum DashSDKTokenConfigUpdateType)
+     * @param signingKeyHandle IdentityPublicKeyHandle that signs the transition
+     * @param signer external signer; kept alive across the call
+     * @param tokenPosition token position within the contract (default 0)
+     * @param amount for MaxSupply updates — new max supply (0 = no limit)
+     * @param boolValue for boolean updates (e.g. MintingAllowChoosingDestination)
+     * @param identityId for identity-based updates — 32-byte identity ID (raw bytes)
+     * @param groupPosition for group-based updates — the group position
+     * @param actionTakers for permission updates — the authorized action takers
+     *   (enum DashSDKAuthorizedActionTakers)
+     * @param publicNote optional public note
+     * @throws IllegalArgumentException if [transitionOwnerId] or a non-null [identityId] is not 32 bytes
+     */
+    suspend fun updateContractTokenConfiguration(
+        transitionOwnerId: ByteArray,
+        tokenContractId: String,
+        updateType: Int,
+        signingKeyHandle: Pointer,
+        signer: Signer,
+        tokenPosition: Int = 0,
+        amount: Long = 0,
+        boolValue: Boolean = false,
+        identityId: ByteArray? = null,
+        groupPosition: Int = 0,
+        actionTakers: Int = 0,
+        publicNote: String? = null,
+        settings: PutSettings? = null
+    ): Unit = withContext(Dispatchers.IO) {
+        val ownerMem = transitionOwnerId.toIdMemory("transitionOwnerId")
+        val identityMem = identityId?.toIdMemory("identityId")
+        val params = DashSDKTokenConfigUpdateParamsNative().apply {
+            token_contract_id = tokenContractId
+            token_position = tokenPosition.toShort()
+            update_type = updateType
+            this.amount = amount
+            bool_value = if (boolValue) 1 else 0
+            identity_id = identityMem
+            group_position = groupPosition.toShort()
+            action_takers = actionTakers
+            public_note = publicNote
+            write()
+        }
+        val ps = settings?.toNative()
+        try {
+            ResultUnwrapper.unwrapVoid(
+                ffi.dash_sdk_token_update_contract_token_configuration(
+                    sdkHandle, ownerMem, params, signingKeyHandle, signer.handle, ps?.pointer, null
+                )
+            )
+        } finally {
+            Reference.reachabilityFence(ownerMem)
+            Reference.reachabilityFence(identityMem)
+            Reference.reachabilityFence(params)
+            Reference.reachabilityFence(signer)
+            Reference.reachabilityFence(ps)
+        }
     }
 
     // ---- write-path helpers ----

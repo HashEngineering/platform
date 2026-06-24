@@ -278,6 +278,183 @@ class TokenServiceTest {
         }
     }
 
+    /** claim rejects a wrong-length owner id before any FFI call. */
+    @Test
+    fun claimRejectsBadOwnerLength() = runBlocking {
+        DashSDK.create(network = Network.TESTNET, dapiAddresses = null).use { sdk ->
+            val key = signingKey(sdk)
+            signer(sdk).use { signer ->
+                try {
+                    sdk.token.claim(
+                        transitionOwnerId = ByteArray(31), // wrong length
+                        tokenContractId = dpnsContractId,
+                        distributionType = 1,
+                        signingKeyHandle = key,
+                        signer = signer,
+                    )
+                    fail("Expected IllegalArgumentException for 31-byte owner id")
+                } catch (e: IllegalArgumentException) {
+                    // expected
+                } finally {
+                    sdk.identity.destroyPublicKey(key)
+                }
+            }
+        }
+    }
+
+    /** claim marshals struct (incl. distribution_type enum) + signer + key; no node ⇒ typed throw. */
+    @Test
+    fun claimMarshals() = runBlocking {
+        DashSDK.create(network = Network.TESTNET, dapiAddresses = null).use { sdk ->
+            val key = signingKey(sdk)
+            signer(sdk).use { signer ->
+                try {
+                    sdk.token.claim(
+                        transitionOwnerId = ownerId,
+                        tokenContractId = dpnsContractId,
+                        distributionType = 1, // Perpetual
+                        signingKeyHandle = key,
+                        signer = signer,
+                        publicNote = "claim test",
+                    )
+                    fail("Expected DashSDKException without a live node")
+                } catch (e: DashSDKException) {
+                    // expected
+                } finally {
+                    sdk.identity.destroyPublicKey(key)
+                }
+            }
+        }
+    }
+
+    /** setSinglePrice marshals the pricing_type enum + uint64 single_price + null entries. */
+    @Test
+    fun setSinglePriceMarshals() = runBlocking {
+        DashSDK.create(network = Network.TESTNET, dapiAddresses = null).use { sdk ->
+            val key = signingKey(sdk)
+            signer(sdk).use { signer ->
+                try {
+                    sdk.token.setSinglePrice(
+                        transitionOwnerId = ownerId,
+                        tokenContractId = dpnsContractId,
+                        singlePrice = 1_000_000,
+                        signingKeyHandle = key,
+                        signer = signer,
+                        publicNote = "set price test",
+                    )
+                    fail("Expected DashSDKException without a live node")
+                } catch (e: DashSDKException) {
+                    // expected
+                } finally {
+                    sdk.identity.destroyPublicKey(key)
+                }
+            }
+        }
+    }
+
+    /** purchase marshals the amount + total_agreed_price uint64 pair across the FFI. */
+    @Test
+    fun purchaseMarshals() = runBlocking {
+        DashSDK.create(network = Network.TESTNET, dapiAddresses = null).use { sdk ->
+            val key = signingKey(sdk)
+            signer(sdk).use { signer ->
+                try {
+                    sdk.token.purchase(
+                        transitionOwnerId = ownerId,
+                        tokenContractId = dpnsContractId,
+                        amount = 10,
+                        totalAgreedPrice = 5_000_000,
+                        signingKeyHandle = key,
+                        signer = signer,
+                    )
+                    fail("Expected DashSDKException without a live node")
+                } catch (e: DashSDKException) {
+                    // expected
+                } finally {
+                    sdk.identity.destroyPublicKey(key)
+                }
+            }
+        }
+    }
+
+    /** destroyFrozenFunds marshals the frozen identity id + signer + key across the FFI. */
+    @Test
+    fun destroyFrozenFundsMarshals() = runBlocking {
+        DashSDK.create(network = Network.TESTNET, dapiAddresses = null).use { sdk ->
+            val key = signingKey(sdk)
+            signer(sdk).use { signer ->
+                try {
+                    sdk.token.destroyFrozenFunds(
+                        transitionOwnerId = ownerId,
+                        tokenContractId = dpnsContractId,
+                        frozenIdentityId = otherId,
+                        signingKeyHandle = key,
+                        signer = signer,
+                    )
+                    fail("Expected DashSDKException without a live node")
+                } catch (e: DashSDKException) {
+                    // expected
+                } finally {
+                    sdk.identity.destroyPublicKey(key)
+                }
+            }
+        }
+    }
+
+    /** emergencyAction marshals the action enum + signer + key across the FFI. */
+    @Test
+    fun emergencyActionMarshals() = runBlocking {
+        DashSDK.create(network = Network.TESTNET, dapiAddresses = null).use { sdk ->
+            val key = signingKey(sdk)
+            signer(sdk).use { signer ->
+                try {
+                    sdk.token.emergencyAction(
+                        transitionOwnerId = ownerId,
+                        tokenContractId = dpnsContractId,
+                        action = 0, // Pause
+                        signingKeyHandle = key,
+                        signer = signer,
+                    )
+                    fail("Expected DashSDKException without a live node")
+                } catch (e: DashSDKException) {
+                    // expected
+                } finally {
+                    sdk.identity.destroyPublicKey(key)
+                }
+            }
+        }
+    }
+
+    /**
+     * updateContractTokenConfiguration marshals the dense mixed struct (enum + uint64 +
+     * mid-struct C bool + identity-id pointer + uint16 + enum) across the FFI.
+     */
+    @Test
+    fun updateContractTokenConfigurationMarshals() = runBlocking {
+        DashSDK.create(network = Network.TESTNET, dapiAddresses = null).use { sdk ->
+            val key = signingKey(sdk)
+            signer(sdk).use { signer ->
+                try {
+                    sdk.token.updateContractTokenConfiguration(
+                        transitionOwnerId = ownerId,
+                        tokenContractId = dpnsContractId,
+                        updateType = 3, // NewTokensDestinationIdentity (uses identity_id)
+                        signingKeyHandle = key,
+                        signer = signer,
+                        identityId = otherId,
+                        boolValue = true,
+                        publicNote = "config update test",
+                    )
+                    fail("Expected DashSDKException without a live node")
+                } catch (e: DashSDKException) {
+                    // expected
+                } finally {
+                    sdk.identity.destroyPublicKey(key)
+                }
+            }
+        }
+    }
+
     private fun String.hexToBytes(): ByteArray {
         val clean = removePrefix("0x")
         require(clean.length % 2 == 0) { "hex string must have even length" }

@@ -1151,6 +1151,111 @@ interface DashSdkFfi : Library {
         state_transition_creation_options: Pointer?
     ): DashSDKResultNative
 
+    /**
+     * Claim a token distribution (pre-programmed or perpetual) and wait for confirmation.
+     * Header: `dash_sdk_token_claim(SDKHandle*, const uint8_t *transition_owner_id,
+     * const DashSDKTokenClaimParams*, const IdentityPublicKeyHandle*, const SignerHandle*,
+     * const DashSDKPutSettings*, const DashSDKStateTransitionCreationOptions*)`.
+     * Returns a [DashSDKResult] with no data payload on success.
+     */
+    fun dash_sdk_token_claim(
+        sdk_handle: Pointer,
+        transition_owner_id: Pointer,
+        params: DashSDKTokenClaimParamsNative,
+        identity_public_key_handle: Pointer,
+        signer_handle: Pointer,
+        put_settings: Pointer?,
+        state_transition_creation_options: Pointer?
+    ): DashSDKResultNative
+
+    /**
+     * Set a token's direct-purchase price (single or tiered) and wait for confirmation.
+     * Header: `dash_sdk_token_set_price(SDKHandle*, const uint8_t *transition_owner_id,
+     * const DashSDKTokenSetPriceParams*, const IdentityPublicKeyHandle*, const SignerHandle*,
+     * const DashSDKPutSettings*, const DashSDKStateTransitionCreationOptions*)`.
+     * Returns a [DashSDKResult] with no data payload on success.
+     */
+    fun dash_sdk_token_set_price(
+        sdk_handle: Pointer,
+        transition_owner_id: Pointer,
+        params: DashSDKTokenSetPriceParamsNative,
+        identity_public_key_handle: Pointer,
+        signer_handle: Pointer,
+        put_settings: Pointer?,
+        state_transition_creation_options: Pointer?
+    ): DashSDKResultNative
+
+    /**
+     * Purchase tokens directly at the agreed price and wait for confirmation. Header:
+     * `dash_sdk_token_purchase(SDKHandle*, const uint8_t *transition_owner_id,
+     * const DashSDKTokenPurchaseParams*, const IdentityPublicKeyHandle*, const SignerHandle*,
+     * const DashSDKPutSettings*, const DashSDKStateTransitionCreationOptions*)`.
+     * Returns a [DashSDKResult] with no data payload on success.
+     */
+    fun dash_sdk_token_purchase(
+        sdk_handle: Pointer,
+        transition_owner_id: Pointer,
+        params: DashSDKTokenPurchaseParamsNative,
+        identity_public_key_handle: Pointer,
+        signer_handle: Pointer,
+        put_settings: Pointer?,
+        state_transition_creation_options: Pointer?
+    ): DashSDKResultNative
+
+    /**
+     * Destroy a frozen identity's token funds and wait for confirmation. Header:
+     * `dash_sdk_token_destroy_frozen_funds(SDKHandle*, const uint8_t *transition_owner_id,
+     * const DashSDKTokenDestroyFrozenFundsParams*, const IdentityPublicKeyHandle*,
+     * const SignerHandle*, const DashSDKPutSettings*,
+     * const DashSDKStateTransitionCreationOptions*)`.
+     * Returns a [DashSDKResult] with no data payload on success.
+     */
+    fun dash_sdk_token_destroy_frozen_funds(
+        sdk_handle: Pointer,
+        transition_owner_id: Pointer,
+        params: DashSDKTokenDestroyFrozenFundsParamsNative,
+        identity_public_key_handle: Pointer,
+        signer_handle: Pointer,
+        put_settings: Pointer?,
+        state_transition_creation_options: Pointer?
+    ): DashSDKResultNative
+
+    /**
+     * Perform a token emergency action (pause/resume) and wait for confirmation. Header:
+     * `dash_sdk_token_emergency_action(SDKHandle*, const uint8_t *transition_owner_id,
+     * const DashSDKTokenEmergencyActionParams*, const IdentityPublicKeyHandle*,
+     * const SignerHandle*, const DashSDKPutSettings*,
+     * const DashSDKStateTransitionCreationOptions*)`.
+     * Returns a [DashSDKResult] with no data payload on success.
+     */
+    fun dash_sdk_token_emergency_action(
+        sdk_handle: Pointer,
+        transition_owner_id: Pointer,
+        params: DashSDKTokenEmergencyActionParamsNative,
+        identity_public_key_handle: Pointer,
+        signer_handle: Pointer,
+        put_settings: Pointer?,
+        state_transition_creation_options: Pointer?
+    ): DashSDKResultNative
+
+    /**
+     * Update a contract's token configuration and wait for confirmation. Header:
+     * `dash_sdk_token_update_contract_token_configuration(SDKHandle*,
+     * const uint8_t *transition_owner_id, const DashSDKTokenConfigUpdateParams*,
+     * const IdentityPublicKeyHandle*, const SignerHandle*, const DashSDKPutSettings*,
+     * const DashSDKStateTransitionCreationOptions*)`.
+     * Returns a [DashSDKResult] with no data payload on success.
+     */
+    fun dash_sdk_token_update_contract_token_configuration(
+        sdk_handle: Pointer,
+        transition_owner_id: Pointer,
+        params: DashSDKTokenConfigUpdateParamsNative,
+        identity_public_key_handle: Pointer,
+        signer_handle: Pointer,
+        put_settings: Pointer?,
+        state_transition_creation_options: Pointer?
+    ): DashSDKResultNative
+
     // -------------------------------------------------------------------------
     // System / status / protocol-version queries (read-path; return DashSDKResult)
     // -------------------------------------------------------------------------
@@ -1827,6 +1932,234 @@ class DashSDKTokenFreezeParamsNative : Structure() {
     @JvmField var token_position: Short = 0
     /** The identity to freeze/unfreeze (32 raw bytes). */
     @JvmField var target_identity_id: Pointer? = null
+    /** Optional public note. */
+    @JvmField var public_note: String? = null
+}
+
+/**
+ * Maps to `struct DashSDKTokenClaimParams` in rs-sdk-ffi.h (6 fields). Passed **by pointer**
+ * to [DashSdkFfi.dash_sdk_token_claim].
+ *
+ * C 64-bit layout (cc-verified, size=40):
+ *   token_contract_id @0 (8), serialized_contract @8 (8), serialized_contract_len @16 (8),
+ *   token_position @24 (2), distribution_type @28 (4), public_note @32 (8).
+ */
+@Structure.FieldOrder(
+    "token_contract_id",
+    "serialized_contract",
+    "serialized_contract_len",
+    "token_position",
+    "distribution_type",
+    "public_note"
+)
+class DashSDKTokenClaimParamsNative : Structure() {
+    /** Token contract ID (Base58) — mutually exclusive with [serialized_contract]. */
+    @JvmField var token_contract_id: String? = null
+    /** Serialized data contract (bincode) — mutually exclusive with [token_contract_id]. */
+    @JvmField var serialized_contract: Pointer? = null
+    /** Length of [serialized_contract] (uintptr_t). */
+    @JvmField var serialized_contract_len: NativeLong = NativeLong(0)
+    /** Token position within the contract (uint16_t; defaults to 0). */
+    @JvmField var token_position: Short = 0
+    /** Distribution type (enum DashSDKTokenDistributionType: 0=PreProgrammed, 1=Perpetual). */
+    @JvmField var distribution_type: Int = 0
+    /** Optional public note. */
+    @JvmField var public_note: String? = null
+}
+
+/**
+ * Maps to `struct DashSDKTokenPriceEntry` in rs-sdk-ffi.h — one tier of `SetPrices` pricing.
+ * Used as the element type of [DashSDKTokenSetPriceParamsNative.price_entries].
+ *
+ * C 64-bit layout (cc-verified): amount @0 (8), price @8 (8); size=16.
+ */
+@Structure.FieldOrder("amount", "price")
+class DashSDKTokenPriceEntryNative : Structure() {
+    /** Token amount threshold (uint64_t). */
+    @JvmField var amount: Long = 0
+    /** Price in credits for this amount (uint64_t). */
+    @JvmField var price: Long = 0
+}
+
+/**
+ * Maps to `struct DashSDKTokenSetPriceParams` in rs-sdk-ffi.h (9 fields). Passed **by pointer**
+ * to [DashSdkFfi.dash_sdk_token_set_price].
+ *
+ * C 64-bit layout (cc-verified, size=64):
+ *   token_contract_id @0 (8), serialized_contract @8 (8), serialized_contract_len @16 (8),
+ *   token_position @24 (2), pricing_type @28 (4), single_price @32 (8), price_entries @40 (8),
+ *   price_entries_count @48 (4), public_note @56 (8).
+ */
+@Structure.FieldOrder(
+    "token_contract_id",
+    "serialized_contract",
+    "serialized_contract_len",
+    "token_position",
+    "pricing_type",
+    "single_price",
+    "price_entries",
+    "price_entries_count",
+    "public_note"
+)
+class DashSDKTokenSetPriceParamsNative : Structure() {
+    /** Token contract ID (Base58) — mutually exclusive with [serialized_contract]. */
+    @JvmField var token_contract_id: String? = null
+    /** Serialized data contract (bincode) — mutually exclusive with [token_contract_id]. */
+    @JvmField var serialized_contract: Pointer? = null
+    /** Length of [serialized_contract] (uintptr_t). */
+    @JvmField var serialized_contract_len: NativeLong = NativeLong(0)
+    /** Token position within the contract (uint16_t; defaults to 0). */
+    @JvmField var token_position: Short = 0
+    /** Pricing type (enum DashSDKTokenPricingType: 0=SinglePrice, 1=SetPrices). */
+    @JvmField var pricing_type: Int = 0
+    /** For SinglePrice — price in credits (ignored for SetPrices) (uint64_t). */
+    @JvmField var single_price: Long = 0
+    /** For SetPrices — array of [DashSDKTokenPriceEntryNative] (null for SinglePrice). */
+    @JvmField var price_entries: Pointer? = null
+    /** Number of [price_entries] (uint32_t). */
+    @JvmField var price_entries_count: Int = 0
+    /** Optional public note. */
+    @JvmField var public_note: String? = null
+}
+
+/**
+ * Maps to `struct DashSDKTokenPurchaseParams` in rs-sdk-ffi.h (6 fields). Passed **by pointer**
+ * to [DashSdkFfi.dash_sdk_token_purchase].
+ *
+ * C 64-bit layout (cc-verified, size=48):
+ *   token_contract_id @0 (8), serialized_contract @8 (8), serialized_contract_len @16 (8),
+ *   token_position @24 (2), amount @32 (8), total_agreed_price @40 (8).
+ */
+@Structure.FieldOrder(
+    "token_contract_id",
+    "serialized_contract",
+    "serialized_contract_len",
+    "token_position",
+    "amount",
+    "total_agreed_price"
+)
+class DashSDKTokenPurchaseParamsNative : Structure() {
+    /** Token contract ID (Base58) — mutually exclusive with [serialized_contract]. */
+    @JvmField var token_contract_id: String? = null
+    /** Serialized data contract (bincode) — mutually exclusive with [token_contract_id]. */
+    @JvmField var serialized_contract: Pointer? = null
+    /** Length of [serialized_contract] (uintptr_t). */
+    @JvmField var serialized_contract_len: NativeLong = NativeLong(0)
+    /** Token position within the contract (uint16_t; defaults to 0). */
+    @JvmField var token_position: Short = 0
+    /** Amount of tokens to purchase (uint64_t). */
+    @JvmField var amount: Long = 0
+    /** Total agreed price in credits (uint64_t). */
+    @JvmField var total_agreed_price: Long = 0
+}
+
+/**
+ * Maps to `struct DashSDKTokenDestroyFrozenFundsParams` in rs-sdk-ffi.h (6 fields). Passed
+ * **by pointer** to [DashSdkFfi.dash_sdk_token_destroy_frozen_funds].
+ *
+ * C 64-bit layout (cc-verified, size=48):
+ *   token_contract_id @0 (8), serialized_contract @8 (8), serialized_contract_len @16 (8),
+ *   token_position @24 (2), frozen_identity_id @32 (8), public_note @40 (8).
+ */
+@Structure.FieldOrder(
+    "token_contract_id",
+    "serialized_contract",
+    "serialized_contract_len",
+    "token_position",
+    "frozen_identity_id",
+    "public_note"
+)
+class DashSDKTokenDestroyFrozenFundsParamsNative : Structure() {
+    /** Token contract ID (Base58) — mutually exclusive with [serialized_contract]. */
+    @JvmField var token_contract_id: String? = null
+    /** Serialized data contract (bincode) — mutually exclusive with [token_contract_id]. */
+    @JvmField var serialized_contract: Pointer? = null
+    /** Length of [serialized_contract] (uintptr_t). */
+    @JvmField var serialized_contract_len: NativeLong = NativeLong(0)
+    /** Token position within the contract (uint16_t; defaults to 0). */
+    @JvmField var token_position: Short = 0
+    /** The frozen identity whose funds to destroy (32 raw bytes). */
+    @JvmField var frozen_identity_id: Pointer? = null
+    /** Optional public note. */
+    @JvmField var public_note: String? = null
+}
+
+/**
+ * Maps to `struct DashSDKTokenEmergencyActionParams` in rs-sdk-ffi.h (6 fields). Passed
+ * **by pointer** to [DashSdkFfi.dash_sdk_token_emergency_action].
+ *
+ * C 64-bit layout (cc-verified, size=40):
+ *   token_contract_id @0 (8), serialized_contract @8 (8), serialized_contract_len @16 (8),
+ *   token_position @24 (2), action @28 (4), public_note @32 (8).
+ */
+@Structure.FieldOrder(
+    "token_contract_id",
+    "serialized_contract",
+    "serialized_contract_len",
+    "token_position",
+    "action",
+    "public_note"
+)
+class DashSDKTokenEmergencyActionParamsNative : Structure() {
+    /** Token contract ID (Base58) — mutually exclusive with [serialized_contract]. */
+    @JvmField var token_contract_id: String? = null
+    /** Serialized data contract (bincode) — mutually exclusive with [token_contract_id]. */
+    @JvmField var serialized_contract: Pointer? = null
+    /** Length of [serialized_contract] (uintptr_t). */
+    @JvmField var serialized_contract_len: NativeLong = NativeLong(0)
+    /** Token position within the contract (uint16_t; defaults to 0). */
+    @JvmField var token_position: Short = 0
+    /** The emergency action (enum DashSDKTokenEmergencyAction: 0=Pause, 1=Resume). */
+    @JvmField var action: Int = 0
+    /** Optional public note. */
+    @JvmField var public_note: String? = null
+}
+
+/**
+ * Maps to `struct DashSDKTokenConfigUpdateParams` in rs-sdk-ffi.h (11 fields). Passed
+ * **by pointer** to [DashSdkFfi.dash_sdk_token_update_contract_token_configuration].
+ *
+ * C 64-bit layout (cc-verified, size=72):
+ *   token_contract_id @0 (8), serialized_contract @8 (8), serialized_contract_len @16 (8),
+ *   token_position @24 (2), update_type @28 (4), amount @32 (8), bool_value @40 (1),
+ *   identity_id @48 (8), group_position @56 (2), action_takers @60 (4), public_note @64 (8).
+ * `bool_value` is a C `bool` (1 byte) → JNA [Byte]; the 7-byte gap before [identity_id] is
+ * padding JNA inserts automatically from the field order.
+ */
+@Structure.FieldOrder(
+    "token_contract_id",
+    "serialized_contract",
+    "serialized_contract_len",
+    "token_position",
+    "update_type",
+    "amount",
+    "bool_value",
+    "identity_id",
+    "group_position",
+    "action_takers",
+    "public_note"
+)
+class DashSDKTokenConfigUpdateParamsNative : Structure() {
+    /** Token contract ID (Base58) — mutually exclusive with [serialized_contract]. */
+    @JvmField var token_contract_id: String? = null
+    /** Serialized data contract (bincode) — mutually exclusive with [token_contract_id]. */
+    @JvmField var serialized_contract: Pointer? = null
+    /** Length of [serialized_contract] (uintptr_t). */
+    @JvmField var serialized_contract_len: NativeLong = NativeLong(0)
+    /** Token position within the contract (uint16_t; defaults to 0). */
+    @JvmField var token_position: Short = 0
+    /** The configuration update type (enum DashSDKTokenConfigUpdateType). */
+    @JvmField var update_type: Int = 0
+    /** For MaxSupply updates — the new max supply, 0 for no limit (uint64_t). */
+    @JvmField var amount: Long = 0
+    /** For boolean updates (e.g. MintingAllowChoosingDestination) — C bool, 1 byte. */
+    @JvmField var bool_value: Byte = 0
+    /** For identity-based updates — identity ID (32 raw bytes). */
+    @JvmField var identity_id: Pointer? = null
+    /** For group-based updates — the group position (uint16_t). */
+    @JvmField var group_position: Short = 0
+    /** For permission updates — the authorized action takers (enum DashSDKAuthorizedActionTakers). */
+    @JvmField var action_takers: Int = 0
     /** Optional public note. */
     @JvmField var public_note: String? = null
 }
