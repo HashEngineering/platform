@@ -1057,6 +1057,101 @@ interface DashSdkFfi : Library {
     fun dash_sdk_token_get_total_supply(handle: Pointer, token_id: String): DashSDKResultNative
 
     // -------------------------------------------------------------------------
+    // Token write-path (state transitions) — external-signer pattern. Each takes the
+    // 32-byte transition_owner_id (uint8_t* → 32-byte Memory), a *Params struct by
+    // pointer, the signing IdentityPublicKeyHandle, the SignerHandle, and the optional
+    // put_settings / state_transition_creation_options (always pass NULL for st-options).
+    // On the Rust side these return DashSDKResult::success(null) — no data payload — so
+    // the service layer unwraps via ResultUnwrapper.unwrapVoid (error-only check).
+    // -------------------------------------------------------------------------
+
+    /**
+     * Mint tokens to an identity and wait for confirmation. Header:
+     * `dash_sdk_token_mint(SDKHandle*, const uint8_t *transition_owner_id,
+     * const DashSDKTokenMintParams*, const IdentityPublicKeyHandle*, const SignerHandle*,
+     * const DashSDKPutSettings*, const DashSDKStateTransitionCreationOptions*)`.
+     * Returns a [DashSDKResult] with no data payload on success.
+     */
+    fun dash_sdk_token_mint(
+        sdk_handle: Pointer,
+        transition_owner_id: Pointer,
+        params: DashSDKTokenMintParamsNative,
+        identity_public_key_handle: Pointer,
+        signer_handle: Pointer,
+        put_settings: Pointer?,
+        state_transition_creation_options: Pointer?
+    ): DashSDKResultNative
+
+    /**
+     * Burn tokens from an identity and wait for confirmation. Header:
+     * `dash_sdk_token_burn(SDKHandle*, const uint8_t *transition_owner_id,
+     * const DashSDKTokenBurnParams*, const IdentityPublicKeyHandle*, const SignerHandle*,
+     * const DashSDKPutSettings*, const DashSDKStateTransitionCreationOptions*)`.
+     * Returns a [DashSDKResult] with no data payload on success.
+     */
+    fun dash_sdk_token_burn(
+        sdk_handle: Pointer,
+        transition_owner_id: Pointer,
+        params: DashSDKTokenBurnParamsNative,
+        identity_public_key_handle: Pointer,
+        signer_handle: Pointer,
+        put_settings: Pointer?,
+        state_transition_creation_options: Pointer?
+    ): DashSDKResultNative
+
+    /**
+     * Transfer tokens to another identity and wait for confirmation. Header:
+     * `dash_sdk_token_transfer(SDKHandle*, const uint8_t *transition_owner_id,
+     * const DashSDKTokenTransferParams*, const IdentityPublicKeyHandle*, const SignerHandle*,
+     * const DashSDKPutSettings*, const DashSDKStateTransitionCreationOptions*)`.
+     * Returns a [DashSDKResult] with no data payload on success.
+     */
+    fun dash_sdk_token_transfer(
+        sdk_handle: Pointer,
+        transition_owner_id: Pointer,
+        params: DashSDKTokenTransferParamsNative,
+        identity_public_key_handle: Pointer,
+        signer_handle: Pointer,
+        put_settings: Pointer?,
+        state_transition_creation_options: Pointer?
+    ): DashSDKResultNative
+
+    /**
+     * Freeze a token for an identity and wait for confirmation. Header:
+     * `dash_sdk_token_freeze(SDKHandle*, const uint8_t *transition_owner_id,
+     * const DashSDKTokenFreezeParams*, const IdentityPublicKeyHandle*, const SignerHandle*,
+     * const DashSDKPutSettings*, const DashSDKStateTransitionCreationOptions*)`.
+     * Returns a [DashSDKResult] with no data payload on success.
+     */
+    fun dash_sdk_token_freeze(
+        sdk_handle: Pointer,
+        transition_owner_id: Pointer,
+        params: DashSDKTokenFreezeParamsNative,
+        identity_public_key_handle: Pointer,
+        signer_handle: Pointer,
+        put_settings: Pointer?,
+        state_transition_creation_options: Pointer?
+    ): DashSDKResultNative
+
+    /**
+     * Unfreeze a token for an identity and wait for confirmation. Header:
+     * `dash_sdk_token_unfreeze(SDKHandle*, const uint8_t *transition_owner_id,
+     * const DashSDKTokenFreezeParams*, const IdentityPublicKeyHandle*, const SignerHandle*,
+     * const DashSDKPutSettings*, const DashSDKStateTransitionCreationOptions*)`.
+     * Reuses [DashSDKTokenFreezeParamsNative] (the header's `DashSDKTokenFreezeParams`).
+     * Returns a [DashSDKResult] with no data payload on success.
+     */
+    fun dash_sdk_token_unfreeze(
+        sdk_handle: Pointer,
+        transition_owner_id: Pointer,
+        params: DashSDKTokenFreezeParamsNative,
+        identity_public_key_handle: Pointer,
+        signer_handle: Pointer,
+        put_settings: Pointer?,
+        state_transition_creation_options: Pointer?
+    ): DashSDKResultNative
+
+    // -------------------------------------------------------------------------
     // System / status / protocol-version queries (read-path; return DashSDKResult)
     // -------------------------------------------------------------------------
 
@@ -1604,6 +1699,136 @@ class DashSDKDocumentHandleParamsNative : Structure() {
     @JvmField var properties_json: String? = null
     /** Optional revision number (0 = no revision). */
     @JvmField var revision: Long = 0
+}
+
+// ---------------------------------------------------------------------------
+// Token write-path parameter structs. Each is `repr(C)` in rs-sdk-ffi.h and passed
+// **by pointer** to its dash_sdk_token_* entry point. `token_contract_id` (Base58
+// const char*) and `serialized_contract`/`serialized_contract_len` are mutually
+// exclusive; the Kotlin services pass the Base58 id and leave the serialized_* pair
+// null/0. 32-byte identity ids are `const uint8_t*` (a 32-byte JNA Memory, nullable).
+// uint16_t → Short, uint64_t → Long, uintptr_t → NativeLong, const char* → String?.
+// ---------------------------------------------------------------------------
+
+/**
+ * Maps to `struct DashSDKTokenMintParams` in rs-sdk-ffi.h (7 fields). Passed **by pointer**
+ * to [DashSdkFfi.dash_sdk_token_mint].
+ */
+@Structure.FieldOrder(
+    "token_contract_id",
+    "serialized_contract",
+    "serialized_contract_len",
+    "token_position",
+    "recipient_id",
+    "amount",
+    "public_note"
+)
+class DashSDKTokenMintParamsNative : Structure() {
+    /** Token contract ID (Base58) — mutually exclusive with [serialized_contract]. */
+    @JvmField var token_contract_id: String? = null
+    /** Serialized data contract (bincode) — mutually exclusive with [token_contract_id]. */
+    @JvmField var serialized_contract: Pointer? = null
+    /** Length of [serialized_contract] (uintptr_t). */
+    @JvmField var serialized_contract_len: NativeLong = NativeLong(0)
+    /** Token position within the contract (uint16_t; defaults to 0). */
+    @JvmField var token_position: Short = 0
+    /** Recipient identity ID (32 raw bytes) — optional. */
+    @JvmField var recipient_id: Pointer? = null
+    /** Amount to mint (uint64_t). */
+    @JvmField var amount: Long = 0
+    /** Optional public note. */
+    @JvmField var public_note: String? = null
+}
+
+/**
+ * Maps to `struct DashSDKTokenBurnParams` in rs-sdk-ffi.h (6 fields). Passed **by pointer**
+ * to [DashSdkFfi.dash_sdk_token_burn].
+ */
+@Structure.FieldOrder(
+    "token_contract_id",
+    "serialized_contract",
+    "serialized_contract_len",
+    "token_position",
+    "amount",
+    "public_note"
+)
+class DashSDKTokenBurnParamsNative : Structure() {
+    /** Token contract ID (Base58) — mutually exclusive with [serialized_contract]. */
+    @JvmField var token_contract_id: String? = null
+    /** Serialized data contract (bincode) — mutually exclusive with [token_contract_id]. */
+    @JvmField var serialized_contract: Pointer? = null
+    /** Length of [serialized_contract] (uintptr_t). */
+    @JvmField var serialized_contract_len: NativeLong = NativeLong(0)
+    /** Token position within the contract (uint16_t; defaults to 0). */
+    @JvmField var token_position: Short = 0
+    /** Amount to burn (uint64_t). */
+    @JvmField var amount: Long = 0
+    /** Optional public note. */
+    @JvmField var public_note: String? = null
+}
+
+/**
+ * Maps to `struct DashSDKTokenTransferParams` in rs-sdk-ffi.h (9 fields). Passed **by pointer**
+ * to [DashSdkFfi.dash_sdk_token_transfer].
+ */
+@Structure.FieldOrder(
+    "token_contract_id",
+    "serialized_contract",
+    "serialized_contract_len",
+    "token_position",
+    "recipient_id",
+    "amount",
+    "public_note",
+    "private_encrypted_note",
+    "shared_encrypted_note"
+)
+class DashSDKTokenTransferParamsNative : Structure() {
+    /** Token contract ID (Base58) — mutually exclusive with [serialized_contract]. */
+    @JvmField var token_contract_id: String? = null
+    /** Serialized data contract (bincode) — mutually exclusive with [token_contract_id]. */
+    @JvmField var serialized_contract: Pointer? = null
+    /** Length of [serialized_contract] (uintptr_t). */
+    @JvmField var serialized_contract_len: NativeLong = NativeLong(0)
+    /** Token position within the contract (uint16_t; defaults to 0). */
+    @JvmField var token_position: Short = 0
+    /** Recipient identity ID (32 raw bytes). */
+    @JvmField var recipient_id: Pointer? = null
+    /** Amount to transfer (uint64_t). */
+    @JvmField var amount: Long = 0
+    /** Optional public note. */
+    @JvmField var public_note: String? = null
+    /** Optional private encrypted note. */
+    @JvmField var private_encrypted_note: String? = null
+    /** Optional shared encrypted note. */
+    @JvmField var shared_encrypted_note: String? = null
+}
+
+/**
+ * Maps to `struct DashSDKTokenFreezeParams` in rs-sdk-ffi.h (6 fields). Passed **by pointer**
+ * to both [DashSdkFfi.dash_sdk_token_freeze] and [DashSdkFfi.dash_sdk_token_unfreeze]
+ * (the header reuses one struct for "Token freeze/unfreeze parameters").
+ */
+@Structure.FieldOrder(
+    "token_contract_id",
+    "serialized_contract",
+    "serialized_contract_len",
+    "token_position",
+    "target_identity_id",
+    "public_note"
+)
+class DashSDKTokenFreezeParamsNative : Structure() {
+    /** Token contract ID (Base58) — mutually exclusive with [serialized_contract]. */
+    @JvmField var token_contract_id: String? = null
+    /** Serialized data contract (bincode) — mutually exclusive with [token_contract_id]. */
+    @JvmField var serialized_contract: Pointer? = null
+    /** Length of [serialized_contract] (uintptr_t). */
+    @JvmField var serialized_contract_len: NativeLong = NativeLong(0)
+    /** Token position within the contract (uint16_t; defaults to 0). */
+    @JvmField var token_position: Short = 0
+    /** The identity to freeze/unfreeze (32 raw bytes). */
+    @JvmField var target_identity_id: Pointer? = null
+    /** Optional public note. */
+    @JvmField var public_note: String? = null
 }
 
 /**

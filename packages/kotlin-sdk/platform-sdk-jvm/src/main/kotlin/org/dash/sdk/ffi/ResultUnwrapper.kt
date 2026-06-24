@@ -38,6 +38,27 @@ internal object ResultUnwrapper {
     }
 
     /**
+     * Unwraps a result that carries no data payload on success: throws on error, otherwise
+     * returns Unit. Used by write paths whose Rust side returns `DashSDKResult::success(null)`
+     * (e.g. the token state-transition ops — `mint`/`burn`/`transfer`/`freeze`/`unfreeze`),
+     * where a null `data` is a successful outcome rather than the missing-data error that
+     * [unwrap] reports.
+     *
+     * @throws DashSDKException only when the FFI reports an error
+     */
+    fun unwrapVoid(result: DashSDKResultNative) {
+        val errorPtr = result.error
+        if (errorPtr != null) {
+            val code = errorPtr.getInt(0)
+            val msgPtr = errorPtr.getPointer(com.sun.jna.Native.POINTER_SIZE.toLong())
+            val msg = msgPtr?.getString(0) ?: "Unknown error"
+            ffi.dash_sdk_error_free(errorPtr)
+            throw DashSDKException(code, msg)
+        }
+        // Success with a null/opaque data payload — nothing to read or free.
+    }
+
+    /**
      * Unwraps a result and reads the data pointer as a UTF-8 C string.
      * Frees the string pointer after reading.
      */
