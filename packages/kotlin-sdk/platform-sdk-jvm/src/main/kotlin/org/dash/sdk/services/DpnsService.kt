@@ -59,18 +59,16 @@ class DpnsService internal constructor(private val sdkHandle: Pointer) {
     }
 
     /**
-     * Search for DPNS names by prefix.
+     * Search for DPNS names by prefix ("starts with").
      *
      * @param prefix name prefix to search
      * @param limit max results (0 = server default)
-     * @return list of matching names
+     * @return list of matching fully-qualified names (e.g. "alice.dash")
      */
     suspend fun search(prefix: String, limit: Int = 10): List<String> = withContext(Dispatchers.IO) {
         runCatching {
             val result = ffi.dash_sdk_dpns_search(sdkHandle, prefix, limit)
-            val json = ResultUnwrapper.unwrapString(result)
-            // Parse JSON string array ["alice.dash","alice2.dash",...]
-            Regex(""""([^"]+)"""").findAll(json).map { it.groupValues[1] }.toList()
+            parseSearchResults(ResultUnwrapper.unwrapString(result))
         }.getOrDefault(emptyList())
     }
 
@@ -308,6 +306,54 @@ class DpnsService internal constructor(private val sdkHandle: Pointer) {
             )
         } finally {
             ffi.dash_sdk_dpns_registration_result_free(resultPtr)
+        }
+    }
+
+    companion object {
+        /**
+         * Parse the JSON returned by `dash_sdk_dpns_search` into a list of fully-qualified
+         * names. The native function returns an array of objects
+         * (`[{"label":"alice","fullName":"alice.dash","ownerId":"..."}]`); we extract each
+         * object's `fullName` (falling back to `label`). For robustness, a plain JSON string
+         * array (`["alice.dash", ...]`) is also accepted. Never throws — returns an empty
+         * list for empty/blank/unrecognized input.
+         */
+        internal fun parseSearchResults(json: String): List<String> {
+            val trimmed = json.trim()
+            if (trimmed.isEmpty() || trimmed == "[]") return emptyList()
+
+            val objects = splitJsonObjects(trimmed)
+            if (objects.isNotEmpty()) {
+                return objects.mapNotNull { obj ->
+                    (jsonField(obj, "fullName") ?: jsonField(obj, "label"))?.takeIf { it.isNotBlank() }
+                }
+            }
+            // Fallback: a plain array of quoted strings.
+            return Regex(""""([^"\\]*(?:\\.[^"\\]*)*)"""").findAll(trimmed)
+                .map { it.groupValues[1] }
+                .filter { it.isNotBlank() }
+                .toList()
+        }
+
+        /** Extract a string value for [key] from a single JSON object literal. */
+        private fun jsonField(obj: String, key: String): String? =
+            Regex(""""$key"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"""").find(obj)?.groupValues?.get(1)
+
+        /** Split a JSON array into its top-level `{...}` object substrings (brace-depth scan). */
+        private fun splitJsonObjects(json: String): List<String> {
+            val objects = mutableListOf<String>()
+            var depth = 0
+            var start = -1
+            for (i in json.indices) {
+                when (json[i]) {
+                    '{' -> if (depth++ == 0) start = i
+                    '}' -> if (--depth == 0 && start >= 0) {
+                        objects += json.substring(start, i + 1)
+                        start = -1
+                    }
+                }
+            }
+            return objects
         }
     }
 }

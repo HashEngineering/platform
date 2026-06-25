@@ -26,3 +26,6 @@ include(":unified-sdk-jvm")
 include(":unified-sdk-android")
 
 include(":console")
+
+// Demo Android app: DPNS "Username Search" (Jetpack Compose) over :platform-sdk-android.
+include(":username-search-app")

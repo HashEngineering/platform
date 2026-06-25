@@ -111,6 +111,47 @@ class DashSDK private constructor(
             }
 
             val result: DashSDKResultNative = DashSdkFfi.INSTANCE.dash_sdk_create(config)
+            return fromResult(result, network)
+        }
+
+        /**
+         * Create a [DashSDK] connected to the network's built-in **trusted** nodes
+         * (`dash_sdk_create_trusted`).
+         *
+         * Use this when you have no explicit DAPI address to pass: unlike [create] with
+         * `dapiAddresses = null` (which yields the offline **mock** SDK), this connects to
+         * the trusted DAPI seed nodes for [network] and returns live data. This is the path
+         * the `dpns-search` console tool uses for testnet by default.
+         *
+         * @param network which Dash network to connect to
+         * @param requestTimeoutMs timeout for individual requests (ms)
+         * @param requestRetryCount number of retries per request
+         * @param skipAssetLockProofVerification skip asset lock proof checks (testing only)
+         * @throws DashSDKException if the native SDK could not be initialized
+         */
+        fun createTrusted(
+            network: Network = Network.TESTNET,
+            requestTimeoutMs: Long = 30_000L,
+            requestRetryCount: Int = 3,
+            skipAssetLockProofVerification: Boolean = false,
+        ): DashSDK {
+            NativeLoader.load()
+
+            val config = DashSDKConfigNative().apply {
+                this.network = network.ffiValue
+                this.dapi_addresses = null
+                this.request_timeout_ms = requestTimeoutMs
+                this.request_retry_count = requestRetryCount
+                this.skip_asset_lock_proof_verification =
+                    if (skipAssetLockProofVerification) 1 else 0
+            }
+
+            val result: DashSDKResultNative = DashSdkFfi.INSTANCE.dash_sdk_create_trusted(config)
+            return fromResult(result, network)
+        }
+
+        /** Throw on FFI error, otherwise wrap the handle in a [DashSDK]. */
+        private fun fromResult(result: DashSDKResultNative, network: Network): DashSDK {
             if (result.error != null) {
                 val code = result.error!!.getInt(0)
                 val msgPtr = result.error!!.getPointer(com.sun.jna.Native.POINTER_SIZE.toLong())
