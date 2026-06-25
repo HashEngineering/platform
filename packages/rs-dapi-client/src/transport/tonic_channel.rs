@@ -28,8 +28,17 @@ pub fn create_channel(
         .with_webpki_roots()
         .assume_http2(true);
 
-    // Try to add native roots - this may fail on iOS, which is fine since we have webpki roots
-    #[cfg(not(any(target_os = "ios", target_os = "tvos", target_os = "watchos")))]
+    // Try to add native roots - this may fail on iOS, which is fine since we have webpki roots.
+    // Android is excluded too: `with_native_roots()` fails with `NativeCertsNotFound` (Android
+    // has no OS trust store at the path rustls-native-certs probes), and tonic turns that into
+    // a `.tls_config()` error which the `.expect()` below would panic+abort on. The webpki
+    // (Mozilla) roots above already cover Android, exactly as for the iOS family.
+    #[cfg(not(any(
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "watchos",
+        target_os = "android"
+    )))]
     {
         tls_config = tls_config.with_native_roots();
     }

@@ -27,7 +27,11 @@ use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::error::Error as StdError;
-#[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(target_os = "ios"),
+    not(target_os = "android")
+))]
 use std::net::ToSocketAddrs;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
@@ -87,7 +91,11 @@ struct MasternodeDiscoveryResponse {
 
 impl TrustedHttpContextProvider {
     /// Verify that a URL's domain resolves
-    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        not(target_os = "ios"),
+        not(target_os = "android")
+    ))]
     fn verify_domain_resolves(url: &str) -> Result<(), TrustedContextProviderError> {
         let parsed_url = Url::parse(url).map_err(|e| {
             TrustedContextProviderError::NetworkError(format!("Invalid URL: {}", e))
@@ -158,8 +166,15 @@ impl TrustedHttpContextProvider {
             }
         }
 
-        // Verify the domain resolves before proceeding (skip on WASM and iOS)
-        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+        // Verify the domain resolves before proceeding (skip on WASM, iOS, and
+        // Android). On mobile, libc's getaddrinfo does not go through the
+        // platform DNS resolver, so this eager check fails even for valid hosts
+        // — reqwest resolves at request time instead.
+        #[cfg(all(
+            not(target_arch = "wasm32"),
+            not(target_os = "ios"),
+            not(target_os = "android")
+        ))]
         Self::verify_domain_resolves(&base_url)?;
 
         #[cfg(target_arch = "wasm32")]
@@ -174,7 +189,20 @@ impl TrustedHttpContextProvider {
                 .build()?
         };
 
-        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+        #[cfg(all(not(target_arch = "wasm32"), target_os = "android"))]
+        let client = {
+            // Android specific configuration
+            Client::builder()
+                .timeout(Duration::from_secs(30))
+                .user_agent("DashSDK-Android/1.0")
+                .build()?
+        };
+
+        #[cfg(all(
+            not(target_arch = "wasm32"),
+            not(target_os = "ios"),
+            not(target_os = "android")
+        ))]
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent("DashSDK/1.0")
