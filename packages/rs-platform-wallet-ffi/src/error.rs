@@ -172,6 +172,15 @@ pub enum PlatformWalletFFIResultCode {
     /// rejected the transaction, so its UTXO reservation was released and the
     /// host may safely retry after addressing the rejection reason.
     ErrorTransactionBroadcastRejected = 26,
+    /// Maps `SignedPaymentError::StaleToken` / `SignedPaymentError::WalletMismatch`
+    /// from the deferred build → broadcast/release core-send lifecycle
+    /// (`core_wallet_signed_payment_*`). The reservation token is unknown,
+    /// already broadcast, already released, or was minted against a different
+    /// (re-created) wallet instance. The operation did NOT touch the network —
+    /// there is no double-broadcast — but the token can never succeed, so this
+    /// is NOT retryable: the host must rebuild the payment. Release is
+    /// idempotent and never surfaces this code.
+    ErrorStaleReservationToken = 27,
 
     NotFound = 98, // Used exclusively for all the Option that are retuned as errors
     ErrorUnknown = 99,
