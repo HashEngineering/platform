@@ -69,6 +69,16 @@ public enum PlatformWalletResultCode: Int32, Sendable {
     /// Core definitively rejected the transaction. Its reserved inputs were
     /// released and a corrected transaction may be submitted again.
     case errorTransactionBroadcastRejected = 26
+    // Raw value 26 above (errorTransactionBroadcastRejected) landed on
+    // v4.1-dev. Raw values 27-28 remain reserved for the deferred-payment
+    // reservation-token errors (dashpay/platform#4185, which must renumber off
+    // 26) and 29/30 for the asset-lock funding errors
+    // (dashpay/platform#4184) on sibling branches.
+    /// A state transition could not be signed because the signer has no
+    /// usable private key for the requested public key — restored from the
+    /// structured signer completion code (dashpay/platform#4060 finding 7).
+    /// Route to key repair; not retryable as-is.
+    case errorSigningKeyUnavailable = 31
     case notFound = 98
     case errorUnknown = 99
 
@@ -128,6 +138,8 @@ public enum PlatformWalletResultCode: Int32, Sendable {
             self = .errorAssetLockFundingMismatch
         case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_TRANSACTION_BROADCAST_REJECTED:
             self = .errorTransactionBroadcastRejected
+        case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_SIGNING_KEY_UNAVAILABLE:
+            self = .errorSigningKeyUnavailable
         case PLATFORM_WALLET_FFI_RESULT_CODE_NOT_FOUND:
             self = .notFound
         case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_UNKNOWN:
@@ -250,6 +262,12 @@ public enum PlatformWalletError: LocalizedError {
     /// to retry, and the retry re-fetches the address nonce so the mismatch
     /// self-heals. The submitted/expected nonce values are in the message.
     case addressNonceMismatch(String)
+    /// The signer has no usable private key for the requested public key
+    /// (missing / stranded scalar) — the operation itself did not fail.
+    /// Restored from the structured signer completion code
+    /// (dashpay/platform#4060 finding 7); route to key repair. Kotlin
+    /// parity: `DashSdkError.PlatformWallet.SigningKeyUnavailable`.
+    case signingKeyUnavailable(String)
     case notFound(String)
     case unknown(String)
 
@@ -272,6 +290,7 @@ public enum PlatformWalletError: LocalizedError {
              .transactionBroadcastUnconfirmed(let m),
              .transactionBroadcastRejected(let m),
              .addressNonceMismatch(let m),
+             .signingKeyUnavailable(let m),
              .notFound(let m), .unknown(let m):
             return m
         }
@@ -313,6 +332,8 @@ public enum PlatformWalletError: LocalizedError {
             self = .transactionBroadcastRejected(detail)
         case .errorAddressNonceMismatch:
             self = .addressNonceMismatch(detail)
+        case .errorSigningKeyUnavailable:
+            self = .signingKeyUnavailable(detail)
         case .notFound:               self = .notFound(detail)
         case .errorUnknown:           self = .unknown(detail)
         }
