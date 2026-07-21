@@ -172,18 +172,25 @@ pub enum PlatformWalletFFIResultCode {
     /// rejected the transaction, so its UTXO reservation was released and the
     /// host may safely retry after addressing the rejection reason.
     ErrorTransactionBroadcastRejected = 26,
+    // Codes 27-28 are reserved: the deferred-payment reservation-token errors
+    // (ErrorStaleReservationToken / ErrorReservationTokenConsumed /
+    // ErrorReservationWalletMismatch) claim them on the split-build-broadcast
+    // branch (dashpay/platform#4185); allocating them here too would merge
+    // without textual conflict and silently misclassify across hosts. (Code 26,
+    // originally part of that reserved range, is now taken by
+    // ErrorTransactionBroadcastRejected from v4.1-dev.)
     /// Asset-lock coin selection came up short over the *permitted* funding set
     /// (dashpay/platform#4073 request 3). Carries the structured
     /// `available`/`required` duff amounts in the message string. Distinct from
     /// [`Self::ErrorCoreInsufficientFunds`] (22), which is the atomic Core-send
     /// selector, not the asset-lock builder.
-    ErrorAssetLockInsufficientFunds = 26,
+    ErrorAssetLockInsufficientFunds = 29,
     /// The default single-privacy-domain funding rule refused a cross-domain
     /// co-spend (dashpay/platform#4184): the transparent domain alone is short
     /// but the wallet-wide union would cover it. The host must obtain explicit
     /// user consent and re-issue the funding request with cross-domain consent.
     /// The transparent/union/required duff amounts travel in the message string.
-    ErrorAssetLockCrossDomainConsentRequired = 27,
+    ErrorAssetLockCrossDomainConsentRequired = 30,
 
     NotFound = 98, // Used exclusively for all the Option that are retuned as errors
     ErrorUnknown = 99,
@@ -710,7 +717,7 @@ mod tests {
     }
 
     /// The asset-lock coin-selection shortfall must cross the FFI boundary as the
-    /// dedicated `ErrorAssetLockInsufficientFunds` (26) code — NOT `ErrorUnknown`
+    /// dedicated `ErrorAssetLockInsufficientFunds` (29) code — NOT `ErrorUnknown`
     /// (99) as it did before this arm existed (dashpay/platform#4073 request 3) —
     /// and its structured `available`/`required` duffs must survive verbatim in
     /// the message so hosts can still parse the amounts.
@@ -748,7 +755,7 @@ mod tests {
     }
 
     /// The default single-privacy-domain refusal (dashpay/platform#4184) must
-    /// cross as the dedicated `ErrorAssetLockCrossDomainConsentRequired` (27) code
+    /// cross as the dedicated `ErrorAssetLockCrossDomainConsentRequired` (30) code
     /// so hosts can prompt for consent and re-issue, instead of seeing an opaque
     /// insufficient-funds/unknown error even though the union covers the amount.
     #[test]

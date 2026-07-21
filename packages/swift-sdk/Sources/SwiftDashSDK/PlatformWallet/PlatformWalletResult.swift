@@ -73,12 +73,12 @@ public enum PlatformWalletResultCode: Int32, Sendable {
     /// (dashpay/platform#4073 request 3). The structured available/required
     /// duffs travel in the message string. Distinct from
     /// `errorCoreInsufficientFunds` (22), which is the atomic Core-send selector.
-    case errorAssetLockInsufficientFunds = 26
+    case errorAssetLockInsufficientFunds = 29
     /// The default single-privacy-domain funding rule refused a cross-domain
     /// co-spend (dashpay/platform#4184): the transparent domain alone is short
     /// but the wallet-wide union would cover it. Obtain explicit user consent
     /// and re-issue the funding request with cross-domain consent.
-    case errorAssetLockCrossDomainConsentRequired = 27
+    case errorAssetLockCrossDomainConsentRequired = 30
     case notFound = 98
     case errorUnknown = 99
 
