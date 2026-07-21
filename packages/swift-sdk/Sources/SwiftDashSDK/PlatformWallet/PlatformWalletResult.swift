@@ -69,6 +69,16 @@ public enum PlatformWalletResultCode: Int32, Sendable {
     /// Core definitively rejected the transaction. Its reserved inputs were
     /// released and a corrected transaction may be submitted again.
     case errorTransactionBroadcastRejected = 26
+    /// Asset-lock coin selection came up short over the permitted funding set
+    /// (dashpay/platform#4073 request 3). The structured available/required
+    /// duffs travel in the message string. Distinct from
+    /// `errorCoreInsufficientFunds` (22), which is the atomic Core-send selector.
+    case errorAssetLockInsufficientFunds = 26
+    /// The default single-privacy-domain funding rule refused a cross-domain
+    /// co-spend (dashpay/platform#4184): the transparent domain alone is short
+    /// but the wallet-wide union would cover it. Obtain explicit user consent
+    /// and re-issue the funding request with cross-domain consent.
+    case errorAssetLockCrossDomainConsentRequired = 27
     case notFound = 98
     case errorUnknown = 99
 
@@ -128,6 +138,10 @@ public enum PlatformWalletResultCode: Int32, Sendable {
             self = .errorAssetLockFundingMismatch
         case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_TRANSACTION_BROADCAST_REJECTED:
             self = .errorTransactionBroadcastRejected
+        case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_ASSET_LOCK_INSUFFICIENT_FUNDS:
+            self = .errorAssetLockInsufficientFunds
+        case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_ASSET_LOCK_CROSS_DOMAIN_CONSENT_REQUIRED:
+            self = .errorAssetLockCrossDomainConsentRequired
         case PLATFORM_WALLET_FFI_RESULT_CODE_NOT_FOUND:
             self = .notFound
         case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_UNKNOWN:
