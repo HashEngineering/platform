@@ -185,12 +185,6 @@ pub enum PlatformWalletFFIResultCode {
     /// [`Self::ErrorCoreInsufficientFunds`] (22), which is the atomic Core-send
     /// selector, not the asset-lock builder.
     ErrorAssetLockInsufficientFunds = 29,
-    /// The default single-privacy-domain funding rule refused a cross-domain
-    /// co-spend (dashpay/platform#4184): the transparent domain alone is short
-    /// but the wallet-wide union would cover it. The host must obtain explicit
-    /// user consent and re-issue the funding request with cross-domain consent.
-    /// The transparent/union/required duff amounts travel in the message string.
-    ErrorAssetLockCrossDomainConsentRequired = 30,
 
     NotFound = 98, // Used exclusively for all the Option that are retuned as errors
     ErrorUnknown = 99,
@@ -370,13 +364,6 @@ impl PlatformWalletFFIResultCode {
             // now lets a host branch on the shortfall without parsing text.
             PlatformWalletError::AssetLockInsufficientFunds { .. } => {
                 PlatformWalletFFIResultCode::ErrorAssetLockInsufficientFunds
-            }
-            // The default single-privacy-domain refusal (dashpay/platform#4184):
-            // a typed, actionable signal so the host can prompt for cross-domain
-            // consent and re-issue, rather than seeing an opaque insufficient-funds
-            // error even though the wallet-wide union covers the amount.
-            PlatformWalletError::AssetLockCrossDomainConsentRequired { .. } => {
-                PlatformWalletFFIResultCode::ErrorAssetLockCrossDomainConsentRequired
             }
             _ => PlatformWalletFFIResultCode::ErrorUnknown,
         }
@@ -752,30 +739,6 @@ mod tests {
             msg, rendered,
             "structured available/required duffs must survive the FFI boundary verbatim"
         );
-    }
-
-    /// The default single-privacy-domain refusal (dashpay/platform#4184) must
-    /// cross as the dedicated `ErrorAssetLockCrossDomainConsentRequired` (30) code
-    /// so hosts can prompt for consent and re-issue, instead of seeing an opaque
-    /// insufficient-funds/unknown error even though the union covers the amount.
-    #[test]
-    fn asset_lock_cross_domain_consent_required_maps_to_dedicated_code() {
-        let err = PlatformWalletError::AssetLockCrossDomainConsentRequired {
-            transparent_available: 9_000_000,
-            cross_domain_available: 18_000_000,
-            required: 15_000_000,
-        };
-        let rendered = err.to_string();
-        let result: PlatformWalletFFIResult = err.into();
-        assert_eq!(
-            result.code,
-            PlatformWalletFFIResultCode::ErrorAssetLockCrossDomainConsentRequired,
-        );
-        assert!(!result.message.is_null());
-        let msg = unsafe { std::ffi::CStr::from_ptr(result.message) }
-            .to_string_lossy()
-            .into_owned();
-        assert_eq!(msg, rendered);
     }
 
     /// `WalletAlreadyExists` maps to the dedicated
