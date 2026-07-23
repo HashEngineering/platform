@@ -177,7 +177,7 @@ sealed class DashSdkError(
             )
 
         /**
-         * `ErrorStaleReservationToken` (native code 26). A deferred
+         * `ErrorStaleReservationToken` (native code 27). A deferred
          * (BIP70/BIP270) [broadcastSigned][org.dashfoundation.dashsdk.wallet.ManagedPlatformWallet.broadcastSigned]
          * token has outlived its funding reservation's lifetime: key-wallet's
          * TTL may already have swept and re-selected the inputs, so acting on it
@@ -194,7 +194,7 @@ sealed class DashSdkError(
             PlatformWallet(message, cause)
 
         /**
-         * `ErrorReservationTokenConsumed` (native code 27). A deferred
+         * `ErrorReservationTokenConsumed` (native code 28). A deferred
          * (BIP70/BIP270) [broadcastSigned][org.dashfoundation.dashsdk.wallet.ManagedPlatformWallet.broadcastSigned]
          * token is unknown, already broadcast, or already released — the guard
          * that turns a double-broadcast (or a broadcast after release) into a
@@ -207,7 +207,7 @@ sealed class DashSdkError(
             PlatformWallet(message, cause)
 
         /**
-         * `ErrorReservationWalletMismatch` (native code 28). A deferred
+         * `ErrorReservationWalletMismatch` (native code 29). A deferred
          * (BIP70/BIP270) [broadcastSigned][org.dashfoundation.dashsdk.wallet.ManagedPlatformWallet.broadcastSigned]
          * token was minted against a different wallet *generation* than the one
          * broadcasting it (e.g. a wallet re-created under the same id); its
@@ -288,9 +288,9 @@ sealed class DashSdkError(
             23 -> PlatformWallet.AssetLockNotTracked(message, cause) // ErrorAssetLockNotTracked
             24 -> PlatformWallet.AssetLockAlreadyConsumed(message, cause) // ErrorAssetLockAlreadyConsumed
             25 -> PlatformWallet.AssetLockFundingMismatch(message, cause) // ErrorAssetLockFundingMismatch
-            26 -> PlatformWallet.StaleReservationToken(message, cause) // ErrorStaleReservationToken
-            27 -> PlatformWallet.ReservationTokenConsumed(message, cause) // ErrorReservationTokenConsumed
-            28 -> PlatformWallet.ReservationWalletMismatch(message, cause) // ErrorReservationWalletMismatch
+            27 -> PlatformWallet.StaleReservationToken(message, cause) // ErrorStaleReservationToken
+            28 -> PlatformWallet.ReservationTokenConsumed(message, cause) // ErrorReservationTokenConsumed
+            29 -> PlatformWallet.ReservationWalletMismatch(message, cause) // ErrorReservationWalletMismatch
             else -> PlatformWallet.Generic(code, message, cause)
         }
     }
