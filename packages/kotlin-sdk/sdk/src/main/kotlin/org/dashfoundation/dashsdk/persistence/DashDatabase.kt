@@ -10,6 +10,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import org.dashfoundation.dashsdk.persistence.converters.Converters
 import org.dashfoundation.dashsdk.persistence.dao.AccountDao
 import org.dashfoundation.dashsdk.persistence.dao.AssetLockDao
+import org.dashfoundation.dashsdk.persistence.dao.InvitationDao
 import org.dashfoundation.dashsdk.persistence.dao.CoreAddressDao
 import org.dashfoundation.dashsdk.persistence.dao.DashpayDao
 import org.dashfoundation.dashsdk.persistence.dao.DataContractDao
@@ -27,6 +28,7 @@ import org.dashfoundation.dashsdk.persistence.dao.WalletDao
 import org.dashfoundation.dashsdk.persistence.dao.WalletManagerMetadataDao
 import org.dashfoundation.dashsdk.persistence.entities.AccountEntity
 import org.dashfoundation.dashsdk.persistence.entities.AssetLockEntity
+import org.dashfoundation.dashsdk.persistence.entities.InvitationEntity
 import org.dashfoundation.dashsdk.persistence.entities.CoreAddressEntity
 import org.dashfoundation.dashsdk.persistence.entities.DashpayContactProfileEntity
 import org.dashfoundation.dashsdk.persistence.entities.DashpayContactRequestEntity
@@ -99,9 +101,16 @@ import org.dashfoundation.dashsdk.persistence.entities.WalletManagerMetadataEnti
  * Version 7 (provider restore): adds transaction block position and an
  * explicit transaction↔typed-account involvement table for payload-only
  * provider transactions.
+ *
+ * Version 8 (DIP-13 sent invitations): adds the `invitations` table — one
+ * row per funded one-time asset-lock voucher, keyed by its 36-byte funding
+ * outpoint. Durable storage here is what lets the Rust `create_invitation`
+ * durability gate mint a voucher (a non-durable store could re-export the
+ * same one-time key after a restart). Rows die with their wallet via the
+ * `deleteWalletData` cascade.
  */
 @Database(
-    version = 7,
+    version = 8,
     exportSchema = true,
     entities = [
         WalletEntity::class,
@@ -111,6 +120,7 @@ import org.dashfoundation.dashsdk.persistence.entities.WalletManagerMetadataEnti
         TxoEntity::class,
         CoreAddressEntity::class,
         AssetLockEntity::class,
+        InvitationEntity::class,
         IdentityEntity::class,
         PublicKeyEntity::class,
         DpnsNameEntity::class,
@@ -148,6 +158,7 @@ abstract class DashDatabase : RoomDatabase() {
     abstract fun txoDao(): TxoDao
     abstract fun coreAddressDao(): CoreAddressDao
     abstract fun assetLockDao(): AssetLockDao
+    abstract fun invitationDao(): InvitationDao
     abstract fun identityDao(): IdentityDao
     abstract fun publicKeyDao(): PublicKeyDao
     abstract fun dpnsNameDao(): DpnsNameDao
@@ -450,6 +461,37 @@ abstract class DashDatabase : RoomDatabase() {
         }
 
         /**
+         * v7 → v8: new `invitations` table (DIP-13 sent-invitation vouchers),
+         * one row per 36-byte funding outpoint. Additive — creates the table
+         * plus its `walletId` index. SQL mirrors the exported
+         * `schemas/.../8.json` `createSql` for the `invitations` entity
+         * exactly. Durability here is load-bearing: wiring the Rust
+         * `tramp_persist_invitations` callback flips `FFIPersister` to report
+         * the `INVITATIONS` capability, which the `create_invitation`
+         * durability gate requires before minting a one-time voucher.
+         */
+        val MIGRATION_7_8: Migration = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `invitations` (" +
+                        "`outPoint` BLOB NOT NULL, " +
+                        "`walletId` BLOB NOT NULL, " +
+                        "`fundingIndex` INTEGER NOT NULL, " +
+                        "`amountDuffs` INTEGER NOT NULL, " +
+                        "`expiryUnix` INTEGER NOT NULL, " +
+                        "`createdAtSecs` INTEGER NOT NULL, " +
+                        "`hasInviter` INTEGER NOT NULL, " +
+                        "`statusRaw` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`outPoint`))",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_invitations_walletId` " +
+                        "ON `invitations` (`walletId`)",
+                )
+            }
+        }
+
+        /**
          * Build the on-disk database. WAL is Room's default journal mode on
          * API 16+; writes go through the persistence handler inside
          * `withTransaction`, mirroring the changeset bracketing contract of
@@ -464,6 +506,7 @@ abstract class DashDatabase : RoomDatabase() {
                     MIGRATION_4_5,
                     MIGRATION_5_6,
                     MIGRATION_6_7,
+                    MIGRATION_7_8,
                 )
                 .build()
 
