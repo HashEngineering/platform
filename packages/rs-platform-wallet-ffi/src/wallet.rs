@@ -390,6 +390,124 @@ pub unsafe extern "C" fn platform_wallet_manager_masternode_withdraw(
 /// Destroy a PlatformWallet handle.
 #[no_mangle]
 pub unsafe extern "C" fn platform_wallet_destroy(handle: Handle) -> PlatformWalletFFIResult {
-    PLATFORM_WALLET_STORAGE.remove(handle);
+    // Remove this handle first so it is excluded from the final-alias scan
+    // below (and so a concurrent lookup can no longer resolve it).
+    let Some(wallet) = PLATFORM_WALLET_STORAGE.remove(handle) else {
+        return PlatformWalletFFIResult::ok();
+    };
+
+    // `platform_wallet_manager_get_wallet` hands out an independent handle for
+    // each alias of the same wallet *generation* (they share the underlying
+    // `WalletManager` `Arc`, `wallet_id`, and the per-generation balance `Arc`).
+    // A deferred-payment token minted through one alias must NOT be invalidated
+    // when a *sibling* alias of the same generation is destroyed — the token is
+    // still live and broadcastable through the survivor.
+    //
+    // So only reconcile when THIS is the final live alias of the generation: no
+    // other stored handle is the same generation
+    // (`CoreWallet::is_same_generation`). While a sibling is live, the
+    // destructor just drops this handle.
+    //
+    // Once the last alias goes, RELEASE (not merely drop) each of this
+    // generation's deferred-payment reservations: destroying the last wrapper
+    // handle does NOT remove the logical wallet from its manager, so the wallet
+    // — and its accounts' still-live `ReservationSet`s — remain, and the same
+    // wallet can be handed out again. Dropping the tokens without releasing
+    // would leave those inputs reserved until key-wallet's TTL. Releasing here
+    // also frees the registry's `CoreWallet` pin on the shared `WalletManager`.
+    // (Actual generation teardown — `remove_wallet` — instead drops the tokens,
+    // since the reservation ceases to exist with the generation.)
+    let core = wallet.core();
+    let sibling_alias_alive =
+        PLATFORM_WALLET_STORAGE.any(|other| other.core().is_same_generation(core));
+    if !sibling_alias_alive {
+        runtime().block_on(
+            crate::core_wallet::signed_payment::SIGNED_PAYMENT_REGISTRY
+                .release_entries_for_wallet(core),
+        );
+    }
     PlatformWalletFFIResult::ok()
+}
+
+#[cfg(test)]
+mod destroy_tests {
+    use super::*;
+    use crate::core_wallet::signed_payment::SIGNED_PAYMENT_REGISTRY;
+    use key_wallet::wallet::managed_wallet_info::transaction_building::AccountTypePreference;
+    use platform_wallet::test_support::test_platform_wallet_manager;
+
+    fn dummy_tx() -> dashcore::Transaction {
+        dashcore::Transaction {
+            version: 3,
+            lock_time: 0,
+            input: vec![],
+            output: vec![],
+            special_transaction_payload: None,
+        }
+    }
+
+    /// Destroying one alias handle of a logical wallet must NOT invalidate a
+    /// deferred-payment token registered against a sibling alias: the sweep runs
+    /// only when the FINAL alias is destroyed. Proves the
+    /// `platform_wallet_destroy` final-alias gating.
+    #[test]
+    fn destroying_one_alias_keeps_a_siblings_token() {
+        // Async setup only. `platform_wallet_destroy` now itself does
+        // `runtime().block_on(...)` to release reservations, exactly as it does
+        // when called from the JNI / NativeCleaner threads (never from inside a
+        // tokio runtime). Calling it from within an outer `block_on` would nest
+        // runtimes and abort, so the destroys run on the plain test thread below.
+        let (manager, handle_a, handle_b, baseline) = runtime().block_on(async {
+            let (manager, wallet_id) = test_platform_wallet_manager().await;
+
+            // Two independent handles for the SAME logical wallet, exactly as two
+            // `platform_wallet_manager_get_wallet` calls would hand out.
+            let alias_a = manager.get_wallet(&wallet_id).await.expect("alias a");
+            let alias_b = manager.get_wallet(&wallet_id).await.expect("alias b");
+            let core = alias_a.core().clone();
+            let handle_a = PLATFORM_WALLET_STORAGE.insert(alias_a);
+            let handle_b = PLATFORM_WALLET_STORAGE.insert(alias_b);
+
+            // Register a deferred-payment token (the process-global registry is
+            // shared, so reason about deltas against a captured baseline).
+            let baseline = SIGNED_PAYMENT_REGISTRY.outstanding();
+            let _token = SIGNED_PAYMENT_REGISTRY
+                .register(
+                    core.clone(),
+                    dummy_tx(),
+                    AccountTypePreference::BIP44,
+                    0,
+                    // This test exercises only the destroy-time sweep, not the
+                    // age guard, so the reservation height is irrelevant here.
+                    None,
+                    // The dummy tx reserved nothing, so there is no funding token
+                    // to owner-guard against — the destroy sweep drops the entry.
+                    None,
+                )
+                .await;
+            assert_eq!(SIGNED_PAYMENT_REGISTRY.outstanding(), baseline + 1);
+            (manager, handle_a, handle_b, baseline)
+        });
+
+        // Destroy alias A while B is still live → token must survive.
+        let result = unsafe { platform_wallet_destroy(handle_a) };
+        assert_eq!(result.code, PlatformWalletFFIResultCode::Success);
+        assert_eq!(
+            SIGNED_PAYMENT_REGISTRY.outstanding(),
+            baseline + 1,
+            "a sibling alias's token must survive destroying another alias"
+        );
+
+        // Destroy the final alias B → now the token is swept.
+        let result = unsafe { platform_wallet_destroy(handle_b) };
+        assert_eq!(result.code, PlatformWalletFFIResultCode::Success);
+        assert_eq!(
+            SIGNED_PAYMENT_REGISTRY.outstanding(),
+            baseline,
+            "destroying the final alias must sweep the wallet's tokens"
+        );
+
+        // Keep the manager alive until the end (owns the wallet + adapter).
+        drop(manager);
+    }
 }

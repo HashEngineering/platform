@@ -235,6 +235,51 @@ sealed class DashSdkError(
         }
 
         /**
+         * `ErrorStaleReservationToken` (native code 27). A deferred
+         * (BIP70/BIP270) [broadcastSigned][org.dashfoundation.dashsdk.wallet.ManagedPlatformWallet.broadcastSigned]
+         * token has outlived its funding reservation's lifetime: key-wallet's
+         * TTL may already have swept and re-selected the inputs, so acting on it
+         * could touch a newer, unrelated reservation. The call did NOT touch the
+         * network. NOT retryable in place — rebuild the payment with
+         * [buildSignedPayment][org.dashfoundation.dashsdk.wallet.ManagedPlatformWallet.buildSignedPayment].
+         *
+         * Sibling of the other two deferred-token failures this code used to
+         * conflate: [ReservationTokenConsumed] (unknown / already broadcast /
+         * already released) and [ReservationWalletMismatch] (minted against a
+         * different wallet generation).
+         */
+        class StaleReservationToken(message: String, cause: Throwable? = null) :
+            PlatformWallet(message, cause)
+
+        /**
+         * `ErrorReservationTokenConsumed` (native code 28). A deferred
+         * (BIP70/BIP270) [broadcastSigned][org.dashfoundation.dashsdk.wallet.ManagedPlatformWallet.broadcastSigned]
+         * token is unknown, already broadcast, or already released — the guard
+         * that turns a double-broadcast (or a broadcast after release) into a
+         * typed error instead of a second send. The call did NOT touch the
+         * network. NOT retryable: rebuild the payment with
+         * [buildSignedPayment][org.dashfoundation.dashsdk.wallet.ManagedPlatformWallet.buildSignedPayment].
+         * (Release is idempotent and never raises this.)
+         */
+        class ReservationTokenConsumed(message: String, cause: Throwable? = null) :
+            PlatformWallet(message, cause)
+
+        /**
+         * `ErrorReservationWalletMismatch` (native code 32; renumbered off 29
+         * during the v4.1 re-integration, where 29 is
+         * [AssetLockInsufficientFunds]). A deferred
+         * (BIP70/BIP270) [broadcastSigned][org.dashfoundation.dashsdk.wallet.ManagedPlatformWallet.broadcastSigned]
+         * token was minted against a different wallet *generation* than the one
+         * broadcasting it (e.g. a wallet re-created under the same id); its
+         * reservation lives in that other generation's reservation set. The call
+         * did NOT touch the network and did NOT consume the rightful owner's
+         * token. NOT retryable through this handle: rebuild the payment with
+         * [buildSignedPayment][org.dashfoundation.dashsdk.wallet.ManagedPlatformWallet.buildSignedPayment].
+         */
+        class ReservationWalletMismatch(message: String, cause: Throwable? = null) :
+            PlatformWallet(message, cause)
+
+        /**
          * `PlatformWalletFFIResultCode::NotFound` (native code 98,
          * [PLATFORM_WALLET_NOT_FOUND_CODE]) — the code the FFI's blanket
          * `Option → result` conversion emits for every "requested <thing>
@@ -360,13 +405,18 @@ sealed class DashSdkError(
             23 -> PlatformWallet.AssetLockNotTracked(message, cause) // ErrorAssetLockNotTracked
             24 -> PlatformWallet.AssetLockAlreadyConsumed(message, cause) // ErrorAssetLockAlreadyConsumed
             25 -> PlatformWallet.AssetLockFundingMismatch(message, cause) // ErrorAssetLockFundingMismatch
+            27 -> PlatformWallet.StaleReservationToken(message, cause) // ErrorStaleReservationToken
+            28 -> PlatformWallet.ReservationTokenConsumed(message, cause) // ErrorReservationTokenConsumed
             29 -> PlatformWallet.AssetLockInsufficientFunds(message, cause) // ErrorAssetLockInsufficientFunds
             // ErrorSigningKeyUnavailable — the STRUCTURED signer
             // discriminator (dashpay/platform#4060 finding 7): the typed
             // completion code rides the whole Rust round-trip, no message
-            // sniffing involved. (Codes 27-28/30 remain reserved by sibling PRs
-            // #4185 / #4184 — see PlatformWalletFFIResultCode.)
+            // sniffing involved. (Code 30 remains reserved by sibling PR
+            // #4184 — see PlatformWalletFFIResultCode.)
             31 -> PlatformWallet.SigningKeyUnavailable(message, cause)
+            // ErrorReservationWalletMismatch — renumbered off 29 during the
+            // v4.1 re-integration (29 is ErrorAssetLockInsufficientFunds).
+            32 -> PlatformWallet.ReservationWalletMismatch(message, cause) // ErrorReservationWalletMismatch
             else ->
                 // @Deprecated fallback — see the code-6 arm; code 31 is the
                 // real discriminator.

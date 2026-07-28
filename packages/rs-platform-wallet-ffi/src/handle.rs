@@ -71,12 +71,38 @@ impl<T> HandleStorage<T> {
         guard.get(&handle).map(f)
     }
 
+    /// Whether any currently-stored item satisfies `predicate`. Used to detect
+    /// whether a logical resource still has a live handle after one of its
+    /// aliases is removed (e.g. the final-alias check in
+    /// `platform_wallet_destroy`).
+    pub fn any<F>(&self, predicate: F) -> bool
+    where
+        F: Fn(&T) -> bool,
+    {
+        self.items.read().values().any(predicate)
+    }
+
     pub fn with_item_mut<F, R>(&self, handle: Handle, f: F) -> Option<R>
     where
         F: FnOnce(&mut T) -> R,
     {
         let mut guard = self.items.write();
         guard.get_mut(&handle).map(f)
+    }
+
+    /// Remove (and drop) every stored item satisfying `predicate`, returning how
+    /// many were removed. Used to sweep a wallet generation's handles at
+    /// teardown (e.g. abandon every finalized-transaction V2 handle whose
+    /// originating wallet was just removed from its manager — the reservation
+    /// ceases to exist with the generation, so dropping is the correct action).
+    pub fn remove_matching<F>(&self, predicate: F) -> usize
+    where
+        F: Fn(&T) -> bool,
+    {
+        let mut guard = self.items.write();
+        let before = guard.len();
+        guard.retain(|_, item| !predicate(item));
+        before - guard.len()
     }
 }
 

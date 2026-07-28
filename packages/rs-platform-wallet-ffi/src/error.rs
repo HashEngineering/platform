@@ -173,14 +173,17 @@ pub enum PlatformWalletFFIResultCode {
     /// host may safely retry after addressing the rejection reason.
     ErrorTransactionBroadcastRejected = 26,
     // Code 26 above (ErrorTransactionBroadcastRejected) landed on v4.1-dev.
-    // Codes 27-28 remain reserved: the deferred-payment reservation-token
-    // errors (ErrorStaleReservationToken / ErrorReservationTokenConsumed /
-    // ErrorReservationWalletMismatch) claim them on the split-build-broadcast
-    // branch (dashpay/platform#4185) — which must now itself renumber off 26,
-    // since v4.1-dev took it. Code 30 (ErrorAssetLockCrossDomainConsentRequired)
-    // is likewise reserved on the multi-account branch (dashpay/platform#4184);
-    // allocating any reserved code here too would merge without textual conflict
-    // and silently misclassify across hosts.
+    // Post-reintegration allocation of the 27-32 range:
+    //   27  ErrorStaleReservationToken          (#4185)
+    //   28  ErrorReservationTokenConsumed        (#4185)
+    //   29  ErrorAssetLockInsufficientFunds      (#4184)
+    //   30  reserved: ErrorAssetLockCrossDomainConsentRequired (#4184, not yet
+    //       allocated in any merged branch)
+    //   31  ErrorSigningKeyUnavailable           (#4183)
+    //   32  ErrorReservationWalletMismatch       (#4185, renumbered off 29 which
+    //       #4184 took under the reserved-slot plan)
+    // The variants themselves are declared below in source order, not numeric
+    // order.
     /// Asset-lock coin selection came up short over the *permitted* funding set
     /// (dashpay/platform#4073 request 3). Carries the structured
     /// `available`/`required` duff amounts in the message string. Distinct from
@@ -200,6 +203,43 @@ pub enum PlatformWalletFFIResultCode {
     /// wallet-operation failure. Not retryable as-is — the key must be
     /// (re-)derived first.
     ErrorSigningKeyUnavailable = 31,
+
+    /// Maps `SignedPaymentError::StaleReservationToken` from the deferred
+    /// build → broadcast/release core-send lifecycle (`core_wallet_signed_payment_*`):
+    /// the token has outlived the registry's `RESERVATION_MAX_AGE_BLOCKS` bound
+    /// and its funding reservation may already have been swept and re-selected by
+    /// key-wallet's TTL, so acting on it could touch a newer, unrelated
+    /// reservation. The operation did NOT touch the network. NOT retryable in
+    /// place — the host must rebuild the payment.
+    ///
+    /// Sibling codes split out the other two deferred-token failures that this
+    /// code used to conflate: [`Self::ErrorReservationTokenConsumed`] (28,
+    /// unknown / already broadcast / already released) and
+    /// [`Self::ErrorReservationWalletMismatch`] (32, minted against a different
+    /// wallet generation). All three are non-retryable-in-place and none touched
+    /// the network; they are distinct codes so a host can message each precisely.
+    ErrorStaleReservationToken = 27,
+
+    /// Maps `SignedPaymentError::StaleToken`. The deferred reservation token is
+    /// unknown, already broadcast, or already released — the guard that turns a
+    /// double-broadcast (or a broadcast after release) into a typed error
+    /// instead of a second send. Did NOT touch the network; NOT retryable
+    /// (rebuild the payment). Release is idempotent and never surfaces this.
+    ErrorReservationTokenConsumed = 28,
+
+    /// Maps `SignedPaymentError::WalletMismatch`. The deferred reservation token
+    /// was minted against a different wallet *generation* than the one it is
+    /// being broadcast through (e.g. a wallet re-created under the same id); its
+    /// reservation lives in that other generation's `ReservationSet`. Did NOT
+    /// touch the network and did NOT consume the rightful owner's token; NOT
+    /// retryable through this handle (rebuild the payment).
+    ///
+    /// Renumbered 29 → 32 during the v4.1 re-integration: code 29 was taken by
+    /// [`Self::ErrorAssetLockInsufficientFunds`] (dashpay/platform#4184) under
+    /// the reserved-slot plan, and 30/31 are reserved/allocated
+    /// (AssetLockCrossDomainConsentRequired / ErrorSigningKeyUnavailable), so
+    /// this sibling reservation-token error moved to the first free slot, 32.
+    ErrorReservationWalletMismatch = 32,
 
     NotFound = 98, // Used exclusively for all the Option that are retuned as errors
     ErrorUnknown = 99,
