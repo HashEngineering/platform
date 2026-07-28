@@ -288,6 +288,9 @@ impl PlatformWallet {
                         // Bounded: a ChainLock timeout here is the deliberate
                         // unconfirmed-ancestor pacing signal this loop retries on.
                         Some(CL_FALLBACK_TIMEOUT),
+                        // Pool seeding funds from the unmixed BIP44 account
+                        // (dashpay/platform#4184); no explicit funding path.
+                        None,
                     )
                     .await
                 {

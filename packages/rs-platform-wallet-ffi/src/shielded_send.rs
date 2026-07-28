@@ -128,6 +128,40 @@ unsafe fn parse_required_platform_address(
     }
 }
 
+/// Decode an OPTIONAL BIP32 derivation-path string from a raw `(ptr, len)` pair
+/// over the C ABI. A null pointer or zero length is `None` (the default: fund
+/// from the unmixed BIP44 account). Otherwise the bytes are parsed as a UTF-8
+/// BIP32 path (e.g. `"m/44'/5'/0'"`); invalid UTF-8 or a malformed path is a
+/// hard `ErrorInvalidParameter`.
+///
+/// # Safety
+/// `ptr`, when non-null, must point to `len` readable bytes for the duration of
+/// the call.
+unsafe fn parse_optional_derivation_path(
+    ptr: *const u8,
+    len: usize,
+) -> Result<Option<key_wallet::bip32::DerivationPath>, PlatformWalletFFIResult> {
+    use std::str::FromStr;
+    if ptr.is_null() || len == 0 {
+        return Ok(None);
+    }
+    let bytes = std::slice::from_raw_parts(ptr, len);
+    let text = std::str::from_utf8(bytes).map_err(|e| {
+        PlatformWalletFFIResult::err(
+            PlatformWalletFFIResultCode::ErrorInvalidParameter,
+            format!("funding_path is not valid UTF-8: {e}"),
+        )
+    })?;
+    key_wallet::bip32::DerivationPath::from_str(text)
+        .map(Some)
+        .map_err(|e| {
+            PlatformWalletFFIResult::err(
+                PlatformWalletFFIResultCode::ErrorInvalidParameter,
+                format!("invalid funding_path derivation path {text:?}: {e}"),
+            )
+        })
+}
+
 /// Kick off the Halo 2 proving-key build on a background tokio
 /// worker if it hasn't been built yet. Returns immediately —
 /// hosts can call this at app startup without blocking the UI
@@ -921,12 +955,23 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_shield(
 /// for a future DPP-side Orchard multi-output bundle change; today
 /// the orchestration rejects anything but a single recipient.
 ///
+/// `funding_path_ptr` / `funding_path_len` optionally supply a UTF-8 BIP32
+/// derivation-path string (e.g. `"m/44'/5'/0'"`) naming the SINGLE funds account
+/// whose UTXOs fund the L1 asset lock (dashpay/platform#4184). Pass `null` / `0`
+/// for the default — the unmixed BIP44 account at `account_index`. Pass an
+/// explicit account-level path (e.g. the DIP-9 CoinJoin account path) to shield
+/// previously-mixed coins from that one account. There is no union across
+/// accounts and no consent gate: exactly one funding source participates, and if
+/// it cannot cover the lock the call fails with `ErrorAssetLockInsufficientFunds`.
+///
 /// # Safety
 /// - `wallet_id_bytes` must point to 32 readable bytes.
 /// - `recipient_raw_43` must point to 43 readable bytes (raw
 ///   Orchard payment address: 11-byte diversifier + 32-byte pk_d).
 /// - `surplus_output_ptr`, when non-null, must point to
 ///   `surplus_output_len` readable bytes for the duration of the call.
+/// - `funding_path_ptr`, when non-null, must point to `funding_path_len`
+///   readable bytes (UTF-8) for the duration of the call.
 /// - `core_signer_handle` must be a valid, non-destroyed
 ///   `*mut MnemonicResolverHandle` produced by
 ///   `dash_sdk_mnemonic_resolver_create`. The caller retains
@@ -942,6 +987,8 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_fund_from_asset_lock(
     surplus_output_ptr: *const u8,
     surplus_output_len: usize,
     core_signer_handle: *mut MnemonicResolverHandle,
+    funding_path_ptr: *const u8,
+    funding_path_len: usize,
 ) -> PlatformWalletFFIResult {
     check_ptr!(wallet_id_bytes);
     check_ptr!(recipient_raw_43);
@@ -968,6 +1015,11 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_fund_from_asset_lock(
         "surplus_output",
     ) {
         Ok(s) => s,
+        Err(result) => return result,
+    };
+
+    let funding_path = match parse_optional_derivation_path(funding_path_ptr, funding_path_len) {
+        Ok(p) => p,
         Err(result) => return result,
     };
 
@@ -1018,16 +1070,48 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_fund_from_asset_lock(
                 // User-facing funding: wait for the ChainLock indefinitely —
                 // a broadcast asset lock is pending finality, never failed.
                 None,
+                // Single funds account named by the caller's derivation path
+                // (dashpay/platform#4184); `None` = the unmixed BIP44 account.
+                funding_path,
             )
             .await
     });
     if let Err(e) = result {
+        // Preserve the typed FFI code so the asset-lock shortfall
+        // (`AssetLockInsufficientFunds`) reaches the host as its dedicated code
+        // instead of the generic `ErrorWalletOperation` — the host surfaces the
+        // shortfall accordingly. The message stays prefixed for continuity with
+        // the existing dash-wallet log matcher. A genuinely-generic failure maps
+        // to `ErrorWalletOperation` (this entry point's historical generic code),
+        // NOT the catch-all `ErrorUnknown` that
+        // `for_platform_wallet_error` returns for unmapped variants.
+        let code = platform_wallet_error_code_or_wallet_operation(&e);
         return PlatformWalletFFIResult::err(
-            PlatformWalletFFIResultCode::ErrorWalletOperation,
+            code,
             format!("shielded fund-from-asset-lock failed: {e}"),
         );
     }
     PlatformWalletFFIResult::ok()
+}
+
+/// Map a [`PlatformWalletError`] to its dedicated FFI code, falling back to
+/// `ErrorWalletOperation` (this module's historical generic funding-failure
+/// code) instead of the catch-all `ErrorUnknown` that
+/// [`PlatformWalletFFIResultCode::for_platform_wallet_error`] returns for
+/// variants without a dedicated code. Typed variants (e.g.
+/// `AssetLockInsufficientFunds`) keep their dedicated code; only the generic
+/// arm changes, restoring the pre-re-scope contract where a generic
+/// fund-from-asset-lock failure surfaced as `ErrorWalletOperation(6)` rather
+/// than `ErrorUnknown(99)`.
+fn platform_wallet_error_code_or_wallet_operation(
+    error: &PlatformWalletError,
+) -> PlatformWalletFFIResultCode {
+    match PlatformWalletFFIResultCode::for_platform_wallet_error(error) {
+        PlatformWalletFFIResultCode::ErrorUnknown => {
+            PlatformWalletFFIResultCode::ErrorWalletOperation
+        }
+        typed => typed,
+    }
 }
 
 /// Resume a shielded fund-from-asset-lock by outpoint.
@@ -1165,12 +1249,20 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_resume_fund_from_asset
                 // User-facing funding: wait for the ChainLock indefinitely —
                 // a broadcast asset lock is pending finality, never failed.
                 None,
+                // Resume replays an already-broadcast lock (no fresh coin
+                // selection), so the funding-source path is inert here.
+                None,
             )
             .await
     });
     if let Err(e) = result {
+        // Keep the typed code (a resume can still surface asset-lock shortfalls),
+        // but map a genuinely-generic failure to `ErrorWalletOperation` rather
+        // than the catch-all `ErrorUnknown` — same generic-arm contract as the
+        // build entry point above.
+        let code = platform_wallet_error_code_or_wallet_operation(&e);
         return PlatformWalletFFIResult::err(
-            PlatformWalletFFIResultCode::ErrorWalletOperation,
+            code,
             format!("shielded resume fund-from-asset-lock failed: {e}"),
         );
     }

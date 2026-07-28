@@ -121,20 +121,36 @@ pub enum AssetLockFunding {
     /// - `AssetLockAddressTopUp` — for platform-address funding flows
     /// - others — see [`AssetLockFundingType`]
     ///
-    /// `account_index` selects which BIP44 *standard* account (by
-    /// BIP44 account index) supplies the UTXOs. Only BIP44 standard
-    /// accounts are supported today — CoinJoin / BIP32 funding for
-    /// any asset-lock-funded operation is out of scope and would
-    /// require additional plumbing in
-    /// [`AssetLockManager::create_funded_asset_lock_proof`].
+    /// `account_index` selects the BIP44 *standard* account that supplies the
+    /// transparent CHANGE address (key-wallet derives change only on Standard
+    /// accounts, so a non-Standard funding source must still sink change here).
+    /// For non-shielded funding it is also the sole INPUT source.
+    ///
+    /// Input SELECTION scope depends on the funding type:
+    ///
+    /// - `AssetLockShieldedAddressTopUp` — funds strictly from the SINGLE funds
+    ///   account named by the caller's `funding_path` argument
+    ///   (dashpay/platform#4184): `None` funds from the unmixed BIP44 account at
+    ///   `account_index`, while an explicit account-level path (e.g. the DIP-9
+    ///   CoinJoin account) funds from that one account so previously-mixed
+    ///   CoinJoin coins can be shielded (dashpay/platform#4073), with change
+    ///   routed to the BIP44 account. There is no union across accounts and no
+    ///   privacy-domain consent gate — the caller names exactly one funding
+    ///   source, and that account's OWN reservation ledger gates concurrent
+    ///   builds against its UTXOs. See
+    ///   [`AssetLockManager::build_asset_lock_tx_from_selected_account`].
+    /// - every other funding type — funds from the single BIP44 account at
+    ///   `account_index` only (spending mixed CoinJoin coins into an
+    ///   identity registration would de-anonymize them). This is the pinned
+    ///   key-wallet `build_asset_lock_with_signer` behavior, whose reservation
+    ///   ledger gates concurrent builds on that BIP44 account.
     FromWalletBalance {
         /// Amount to lock (in duffs).
         amount_duffs: u64,
-        /// BIP44 standard-account index to draw the funding UTXOs from.
-        ///
-        /// Only BIP44 standard accounts (`AccountType::Standard` with
-        /// `StandardAccountTypeTag::Bip44`) are supported today;
-        /// CoinJoin / BIP32 are not.
+        /// BIP44 standard-account index. Supplies the transparent change
+        /// address, and for non-shielded funding is also the input source. For
+        /// shielded funding the inputs come from the single account named by the
+        /// caller's `funding_path` (`None` = this BIP44 account); see above.
         account_index: u32,
     },
 
@@ -386,12 +402,21 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
     /// carries the *exact* outpoint that timed out (no
     /// `find_tracked_unproven_lock` BTreeMap walk needed), so the
     /// `IsTimeout` outcome is built directly from the error payload.
+    ///
+    /// `funding_path` selects the single funds account for shielded
+    /// fund-from-asset-lock's fresh `FromWalletBalance` build (`None` = the
+    /// unmixed BIP44 account at the funding `account_index`; `Some(path)` = the
+    /// one funds account whose account-level path equals `path`, e.g. CoinJoin).
+    /// Non-shielded funding ignores it, and the `FromExistingAssetLock` resume
+    /// path ignores it too (the lock is already on-chain, so no fresh coin
+    /// selection occurs). See [`Self::build_asset_lock_transaction`].
     pub(crate) async fn resolve_funding_with_is_timeout_fallback<AS>(
         &self,
         funding: AssetLockFunding,
         funding_type: AssetLockFundingType,
         destination_index: u32,
         asset_lock_signer: &AS,
+        funding_path: Option<::key_wallet::bip32::DerivationPath>,
     ) -> Result<FundingResolution, PlatformWalletError>
     where
         AS: ::key_wallet::signer::ExtendedPubKeySigner + Send + Sync,
@@ -408,6 +433,7 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
                         funding_type,
                         destination_index,
                         asset_lock_signer,
+                        funding_path,
                     )
                     .await
                 {

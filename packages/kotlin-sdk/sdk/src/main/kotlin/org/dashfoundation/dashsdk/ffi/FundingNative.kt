@@ -49,8 +49,15 @@ internal object FundingNative {
      * `platform_wallet_manager_shielded_fund_from_asset_lock`).
      * [recipientRaw43] is the 43-byte raw Orchard address; [surplusOutput]
      * is the optional 21-byte remainder platform address (null = none);
-     * [coreSignerHandle] is the manager's `MnemonicResolverHandle`. Blocks
-     * for the ~30s Halo 2 proof; the note arrives on the next shielded sync.
+     * [coreSignerHandle] is the manager's `MnemonicResolverHandle`.
+     * [fundingPath] is an optional UTF-8 BIP32 derivation-path string
+     * (dashpay/platform#4184) naming the single funds account whose UTXOs fund
+     * the lock: null (the default) funds from the unmixed BIP44 account at
+     * [fundingAccountIndex]; an explicit account-level path (e.g. the DIP-9
+     * CoinJoin account path) funds strictly from that one account, with no union
+     * across accounts and no consent gate. A shortfall throws
+     * [org.dashfoundation.dashsdk.errors.DashSdkError.PlatformWallet.AssetLockInsufficientFunds].
+     * Blocks for the ~30s Halo 2 proof; the note arrives on the next shielded sync.
      */
     external fun shieldedFundFromAssetLock(
         managerHandle: Long,
@@ -60,6 +67,7 @@ internal object FundingNative {
         recipientRaw43: ByteArray,
         surplusOutput: ByteArray?,
         coreSignerHandle: Long,
+        fundingPath: String?,
     )
 
     /**

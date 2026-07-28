@@ -72,8 +72,13 @@ public enum PlatformWalletResultCode: Int32, Sendable {
     // Raw value 26 above (errorTransactionBroadcastRejected) landed on
     // v4.1-dev. Raw values 27-28 remain reserved for the deferred-payment
     // reservation-token errors (dashpay/platform#4185, which must renumber off
-    // 26) and 29/30 for the asset-lock funding errors
+    // 26) and 30 for the asset-lock cross-domain-consent error
     // (dashpay/platform#4184) on sibling branches.
+    /// Asset-lock coin selection came up short over the permitted funding set
+    /// (dashpay/platform#4073 request 3). The structured available/required
+    /// duffs travel in the message string. Distinct from
+    /// `errorCoreInsufficientFunds` (22), which is the atomic Core-send selector.
+    case errorAssetLockInsufficientFunds = 29
     /// A state transition could not be signed because the signer has no
     /// usable private key for the requested public key — restored from the
     /// structured signer completion code (dashpay/platform#4060 finding 7).
@@ -138,6 +143,8 @@ public enum PlatformWalletResultCode: Int32, Sendable {
             self = .errorAssetLockFundingMismatch
         case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_TRANSACTION_BROADCAST_REJECTED:
             self = .errorTransactionBroadcastRejected
+        case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_ASSET_LOCK_INSUFFICIENT_FUNDS:
+            self = .errorAssetLockInsufficientFunds
         case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_SIGNING_KEY_UNAVAILABLE:
             self = .errorSigningKeyUnavailable
         case PLATFORM_WALLET_FFI_RESULT_CODE_NOT_FOUND:
@@ -221,6 +228,16 @@ public enum PlatformWalletError: LocalizedError {
     case assetLockNotTracked(String)
     case assetLockAlreadyConsumed(String)
     case assetLockFundingMismatch(String)
+    /// Asset-lock coin selection came up short over the *permitted* funding
+    /// set (dashpay/platform#4073 request 3): the requested amount plus the L1
+    /// fee exceeds the spendable funds the selector was allowed to draw on.
+    /// Raised strictly pre-broadcast (while building the asset-lock
+    /// transaction), so nothing reached the wire. The structured
+    /// `available`/`required` duff amounts travel in the message
+    /// (`"asset lock coin selection is short: available N duffs, required M
+    /// duffs"`). Distinct from `coreInsufficientFunds`, which is the atomic
+    /// Core-send selector rather than the asset-lock builder.
+    case assetLockInsufficientFunds(String)
     case walletAlreadyExists(String)
     /// Definitive shielded-broadcast failure: the shielded transition
     /// (identity-create or a spend — unshield / transfer / withdrawal) was
@@ -284,6 +301,7 @@ public enum PlatformWalletError: LocalizedError {
              .coreInsufficientFunds(let m),
              .assetLockNotTracked(let m), .assetLockAlreadyConsumed(let m),
              .assetLockFundingMismatch(let m),
+             .assetLockInsufficientFunds(let m),
              .walletAlreadyExists(let m), .shieldedBroadcastFailed(let m),
              .shieldedBroadcastUnconfirmed(let m), .shieldedSpendUnconfirmed(let m),
              .shieldedNoRecordedAnchor(let m),
@@ -321,6 +339,7 @@ public enum PlatformWalletError: LocalizedError {
         case .errorAssetLockNotTracked: self = .assetLockNotTracked(detail)
         case .errorAssetLockAlreadyConsumed: self = .assetLockAlreadyConsumed(detail)
         case .errorAssetLockFundingMismatch: self = .assetLockFundingMismatch(detail)
+        case .errorAssetLockInsufficientFunds: self = .assetLockInsufficientFunds(detail)
         case .errorWalletAlreadyExists: self = .walletAlreadyExists(detail)
         case .errorShieldedBroadcastFailed: self = .shieldedBroadcastFailed(detail)
         case .errorShieldedBroadcastUnconfirmed: self = .shieldedBroadcastUnconfirmed(detail)

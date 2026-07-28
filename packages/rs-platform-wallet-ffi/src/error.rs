@@ -177,11 +177,16 @@ pub enum PlatformWalletFFIResultCode {
     // errors (ErrorStaleReservationToken / ErrorReservationTokenConsumed /
     // ErrorReservationWalletMismatch) claim them on the split-build-broadcast
     // branch (dashpay/platform#4185) — which must now itself renumber off 26,
-    // since v4.1-dev took it — and 29/30 belong to the asset-lock funding
-    // errors (ErrorAssetLockInsufficientFunds /
-    // ErrorAssetLockCrossDomainConsentRequired) on the multi-account branch
-    // (dashpay/platform#4184); allocating any of them here too would merge
-    // without textual conflict and silently misclassify across hosts.
+    // since v4.1-dev took it. Code 30 (ErrorAssetLockCrossDomainConsentRequired)
+    // is likewise reserved on the multi-account branch (dashpay/platform#4184);
+    // allocating any reserved code here too would merge without textual conflict
+    // and silently misclassify across hosts.
+    /// Asset-lock coin selection came up short over the *permitted* funding set
+    /// (dashpay/platform#4073 request 3). Carries the structured
+    /// `available`/`required` duff amounts in the message string. Distinct from
+    /// [`Self::ErrorCoreInsufficientFunds`] (22), which is the atomic Core-send
+    /// selector, not the asset-lock builder.
+    ErrorAssetLockInsufficientFunds = 29,
     /// A state transition could not be signed because the signer has no
     /// usable private key for the requested public key — the stored blob is
     /// missing, stranded, or written under a different Keystore/Keychain
@@ -291,14 +296,20 @@ impl<T> From<Option<T>> for PlatformWalletFFIResult {
     }
 }
 
-impl From<PlatformWalletError> for PlatformWalletFFIResult {
-    fn from(error: PlatformWalletError) -> Self {
+impl PlatformWalletFFIResultCode {
+    /// Map a [`PlatformWalletError`] to its dedicated FFI code without consuming
+    /// the error or allocating a message. Kept separate from the `From` impl so
+    /// FFI entry points that want to keep a *prefixed* message (for host log
+    /// matchers) can still surface the typed code instead of flattening to
+    /// `ErrorWalletOperation`/`ErrorUnknown`. The two must stay in lockstep — the
+    /// `From` impl delegates here.
+    pub fn for_platform_wallet_error(error: &PlatformWalletError) -> Self {
         // Map the typed wallet error variants explicitly so they
         // don't flatten to ErrorUnknown at the FFI boundary. The
         // catch-all ErrorUnknown remains for variants the FFI hasn't
         // assigned a dedicated code yet — those still carry the
         // typed Display rendering as the message.
-        let code = match &error {
+        match error {
             PlatformWalletError::NoSpendableInputs { .. }
             | PlatformWalletError::OnlyOutputAddressesFunded { .. }
             | PlatformWalletError::OnlyDustInputs { .. } => {
@@ -359,6 +370,16 @@ impl From<PlatformWalletError> for PlatformWalletFFIResult {
             PlatformWalletError::AssetLockFundingMismatch { .. } => {
                 PlatformWalletFFIResultCode::ErrorAssetLockFundingMismatch
             }
+            // The asset-lock coin-selection shortfall (dashpay/platform#4073
+            // request 3). Without this arm it flattened to `ErrorUnknown(99)`,
+            // hiding a typed shortfall behind the catch-all and forcing hosts to
+            // string-match the Display text. The structured `available`/`required`
+            // duff amounts still travel in the message (the by-value
+            // `PlatformWalletFFIResult` has no out-params for them), but the code
+            // now lets a host branch on the shortfall without parsing text.
+            PlatformWalletError::AssetLockInsufficientFunds { .. } => {
+                PlatformWalletFFIResultCode::ErrorAssetLockInsufficientFunds
+            }
             // A signer failure can also reach this blanket impl wrapped as
             // `PlatformWalletError::Sdk(dash_sdk::Error::Protocol(..))` (any
             // wallet operation that propagates the SDK error via `?`). The
@@ -373,7 +394,13 @@ impl From<PlatformWalletError> for PlatformWalletFFIResult {
                 PlatformWalletFFIResultCode::ErrorSigningKeyUnavailable
             }
             _ => PlatformWalletFFIResultCode::ErrorUnknown,
-        };
+        }
+    }
+}
+
+impl From<PlatformWalletError> for PlatformWalletFFIResult {
+    fn from(error: PlatformWalletError) -> Self {
+        let code = PlatformWalletFFIResultCode::for_platform_wallet_error(&error);
         PlatformWalletFFIResult::err(code, error.to_string())
     }
 }
@@ -708,6 +735,44 @@ mod tests {
             let result: PlatformWalletFFIResult = error.into();
             assert_eq!(result.code, expected);
         }
+    }
+
+    /// The asset-lock coin-selection shortfall must cross the FFI boundary as the
+    /// dedicated `ErrorAssetLockInsufficientFunds` (29) code — NOT `ErrorUnknown`
+    /// (99) as it did before this arm existed (dashpay/platform#4073 request 3) —
+    /// and its structured `available`/`required` duffs must survive verbatim in
+    /// the message so hosts can still parse the amounts.
+    #[test]
+    fn asset_lock_insufficient_funds_maps_to_dedicated_code() {
+        let err = PlatformWalletError::AssetLockInsufficientFunds {
+            available: 18_000_000,
+            required: 100_000_000,
+        };
+        let rendered = err.to_string();
+        // Guard the exact text hosts (dash-wallet) substring-match on.
+        assert!(
+            rendered.contains("asset lock coin selection is short"),
+            "shortfall Display text changed — coordinate dash-wallet's matcher \
+             (rendered: {rendered})"
+        );
+        let result: PlatformWalletFFIResult = err.into();
+        assert_eq!(
+            result.code,
+            PlatformWalletFFIResultCode::ErrorAssetLockInsufficientFunds,
+            "must not flatten to ErrorUnknown(99) (rendered: {rendered})"
+        );
+        assert_ne!(
+            result.code as i32,
+            PlatformWalletFFIResultCode::ErrorUnknown as i32
+        );
+        assert!(!result.message.is_null());
+        let msg = unsafe { std::ffi::CStr::from_ptr(result.message) }
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            msg, rendered,
+            "structured available/required duffs must survive the FFI boundary verbatim"
+        );
     }
 
     /// `WalletAlreadyExists` maps to the dedicated

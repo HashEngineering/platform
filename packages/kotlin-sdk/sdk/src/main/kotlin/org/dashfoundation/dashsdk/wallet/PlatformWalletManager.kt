@@ -1398,6 +1398,15 @@ class PlatformWalletManager(
      * @param fundingAccountIndex the Core BIP44 account funding the lock.
      * @param amountDuffs the L1 lock amount in duffs.
      * @param surplusOutput optional 21-byte remainder platform address.
+     * @param fundingPath optional UTF-8 BIP32 derivation-path string
+     *   (dashpay/platform#4184) naming the single funds account whose UTXOs fund
+     *   the lock. Defaults to `null`, which funds from the unmixed BIP44 account
+     *   at [fundingAccountIndex]. Pass an explicit account-level path (e.g. the
+     *   DIP-9 CoinJoin account path) to fund strictly from that one account — to
+     *   shield previously-mixed CoinJoin coins, for instance. There is no union
+     *   across accounts and no consent gate: exactly one funding source
+     *   participates, and if it cannot cover the lock this throws
+     *   [org.dashfoundation.dashsdk.errors.DashSdkError.PlatformWallet.AssetLockInsufficientFunds].
      */
     suspend fun shieldedFundFromAssetLock(
         walletId: ByteArray,
@@ -1405,6 +1414,7 @@ class PlatformWalletManager(
         amountDuffs: Long,
         fundingAccountIndex: Int = 0,
         surplusOutput: ByteArray? = null,
+        fundingPath: String? = null,
     ): Unit = teardownGate.op {
         require(amountDuffs > 0) { "amountDuffs must be positive, got $amountDuffs" }
         require(fundingAccountIndex >= 0) {
@@ -1419,6 +1429,7 @@ class PlatformWalletManager(
                 recipientRaw43,
                 surplusOutput,
                 mnemonicResolverHandle,
+                fundingPath,
             )
         }
     }

@@ -99,6 +99,21 @@ sealed class DashSdkError(
             PlatformWallet(message, cause)
 
         /**
+         * `ErrorAssetLockInsufficientFunds` (native code 29). Asset-lock coin
+         * selection came up short over the *permitted* funding set — the requested
+         * amount plus the L1 fee exceeds the spendable funds the selector was
+         * allowed to draw on. Raised strictly pre-broadcast (while BUILDING the
+         * asset-lock transaction), so nothing reached the wire. The structured
+         * `available`/`required` duff amounts travel in [message]
+         * (`"asset lock coin selection is short: available N duffs, required M
+         * duffs"`); the typed code lets callers branch without substring-matching.
+         * Distinct from [CoreInsufficientFunds] (code 22), which is the atomic
+         * Core-send selector rather than the asset-lock builder.
+         */
+        class AssetLockInsufficientFunds(message: String, cause: Throwable? = null) :
+            PlatformWallet(message, cause)
+
+        /**
          * `ErrorShieldedNoRecordedAnchor` (native code 19). A shielded spend
          * could not be built against a Platform-recorded anchor because the
          * local commitment tree is mid-block. Nothing was broadcast and the
@@ -345,10 +360,11 @@ sealed class DashSdkError(
             23 -> PlatformWallet.AssetLockNotTracked(message, cause) // ErrorAssetLockNotTracked
             24 -> PlatformWallet.AssetLockAlreadyConsumed(message, cause) // ErrorAssetLockAlreadyConsumed
             25 -> PlatformWallet.AssetLockFundingMismatch(message, cause) // ErrorAssetLockFundingMismatch
+            29 -> PlatformWallet.AssetLockInsufficientFunds(message, cause) // ErrorAssetLockInsufficientFunds
             // ErrorSigningKeyUnavailable — the STRUCTURED signer
             // discriminator (dashpay/platform#4060 finding 7): the typed
             // completion code rides the whole Rust round-trip, no message
-            // sniffing involved. (Codes 26-30 are reserved by sibling PRs
+            // sniffing involved. (Codes 27-28/30 remain reserved by sibling PRs
             // #4185 / #4184 — see PlatformWalletFFIResultCode.)
             31 -> PlatformWallet.SigningKeyUnavailable(message, cause)
             else ->

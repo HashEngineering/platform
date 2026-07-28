@@ -71,6 +71,24 @@ pub enum PlatformWalletError {
     #[error("Asset lock transaction failed: {0}")]
     AssetLockTransaction(String),
 
+    /// Asset-lock coin selection could not raise the requested amount from
+    /// the wallet's spendable Core funds. Carries the exact `available` and
+    /// `required` duff amounts the coin selector reported so callers (and the
+    /// UI) can render a precise shortfall instead of a stringly-typed
+    /// "Insufficient funds" message.
+    ///
+    /// For shielded fund-from-asset-lock the `available` figure reflects the
+    /// single funds account the caller selected by derivation path (the unmixed
+    /// BIP44 account by default, or an explicit account such as CoinJoin). A
+    /// shortfall here means that one account is short — funding never unions
+    /// across accounts, so a different source must be named explicitly rather
+    /// than combined automatically.
+    #[error(
+        "asset lock coin selection is short: available {available} duffs, \
+         required {required} duffs"
+    )]
+    AssetLockInsufficientFunds { available: u64, required: u64 },
+
     #[error("Transaction broadcast failed: {0}")]
     TransactionBroadcast(String),
 

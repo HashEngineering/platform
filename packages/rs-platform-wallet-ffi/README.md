@@ -202,6 +202,20 @@ Strings and arrays returned by the library must be freed using the provided free
 - `platform_wallet_bytes_free()`
 - `platform_wallet_identifier_array_free()`
 
+## ABI stability / Release notes
+
+This crate exposes a C ABI. Changes that alter an exported function's
+signature or the numeric value of a result code are **breaking** for C/Swift/JNI
+consumers and must be called out here.
+
+- **C-ABI break:** `platform_wallet_manager_shielded_fund_from_asset_lock`
+  gained a trailing `funding_path_ptr: *const u8, funding_path_len: usize`
+  parameter — a UTF-8 BIP32 derivation path selecting the single source
+  account (a null pointer / zero length = the unmixed BIP44 account). Callers
+  linking the old symbol must be recompiled against the regenerated header;
+  a null path reproduces the previous single-account behaviour. Adds result
+  code `ERROR_ASSET_LOCK_INSUFFICIENT_FUNDS = 29`.
+
 ## License
 
 MIT
