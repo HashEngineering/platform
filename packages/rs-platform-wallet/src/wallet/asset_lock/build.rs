@@ -26,7 +26,6 @@ use key_wallet::wallet::managed_wallet_info::transaction_builder::{
 use key_wallet::wallet::managed_wallet_info::wallet_info_interface::WalletInfoInterface;
 use key_wallet::wallet::managed_wallet_info::ManagedWalletInfo;
 use key_wallet::wallet::Wallet;
-use key_wallet::ManagedAccountType;
 
 use crate::changeset::{AccountRegistrationEntry, PlatformWalletChangeSet};
 use crate::error::PlatformWalletError;
@@ -35,14 +34,10 @@ use crate::wallet::platform_wallet::PlatformWalletInfo;
 use super::manager::{AssetLockManager, DEFAULT_FEE_PER_KB};
 use super::tracked::{AssetLockStatus, TrackedAssetLock};
 
-/// Whether a funds account can *sign* an asset-lock funding spend. Watch-only
-/// `DashpayExternalAccount`s hold a contact's coins the local mnemonic cannot
-/// sign, so they must never fund an asset lock — even when a caller names their
-/// derivation path explicitly. Every other funds-account type is locally
-/// signable.
-fn is_signable_funding_account(managed_type: &ManagedAccountType) -> bool {
-    !matches!(managed_type, ManagedAccountType::DashpayExternalAccount { .. })
-}
+// Watch-only account filtering and the funding-domain invariant both live in
+// `crate::wallet::funding_privacy`, so the send path and the asset-lock path
+// share one definition (and one place to read the rule).
+use crate::wallet::funding_privacy::is_signable_funding_account;
 
 // ---------------------------------------------------------------------------
 // Asset lock transaction building
@@ -355,6 +350,9 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
         // selected inputs in that account's OWN reservation ledger. Watch-only
         // `DashpayExternalAccount`s are never fundable (the local mnemonic can't
         // sign them) — refuse even when their path is named explicitly.
+        // PRIVACY-DOMAIN-OK: iterates funds accounts only to LOOK ONE UP by
+        // derivation path. Exactly one account is selected below and it alone
+        // funds the lock; nothing is accumulated across accounts.
         let mut selected: Option<&mut ManagedCoreFundsAccount> = None;
         for acc in info.core_wallet.accounts.all_funding_accounts_mut() {
             let acc_path = acc
@@ -542,6 +540,9 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
                     return;
                 };
                 let network = info.core_wallet.network();
+                // PRIVACY-DOMAIN-OK: locates the ONE account that holds this
+                // transaction's reservation, by derivation path. Releases a
+                // reservation; selects no coins.
                 for acc in info.core_wallet.accounts.all_funding_accounts() {
                     if acc
                         .managed_account_type()
@@ -2741,6 +2742,8 @@ mod tests {
             info.core_wallet.update_balance();
             let before = WalletInfoInterface::balance(&info.core_wallet).total();
             let mut values = std::collections::HashMap::new();
+            // PRIVACY-DOMAIN-OK: test-only read of UTXO values for a balance
+            // assertion. Reads state; selects no coins.
             for acc in info.core_wallet.accounts.all_funding_accounts() {
                 for (op, utxo) in &acc.utxos {
                     values.insert(*op, utxo.txout.value);
@@ -3054,6 +3057,8 @@ mod tests {
             info.core_wallet.update_balance();
             let before = WalletInfoInterface::balance(&info.core_wallet).total();
             let mut values = std::collections::HashMap::new();
+            // PRIVACY-DOMAIN-OK: test-only read of UTXO values for a balance
+            // assertion. Reads state; selects no coins.
             for acc in info.core_wallet.accounts.all_funding_accounts() {
                 for (op, utxo) in &acc.utxos {
                     values.insert(*op, utxo.txout.value);

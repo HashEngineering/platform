@@ -307,7 +307,7 @@ fn read_cstring_opt(
 /// keeps the lenient [`read_cstring_opt`], where a read error harmlessly
 /// degrades to "no memo". Empty and interior-NUL handling match the lenient
 /// helper (empty → `Ok(None)`; interior NUL → throws + `Err(())`).
-fn read_cstring_opt_strict(
+pub(crate) fn read_cstring_opt_strict(
     env: &mut JNIEnv,
     s: &JString,
     field: &str,
