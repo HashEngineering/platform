@@ -52,14 +52,14 @@ members = [
 ]
 
 [workspace.dependencies]
-dashcore = { git = "https://github.com/bfoss765/rust-dashcore", rev = "e99959ced0062159d629930f488374e29f63c42b" }
-dash-network-seeds = { git = "https://github.com/bfoss765/rust-dashcore", rev = "e99959ced0062159d629930f488374e29f63c42b" }
-dash-spv = { git = "https://github.com/bfoss765/rust-dashcore", rev = "e99959ced0062159d629930f488374e29f63c42b" }
-key-wallet = { git = "https://github.com/bfoss765/rust-dashcore", rev = "e99959ced0062159d629930f488374e29f63c42b" }
-key-wallet-ffi = { git = "https://github.com/bfoss765/rust-dashcore", rev = "e99959ced0062159d629930f488374e29f63c42b" }
-key-wallet-manager = { git = "https://github.com/bfoss765/rust-dashcore", rev = "e99959ced0062159d629930f488374e29f63c42b" }
-dash-network = { git = "https://github.com/bfoss765/rust-dashcore", rev = "e99959ced0062159d629930f488374e29f63c42b" }
-dashcore-rpc = { git = "https://github.com/bfoss765/rust-dashcore", rev = "e99959ced0062159d629930f488374e29f63c42b" }
+dashcore = { git = "https://github.com/bfoss765/rust-dashcore", rev = "4d927c155b6740ba7e1f271144217f7e82b69990" }
+dash-network-seeds = { git = "https://github.com/bfoss765/rust-dashcore", rev = "4d927c155b6740ba7e1f271144217f7e82b69990" }
+dash-spv = { git = "https://github.com/bfoss765/rust-dashcore", rev = "4d927c155b6740ba7e1f271144217f7e82b69990" }
+key-wallet = { git = "https://github.com/bfoss765/rust-dashcore", rev = "4d927c155b6740ba7e1f271144217f7e82b69990" }
+key-wallet-ffi = { git = "https://github.com/bfoss765/rust-dashcore", rev = "4d927c155b6740ba7e1f271144217f7e82b69990" }
+key-wallet-manager = { git = "https://github.com/bfoss765/rust-dashcore", rev = "4d927c155b6740ba7e1f271144217f7e82b69990" }
+dash-network = { git = "https://github.com/bfoss765/rust-dashcore", rev = "4d927c155b6740ba7e1f271144217f7e82b69990" }
+dashcore-rpc = { git = "https://github.com/bfoss765/rust-dashcore", rev = "4d927c155b6740ba7e1f271144217f7e82b69990" }
 
 tokio-metrics = "0.5"
 
@@ -130,3 +130,5 @@ opt-level = 3
 
 version = "4.1.0"
 rust-version = "1.92"
+
+# LOCAL TEST BUILD ONLY (v41int10) — do NOT push upstream.
