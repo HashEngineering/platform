@@ -77,7 +77,7 @@ use key_wallet::wallet::managed_wallet_info::transaction_building::AccountTypePr
 use key_wallet::ReservationToken as FundingReservationToken;
 
 use crate::broadcaster::TransactionBroadcaster;
-use crate::wallet::core::CoreWallet;
+use crate::wallet::core::{CoreWallet, FundingAccountRef};
 use crate::PlatformWalletError;
 
 /// Opaque handle to a registered, signed-but-unsent payment. Minted by
@@ -159,16 +159,24 @@ struct RegisteredPayment<B: TransactionBroadcaster + ?Sized> {
     core: CoreWallet<B>,
     /// The signed transaction to broadcast.
     tx: Transaction,
-    /// The releasable funding-account handle — the account whose reservation
-    /// `finalize` took and which a rejected broadcast or an explicit release
-    /// must reconcile. An [`AccountTypePreference`] (not the narrower
-    /// `StandardAccountType`) so CoinJoin-funded deferred payments retain a
-    /// releasable handle too: `finalize` reserves the selected inputs for EVERY
-    /// account variant, so a CoinJoin token must be able to release them
-    /// immediately on rejection/abandon rather than stranding them until the
-    /// key-wallet TTL backstop.
-    account_type: AccountTypePreference,
-    account_index: u32,
+    /// The releasable funding-account handle — the account whose reservation the
+    /// build took and which a rejected broadcast or an explicit release must
+    /// reconcile.
+    ///
+    /// A [`FundingAccountRef`], not a bare `StandardAccountType`, so every
+    /// funding domain retains a releasable handle:
+    ///
+    /// * [`FundingAccountRef::Standard`] covers BIP44/BIP32 **and** CoinJoin —
+    ///   `finalize` reserves the selected inputs for every account variant, so a
+    ///   CoinJoin token must be able to release them immediately on
+    ///   rejection/abandon rather than stranding them until the key-wallet TTL
+    ///   backstop.
+    /// * [`FundingAccountRef::Path`] covers accounts key-wallet's
+    ///   [`AccountTypePreference`] cannot name at all — above all a **DashPay
+    ///   receiving-funds** account, whose reservation would otherwise be
+    ///   unreleasable, and whose release keyed on BIP44 instead would free an
+    ///   unrelated account's inputs.
+    funding: FundingAccountRef,
     /// Wallet `last_processed_height` captured at registration — the exact clock
     /// `build_signed` / `finalize_transaction` stamps the funding reservation
     /// with. Compared against the wallet's current `last_processed_height` to
@@ -261,14 +269,49 @@ impl<B: TransactionBroadcaster + ?Sized> SignedPaymentRegistry<B> {
         registered_height: Option<u32>,
         funding_reservation_token: Option<FundingReservationToken>,
     ) -> ReservationToken {
+        self.register_funded_by(
+            core,
+            tx,
+            FundingAccountRef::standard(account_type, account_index),
+            registered_height,
+            funding_reservation_token,
+        )
+        .await
+    }
+
+    /// [`register`](Self::register) for a payment funded from the single funds
+    /// account named by its **account-level derivation path** — the shape
+    /// [`CoreWallet::finalize_signed_payment_from_funding_path`] produces.
+    ///
+    /// This is the only registration form that can hold a **DashPay
+    /// receiving-funds** payment: key-wallet's [`AccountTypePreference`] has no
+    /// variant for that account, so registering such a payment through
+    /// [`register`](Self::register) would have to lie about its funding account
+    /// and a later release would then free BIP44's inputs instead of the
+    /// receival account's.
+    ///
+    /// `funding_path` MUST be the path the build actually selected from
+    /// (`FinalizedCorePayment::funding`), not the caller's requested path:
+    /// `None` requests resolve to the unmixed BIP44 account's path, and the
+    /// release must name the resolved account.
+    ///
+    /// [`CoreWallet::finalize_signed_payment_from_funding_path`]:
+    ///     crate::CoreWallet::finalize_signed_payment_from_funding_path
+    pub async fn register_funded_by(
+        &self,
+        core: CoreWallet<B>,
+        tx: Transaction,
+        funding: FundingAccountRef,
+        registered_height: Option<u32>,
+        funding_reservation_token: Option<FundingReservationToken>,
+    ) -> ReservationToken {
         let token = self.next_token.fetch_add(1, Ordering::SeqCst);
         self.lock().insert(
             token,
             RegisteredPayment {
                 core,
                 tx,
-                account_type,
-                account_index,
+                funding,
                 registered_height,
                 funding_reservation_token,
             },
@@ -345,8 +388,7 @@ impl<B: TransactionBroadcaster + ?Sized> SignedPaymentRegistry<B> {
         let txid = entry
             .core
             .broadcast_payment_releasing_reservation(
-                entry.account_type,
-                entry.account_index,
+                &entry.funding,
                 &entry.tx,
                 entry.funding_reservation_token,
             )
@@ -370,9 +412,8 @@ impl<B: TransactionBroadcaster + ?Sized> SignedPaymentRegistry<B> {
         }
         entry
             .core
-            .release_transaction_reservation(
-                entry.account_type,
-                entry.account_index,
+            .release_reservation_for(
+                &entry.funding,
                 &entry.tx,
                 entry.funding_reservation_token,
             )
