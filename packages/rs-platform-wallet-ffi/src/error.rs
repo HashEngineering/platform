@@ -184,7 +184,7 @@ pub enum PlatformWalletFFIResultCode {
     /// Sibling codes split out the other two deferred-token failures that this
     /// code used to conflate: [`Self::ErrorReservationTokenConsumed`] (28,
     /// unknown / already broadcast / already released) and
-    /// [`Self::ErrorReservationWalletMismatch`] (29, minted against a different
+    /// [`Self::ErrorReservationWalletMismatch`] (30, minted against a different
     /// wallet generation). All three are non-retryable-in-place and none touched
     /// the network; they are distinct codes so a host can message each precisely.
     ErrorStaleReservationToken = 27,
@@ -202,7 +202,11 @@ pub enum PlatformWalletFFIResultCode {
     /// reservation lives in that other generation's `ReservationSet`. Did NOT
     /// touch the network and did NOT consume the rightful owner's token; NOT
     /// retryable through this handle (rebuild the payment).
-    ErrorReservationWalletMismatch = 29,
+    ///
+    /// Note: 29 is taken by `ErrorAssetLockInsufficientFunds`
+    /// (`dashpay/platform#4184`); this code is 30. See
+    /// `packages/rs-platform-wallet-ffi/ERROR_CODE_REGISTRY.md`.
+    ErrorReservationWalletMismatch = 30,
 
     /// The named thing does not exist.
     ///
@@ -218,7 +222,7 @@ pub enum PlatformWalletFFIResultCode {
     /// refuses to register a payment whose wallet was removed while it was being
     /// signed — reconciling that build's reservation before returning. Neither
     /// touched the network. Contrast [`Self::ErrorReservationWalletMismatch`]
-    /// (29), where a DIFFERENT live generation answers to the same wallet id;
+    /// (30), where a DIFFERENT live generation answers to the same wallet id;
     /// here there is no live generation at all, so there is nothing to retry
     /// against (`dashpay/platform#4185`).
     NotFound = 98,

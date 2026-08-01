@@ -207,7 +207,7 @@ sealed class DashSdkError(
             PlatformWallet(message, cause)
 
         /**
-         * `ErrorReservationWalletMismatch` (native code 29). A deferred
+         * `ErrorReservationWalletMismatch` (native code 30). A deferred
          * (BIP70/BIP270) [broadcastSigned][org.dashfoundation.dashsdk.wallet.ManagedPlatformWallet.broadcastSigned]
          * token was minted against a different wallet *generation* than the one
          * broadcasting it (e.g. a wallet re-created under the same id); its
@@ -283,7 +283,7 @@ sealed class DashSdkError(
             // whose wallet is no longer registered in the manager, or a
             // signed-payment finalize whose wallet was removed while it was
             // being signed (its reservation is reconciled before this returns).
-            // Nothing was broadcast, and unlike ReservationWalletMismatch (29)
+            // Nothing was broadcast, and unlike ReservationWalletMismatch (30)
             // no other live generation holds the payment either — so it is not
             // retryable. See dashpay/platform#4185.
             98,
@@ -298,7 +298,9 @@ sealed class DashSdkError(
             25 -> PlatformWallet.AssetLockFundingMismatch(message, cause) // ErrorAssetLockFundingMismatch
             27 -> PlatformWallet.StaleReservationToken(message, cause) // ErrorStaleReservationToken
             28 -> PlatformWallet.ReservationTokenConsumed(message, cause) // ErrorReservationTokenConsumed
-            29 -> PlatformWallet.ReservationWalletMismatch(message, cause) // ErrorReservationWalletMismatch
+            // 29 is ErrorAssetLockInsufficientFunds (dashpay/platform#4184); this
+            // code is 30. See packages/rs-platform-wallet-ffi/ERROR_CODE_REGISTRY.md.
+            30 -> PlatformWallet.ReservationWalletMismatch(message, cause) // ErrorReservationWalletMismatch
             else -> PlatformWallet.Generic(code, message, cause)
         }
     }
