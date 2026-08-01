@@ -278,7 +278,15 @@ sealed class DashSdkError(
             6 -> PlatformWallet.WalletOperation(message, cause) // ErrorWalletOperation
             7, // ErrorIdentityNotFound
             8, // ErrorContactNotFound
-            98, // NotFound (Option returned as an error)
+            // NotFound. Handle/Option lookup failures, plus the deferred
+            // (BIP70/BIP270) wallet-was-REMOVED case: a signed-payment broadcast
+            // whose wallet is no longer registered in the manager, or a
+            // signed-payment finalize whose wallet was removed while it was
+            // being signed (its reservation is reconciled before this returns).
+            // Nothing was broadcast, and unlike ReservationWalletMismatch (29)
+            // no other live generation holds the payment either — so it is not
+            // retryable. See dashpay/platform#4185.
+            98,
             -> NotFound(message, cause)
             16 -> PlatformWallet.ShieldedBroadcastFailed(message, cause) // ErrorShieldedBroadcastFailed
             18 -> PlatformWallet.ShieldedSpendUnconfirmed(message, cause) // ErrorShieldedSpendUnconfirmed
