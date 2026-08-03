@@ -204,8 +204,7 @@ pub enum PlatformWalletFFIResultCode {
     /// retryable through this handle (rebuild the payment).
     ///
     /// Note: 29 is taken by `ErrorAssetLockInsufficientFunds`
-    /// (`dashpay/platform#4184`); this code is 30. See
-    /// `packages/rs-platform-wallet-ffi/ERROR_CODE_REGISTRY.md`.
+    /// (`dashpay/platform#4184`); this code is 30.
     ErrorReservationWalletMismatch = 30,
 
     /// The named thing does not exist.
