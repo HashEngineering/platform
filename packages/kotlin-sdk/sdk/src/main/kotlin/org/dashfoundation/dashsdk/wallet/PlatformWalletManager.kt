@@ -39,6 +39,7 @@ import org.dashfoundation.dashsdk.security.KeystoreSigner
 import org.dashfoundation.dashsdk.security.MnemonicResolverAndPersister
 import org.dashfoundation.dashsdk.security.WalletStorage
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.coroutines.cancellation.CancellationException
 
 /** Effective native persistence contract exposed for initialization diagnostics. */
 data class PlatformWalletPersistenceCapabilities(
@@ -1031,14 +1032,18 @@ class PlatformWalletManager(
             persistenceHandler.reconstructPendingIdentityKeysFromPersistence(
                 isPrivateKeyDecryptable = { walletStorage.isPrivateKeyDecryptable(it) },
             )
-        } catch (cancellation: kotlin.coroutines.cancellation.CancellationException) {
-            // NEVER swallow structured-concurrency cancellation from the
-            // suspend reconstruction — rethrow so a cancelled load propagates
-            // (dashpay/platform#4183 review). A best-effort reconstruction
-            // failure is fine to absorb (the repair signal reconstructs on the
-            // next launch), but cancellation must not be masked.
+        } catch (cancellation: CancellationException) {
+            // NEVER swallow structured-concurrency cancellation from the suspend
+            // reconstruction — rethrow so a cancelled load propagates
+            // (dashpay/platform#4183 review). A bare catch-all here would
+            // re-swallow, one frame up, the very cancellation the probe inside
+            // the handler deliberately rethrows, and load would silently
+            // continue on a cancelled coroutine.
             throw cancellation
         } catch (t: Throwable) {
+            // Best-effort otherwise: a reconstruction failure must not block
+            // handing the loaded wallets to the host — the durable breadcrumbs
+            // stay in Room, so the pending-repair state re-seeds next launch.
             android.util.Log.w(
                 "PlatformWalletManager",
                 "pending-identity-key reconstruction failed on load; repair signals will be " +
