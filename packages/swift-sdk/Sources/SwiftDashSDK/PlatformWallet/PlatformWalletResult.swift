@@ -69,15 +69,22 @@ public enum PlatformWalletResultCode: Int32, Sendable {
     /// Core definitively rejected the transaction. Its reserved inputs were
     /// released and a corrected transaction may be submitted again.
     case errorTransactionBroadcastRejected = 26
-    // Codes 27-33 are claimed outside this PR and must not be reused here:
+    // Codes 27-31 are claimed by sibling PRs and must not be reused here:
     // 27 errorShutdownIncomplete (dashpay/platform#4268, merged), 29
     // errorAssetLockInsufficientFunds (#4184), 31 errorSigningKeyUnavailable
-    // (#4183/#4259), 32 errorTransactionBuild (#4247/#4256), 33
-    // errorTransactionSigning (#4256); 28 and 30 are free. The deferred-token
+    // (#4183/#4259); 28 and 30 are vacated-but-reserved. The deferred-token
     // trio therefore occupies the contiguous block 34-36. These raw values
     // MUST match `PlatformWalletFFIResultCode` in
     // packages/rs-platform-wallet-ffi/src/error.rs — there is no compile-time
     // check across the ABI. See ERROR_CODE_REGISTRY.md (#4261).
+    /// A Core transaction could not be assembled from the request: a
+    /// `fundingPath` matching no spendable funds account or naming a
+    /// watch-only one, a request breaching a monetary bound (MAX_MONEY total,
+    /// max fee rate, a below-dust recipient, an over-100 kB recipient list), or
+    /// a malformed recipients blob. The REQUEST is at fault, so a verbatim
+    /// retry fails identically — the caller must change it. Nothing was
+    /// reserved or broadcast.
+    case errorTransactionBuild = 32
     /// A deferred (BIP70/BIP270) reservation token has outlived its funding
     /// reservation's lifetime: key-wallet's TTL may already have swept and
     /// re-selected the inputs, so acting on it could touch a newer, unrelated
@@ -173,6 +180,8 @@ public enum PlatformWalletResultCode: Int32, Sendable {
             self = .errorAssetLockFundingMismatch
         case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_TRANSACTION_BROADCAST_REJECTED:
             self = .errorTransactionBroadcastRejected
+        case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_TRANSACTION_BUILD:
+            self = .errorTransactionBuild
         case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_STALE_RESERVATION_TOKEN:
             self = .errorStaleReservationToken
         case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_RESERVATION_TOKEN_CONSUMED:
@@ -294,6 +303,11 @@ public enum PlatformWalletError: LocalizedError {
     /// Core definitively rejected the transaction and its input reservation
     /// was released. Unlike `transactionBroadcastUnconfirmed`, retry is safe.
     case transactionBroadcastRejected(String)
+    /// A Core transaction could not be assembled from the request — an
+    /// unresolvable or watch-only funding path, a breached monetary bound, or a
+    /// malformed recipients blob. The REQUEST is at fault: a verbatim retry
+    /// fails identically. Nothing was reserved or broadcast.
+    case transactionBuild(String)
     /// Definitively-failed address-nonce race (shield, or identity
     /// top-up-from-addresses): Platform rejected the transition because the
     /// submitted address nonce raced its expected value. The transition did
@@ -344,6 +358,7 @@ public enum PlatformWalletError: LocalizedError {
              .shieldedNoRecordedAnchor(let m),
              .transactionBroadcastUnconfirmed(let m),
              .transactionBroadcastRejected(let m),
+             .transactionBuild(let m),
              .addressNonceMismatch(let m),
              .staleReservationToken(let m), .reservationTokenConsumed(let m),
              .reservationWalletMismatch(let m),
@@ -386,6 +401,8 @@ public enum PlatformWalletError: LocalizedError {
             self = .transactionBroadcastUnconfirmed(detail)
         case .errorTransactionBroadcastRejected:
             self = .transactionBroadcastRejected(detail)
+        case .errorTransactionBuild:
+            self = .transactionBuild(detail)
         case .errorAddressNonceMismatch:
             self = .addressNonceMismatch(detail)
         case .errorStaleReservationToken:
