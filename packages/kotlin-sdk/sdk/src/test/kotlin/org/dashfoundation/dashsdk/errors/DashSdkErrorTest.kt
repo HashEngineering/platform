@@ -150,8 +150,13 @@ class DashSdkErrorTest {
         )
         assertEquals("already broadcast", consumed.message)
 
+        // 32, not 29: in THIS integration 29 is ErrorAssetLockInsufficientFunds
+        // (#4184) and ErrorReservationWalletMismatch sits at 32. The assertion
+        // carried 29 from before #4184 took that number, so it never matched
+        // the mapping it was testing. #4185/#4256 move this trio to 34-36 and
+        // update the assertion with it; until those land, 32 is correct here.
         val walletMismatch =
-            DashSdkError.fromNative(DashSDKException(offset + 29, "different generation"))
+            DashSdkError.fromNative(DashSDKException(offset + 32, "different generation"))
         assertTrue(walletMismatch is DashSdkError.PlatformWallet.ReservationWalletMismatch)
         assertFalse(
             "ReservationWalletMismatch must NOT be retryable (rebuild the payment)",
