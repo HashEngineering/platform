@@ -129,6 +129,13 @@ public enum PlatformWalletResultCode: Int32, Sendable {
     /// returning. Distinct from `errorReservationWalletMismatch` (36), where a
     /// *different* live generation answers to the same id. The call did NOT touch
     /// the network and is NOT retryable — the wallet is gone.
+    /// A quiesce/drain barrier did not complete within its budget: an
+    /// in-flight sync pass was still running when a Clear / reset /
+    /// sync-stop needed it provably drained. The operation failed closed —
+    /// no state was wiped — and the caller should retry once sync is idle.
+    /// (Not returned by `destroy`: Rust owns the callback contexts, so a
+    /// straggling worker is memory-safe and merely logged there.)
+    case errorShutdownIncomplete = 27
     case notFound = 98
     case errorUnknown = 99
 
@@ -198,6 +205,8 @@ public enum PlatformWalletResultCode: Int32, Sendable {
             self = .errorReservationTokenConsumed
         case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_RESERVATION_WALLET_MISMATCH:
             self = .errorReservationWalletMismatch
+        case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_SHUTDOWN_INCOMPLETE:
+            self = .errorShutdownIncomplete
         case PLATFORM_WALLET_FFI_RESULT_CODE_NOT_FOUND:
             self = .notFound
         case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_UNKNOWN:
@@ -352,6 +361,10 @@ public enum PlatformWalletError: LocalizedError {
     /// finalize path reconciles the build's reservation before returning. NOT
     /// retryable — unlike `reservationWalletMismatch`, no other generation holds
     /// this payment either.
+    /// A quiesce/drain barrier (Clear / reset / sync-stop) timed out with a
+    /// sync pass still in flight. The operation failed closed — retry once
+    /// sync is idle.
+    case shutdownIncomplete(String)
     case notFound(String)
     case unknown(String)
 
@@ -377,6 +390,7 @@ public enum PlatformWalletError: LocalizedError {
              .addressNonceMismatch(let m),
              .staleReservationToken(let m), .reservationTokenConsumed(let m),
              .reservationWalletMismatch(let m),
+             .shutdownIncomplete(let m),
              .notFound(let m), .unknown(let m):
             return m
         }
@@ -428,6 +442,8 @@ public enum PlatformWalletError: LocalizedError {
             self = .reservationTokenConsumed(detail)
         case .errorReservationWalletMismatch:
             self = .reservationWalletMismatch(detail)
+        case .errorShutdownIncomplete:
+            self = .shutdownIncomplete(detail)
         case .notFound:               self = .notFound(detail)
         case .errorUnknown:           self = .unknown(detail)
         }
