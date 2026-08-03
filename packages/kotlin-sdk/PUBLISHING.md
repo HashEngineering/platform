@@ -1,4 +1,80 @@
-# Publishing `org.dashj:dash-sdk-android` to Maven Central
+# Publishing `org.dashj:dash-sdk-android`
+
+Two destinations, two audiences:
+
+| Destination | Versions | Audience | Command |
+| --- | --- | --- | --- |
+| **Maven Central** (via JReleaser) | tagged releases + Sonatype snapshots | public consumers | see [Maven Central](#maven-central) below |
+| **GitHub Packages** on `dashpay/platform` | pre-release `-SNAPSHOT` builds | dash-wallet CI on the SDK-cutover branches | see [GitHub Packages](#github-packages-internal-pre-release-channel) below |
+
+## GitHub Packages (internal pre-release channel)
+
+The Android wallet's cutover branch pins coordinates such as
+`org.dashj:dash-sdk-android:0.1.0-v41intN-SNAPSHOT`. These are QA builds that
+must never reach Maven Central, but dash-wallet CI has to resolve them — so
+they go to the GitHub Packages Maven registry attached to `dashpay/platform`:
+
+```
+https://maven.pkg.github.com/dashpay/platform
+```
+
+Packages published there are private to the `dashpay` org. **GitHub Packages
+requires authentication for reads as well as writes**, so consumers need a
+token too (see "Consuming from GitHub Packages" below).
+
+### Credentials — environment only, never committed
+
+A GitHub personal access token (classic) with the `write:packages` scope
+(which implies `read:packages`); the account must have write access to
+`dashpay/platform`.
+
+```bash
+export ORG_GRADLE_PROJECT_githubPackagesUser="<github-login>"
+export ORG_GRADLE_PROJECT_githubPackagesToken="<PAT with write:packages>"
+```
+
+Inside GitHub Actions the automatic `GITHUB_ACTOR` / `GITHUB_TOKEN` pair is
+picked up with no extra configuration (`packages: write` permission required).
+
+### Publishing
+
+```bash
+# from packages/kotlin-sdk/, after ./build_android.sh has produced the .so files
+./gradlew :sdk:publishToGithubPackages -PsdkVersion=0.1.0-v41int11-SNAPSHOT
+```
+
+The same `verifyJniLibsForRemotePublish` guard as the Central path applies, so
+a nativeless AAR can never be published. Artifacts are **not** PGP-signed for
+this destination — signing is required only for the Central-bound staging
+publish. If the credentials are absent, `publishToGithubPackages` fails with an
+explicit message rather than silently doing nothing.
+
+Every QA build must use a fresh version string (`v41int11`, `v41int12`, …).
+GitHub Packages treats an already-published coordinate as immutable, so
+re-publishing the same version will be rejected.
+
+### Consuming from GitHub Packages
+
+```groovy
+repositories {
+    mavenLocal()           // keep local dev builds winning
+    maven {
+        url 'https://maven.pkg.github.com/dashpay/platform'
+        credentials {
+            username = System.getenv('GITHUB_ACTOR')
+            password = System.getenv('GITHUB_TOKEN')   // needs read:packages
+        }
+        content { includeModule('org.dashj', 'dash-sdk-android') }
+    }
+}
+```
+
+A consumer in a *different* repository (e.g. `dashpay/dash-wallet`) cannot read
+the package with its own repo-scoped `GITHUB_TOKEN` by default. Either grant
+that repository read access to the package (package page → *Manage Actions
+access* → add repo with **Read**), or give its CI a PAT with `read:packages`.
+
+## Maven Central
 
 The SDK publishes under the existing **`org.dashj`** namespace (same as
 `dashj-core`), so no new Central namespace verification is needed. This is a

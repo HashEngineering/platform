@@ -132,7 +132,28 @@ dependencies {
 // Remote: `:sdk:publishReleasePublicationToStagingRepository` stages the signed
 //         artifacts into build/staging-deploy, then `:sdk:jreleaserDeploy` uploads
 //         them to Maven Central (release) / Sonatype snapshots (see jreleaser block).
+// Internal: `:sdk:publishToGithubPackages` pushes pre-release coordinates to the
+//         GitHub Packages Maven registry on dashpay/platform (see PUBLISHING.md).
 // Override the version with -PsdkVersion=x.y.z (defaults to 0.1.0-SNAPSHOT).
+
+// GitHub Packages (dashpay/platform) — the internal distribution channel for
+// pre-release SDK coordinates that must not go to Maven Central, e.g. the
+// `0.1.0-v41intN-SNAPSHOT` builds the Android wallet's cutover branch consumes.
+// The registry requires authentication for BOTH reads and writes.
+// Credentials are read from the environment / Gradle properties only and are
+// never committed:
+//   ORG_GRADLE_PROJECT_githubPackagesUser  / ORG_GRADLE_PROJECT_githubPackagesToken
+//   -PgithubPackagesUser=<login> -PgithubPackagesToken=<PAT with write:packages>
+//   GITHUB_ACTOR / GITHUB_TOKEN            (set automatically inside GitHub Actions)
+val githubPackagesUser: String? =
+    (project.findProperty("githubPackagesUser") as String?)?.takeIf { it.isNotBlank() }
+        ?: System.getenv("GITHUB_ACTOR")?.takeIf { it.isNotBlank() }
+val githubPackagesToken: String? =
+    (project.findProperty("githubPackagesToken") as String?)?.takeIf { it.isNotBlank() }
+        ?: System.getenv("GITHUB_TOKEN")?.takeIf { it.isNotBlank() }
+val githubPackagesCredentialsPresent =
+    githubPackagesUser != null && githubPackagesToken != null
+
 afterEvaluate {
     publishing {
         repositories {
@@ -141,6 +162,21 @@ afterEvaluate {
             maven {
                 name = "staging"
                 url = uri(layout.buildDirectory.dir("staging-deploy"))
+            }
+            // Declared only when credentials are available: an unconditional
+            // declaration would break `./gradlew publish` (and any aggregate
+            // publish task) on a credential-less checkout. The
+            // `publishToGithubPackages` lifecycle task below fails with an
+            // actionable message when someone asks for this publish without them.
+            if (githubPackagesCredentialsPresent) {
+                maven {
+                    name = "githubPackages"
+                    url = uri("https://maven.pkg.github.com/dashpay/platform")
+                    credentials {
+                        username = githubPackagesUser
+                        password = githubPackagesToken
+                    }
+                }
             }
         }
 
@@ -195,8 +231,33 @@ afterEvaluate {
         }
     }
 
-    // Sign published artifacts, but only for a real remote publish. `publishToMavenLocal`
-    // and a bare `assemble` never put a PublishToMavenRepository task in the graph, so a
+    // One command for the internal GitHub Packages publish, with a clear failure when
+    // credentials are absent (otherwise the repository — and therefore its publish
+    // task — simply would not exist, and Gradle's "task not found" says nothing useful).
+    tasks.register("publishToGithubPackages") {
+        group = "publishing"
+        description =
+            "Publishes the release AAR to GitHub Packages (dashpay/platform). " +
+                "Requires githubPackagesUser/githubPackagesToken (or GITHUB_ACTOR/GITHUB_TOKEN)."
+        if (githubPackagesCredentialsPresent) {
+            dependsOn("publishReleasePublicationToGithubPackagesRepository")
+        } else {
+            doFirst {
+                throw GradleException(
+                    "GitHub Packages credentials are missing. Set " +
+                        "ORG_GRADLE_PROJECT_githubPackagesUser / " +
+                        "ORG_GRADLE_PROJECT_githubPackagesToken (a GitHub PAT with " +
+                        "write:packages), or GITHUB_ACTOR / GITHUB_TOKEN. " +
+                        "See packages/kotlin-sdk/PUBLISHING.md."
+                )
+            }
+        }
+    }
+
+    // Sign published artifacts, but only for a Maven Central-bound publish. Central
+    // requires PGP signatures; the internal GitHub Packages registry does not, and
+    // requiring a GPG key there would block every pre-release snapshot push.
+    // `publishToMavenLocal` and a bare `assemble` never stage anything either, so a
     // local build requires no GPG key. Keys come from the standard signing properties/env
     // (signing.keyId + signing.password + signing.secretKeyRingFile, or the in-memory
     // ORG_GRADLE_PROJECT_signingKey / signingPassword pair) when a remote publish runs.
@@ -215,7 +276,11 @@ afterEvaluate {
             useInMemoryPgpKeys(signingKey, signingPassword)
         }
         setRequired(Callable {
-            gradle.taskGraph.allTasks.any { it is PublishToMavenRepository }
+            // Only the staging repository feeds jreleaser -> Maven Central, which is
+            // the one destination that mandates signatures.
+            gradle.taskGraph.allTasks.any {
+                it is PublishToMavenRepository && it.name.endsWith("ToStagingRepository")
+            }
         })
         sign(publishing.publications["release"])
     }
