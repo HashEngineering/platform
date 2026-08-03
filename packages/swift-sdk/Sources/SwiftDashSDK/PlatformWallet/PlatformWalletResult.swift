@@ -86,6 +86,15 @@ public enum PlatformWalletResultCode: Int32, Sendable {
     /// duffs travel in the message string. Distinct from
     /// `errorCoreInsufficientFunds` (22), which is the atomic Core-send selector.
     case errorAssetLockInsufficientFunds = 29
+    // Raw value 26 above (errorTransactionBroadcastRejected) landed on
+    // v4.1-dev. NOTE: this integration does NOT carry #4185/#4256, so the
+    // deferred-token trio still sits at 27/28/32 below rather than the
+    // 34-36 those branches move it to, and 32 is errorReservationWalletMismatch
+    // rather than #4247's errorTransactionBuild. 37 is allocated from the
+    // frontier and is stable across that future renumber. These raw values
+    // MUST match `PlatformWalletFFIResultCode` in
+    // packages/rs-platform-wallet-ffi/src/error.rs — there is no compile-time
+    // check across the ABI. See ERROR_CODE_REGISTRY.md (#4261).
     /// A state transition could not be signed because the signer has no
     /// usable private key for the requested public key — restored from the
     /// structured signer completion code (dashpay/platform#4060 finding 7).
@@ -99,6 +108,17 @@ public enum PlatformWalletResultCode: Int32, Sendable {
     /// Renumbered 29 → 32 during the v4.1 re-integration (code 29 is
     /// `errorAssetLockInsufficientFunds`; 30/31 are reserved/allocated).
     case errorReservationWalletMismatch = 32
+    /// A one-time-key (shielded invitation) claim found the invitation note's
+    /// nullifier already spent on chain, with no positive evidence that this
+    /// claim created an identity. TERMINAL and NOT retryable — the note is
+    /// consumed, so no retry can spend it again, and no identity id is
+    /// produced. Surface the invitation as spent.
+    ///
+    /// Raw value 37 is the allocation frontier from ERROR_CODE_REGISTRY.md
+    /// (dashpay/platform#4261): 32 belongs to `errorTransactionBuild`
+    /// (#4247/#4256), 34-36 to the #4185 deferred-token trio, and 28/30 are
+    /// vacated-but-reserved.
+    case errorShieldedInviteAlreadyClaimed = 37
     case notFound = 98
     case errorUnknown = 99
 
@@ -168,6 +188,8 @@ public enum PlatformWalletResultCode: Int32, Sendable {
             self = .errorSigningKeyUnavailable
         case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_RESERVATION_WALLET_MISMATCH:
             self = .errorReservationWalletMismatch
+        case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_SHIELDED_INVITE_ALREADY_CLAIMED:
+            self = .errorShieldedInviteAlreadyClaimed
         case PLATFORM_WALLET_FFI_RESULT_CODE_NOT_FOUND:
             self = .notFound
         case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_UNKNOWN:

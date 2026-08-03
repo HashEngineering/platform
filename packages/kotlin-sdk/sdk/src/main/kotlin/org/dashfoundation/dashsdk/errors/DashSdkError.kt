@@ -300,6 +300,25 @@ sealed class DashSdkError(
             PlatformWallet(message, cause)
 
         /**
+         * `ErrorShieldedInviteAlreadyClaimed` (native code 37). A one-time-key
+         * (shielded invitation) claim found the invitation note's nullifier
+         * already spent on chain, and could NOT produce positive evidence that
+         * this claim's Type-20 transition created an identity — the spend was
+         * finalized to the creation-failure address, or another holder of the
+         * same bearer one-time key won the race, or the id is not re-derivable.
+         *
+         * TERMINAL and NOT retryable (the inherited [isRetryable] `false`):
+         * the note is consumed, so no retry can spend it again. Distinct from
+         * [ShieldedCreateUnconfirmed], which means "executed, not yet
+         * resolvable, hold the slot". No identity id is produced — this wallet
+         * has no identity to hold a slot for, and claiming one would be the
+         * false-ownership assertion this code exists to prevent. Hosts should
+         * surface the invitation as spent rather than registering an identity.
+         */
+        class ShieldedInviteAlreadyClaimed(message: String, cause: Throwable? = null) :
+            PlatformWallet(message, cause)
+
+        /**
          * Any other `PlatformWalletFFIResultCode` without a dedicated type.
          * Carries the platform-wallet [nativeCode] (already de-offset) and
          * the Rust-supplied message.
@@ -417,6 +436,10 @@ sealed class DashSdkError(
             // ErrorReservationWalletMismatch — renumbered off 29 during the
             // v4.1 re-integration (29 is ErrorAssetLockInsufficientFunds).
             32 -> PlatformWallet.ReservationWalletMismatch(message, cause) // ErrorReservationWalletMismatch
+            // ErrorShieldedInviteAlreadyClaimed. Allocated 37 (not 32, which
+            // belongs to ErrorTransactionBuild — dashpay/platform#4247/#4256);
+            // see packages/rs-platform-wallet-ffi/ERROR_CODE_REGISTRY.md.
+            37 -> PlatformWallet.ShieldedInviteAlreadyClaimed(message, cause)
             else ->
                 // @Deprecated fallback — see the code-6 arm; code 31 is the
                 // real discriminator.
