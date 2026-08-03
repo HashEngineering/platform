@@ -60,6 +60,7 @@ import org.dashfoundation.dashsdk.persistence.entities.TransactionAccountInvolve
 import org.dashfoundation.dashsdk.persistence.entities.TxoEntity
 import org.dashfoundation.dashsdk.persistence.entities.WalletEntity
 import java.util.concurrent.Executors
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * Android port of
@@ -2818,8 +2819,24 @@ class PlatformWalletPersistenceHandler(
             if (networkRaw != null && identity.networkRaw != networkRaw) continue
             val walletId = identity.walletId ?: continue
             val pubkeyHex = row.publicKeyData.toHex()
-            val usable = row.privateKeyKeychainIdentifier != null &&
-                runCatching { isPrivateKeyDecryptable(pubkeyHex) }.getOrDefault(false)
+            val usable = if (row.privateKeyKeychainIdentifier == null) {
+                false
+            } else {
+                try {
+                    isPrivateKeyDecryptable(pubkeyHex)
+                } catch (cancellation: CancellationException) {
+                    // NEVER swallow structured-concurrency cancellation: the
+                    // capability check is a SUSPEND probe, so a cancelled caller
+                    // would otherwise be misread as "private half unusable" and
+                    // publish a spurious pending-repair entry for a key that is
+                    // perfectly fine. Rethrow so the cancellation propagates.
+                    throw cancellation
+                } catch (_: Throwable) {
+                    // A genuine probe failure IS the unusable signal — seed the
+                    // repair slot, which is the point of the second disjunct.
+                    false
+                }
+            }
             if (usable) continue
             entries += PendingIdentityKey(
                 walletIdHex = walletId.toHex(),

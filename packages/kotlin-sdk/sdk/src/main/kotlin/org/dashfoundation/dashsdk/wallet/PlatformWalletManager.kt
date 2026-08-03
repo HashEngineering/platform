@@ -39,6 +39,7 @@ import org.dashfoundation.dashsdk.security.KeystoreSigner
 import org.dashfoundation.dashsdk.security.MnemonicResolverAndPersister
 import org.dashfoundation.dashsdk.security.WalletStorage
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.coroutines.cancellation.CancellationException
 
 /** Effective native persistence contract exposed for initialization diagnostics. */
 data class PlatformWalletPersistenceCapabilities(
@@ -998,10 +999,20 @@ class PlatformWalletManager(
         // CHEAP capability check re-seed pendingIdentityKeys, so a repair
         // signal recorded before a process death (or a blob stranded by a
         // Keystore keypair replacement) resurfaces on every launch.
-        runCatching {
+        try {
             persistenceHandler.reconstructPendingIdentityKeysFromPersistence(
                 isPrivateKeyDecryptable = { walletStorage.isPrivateKeyDecryptable(it) },
             )
+        } catch (cancellation: CancellationException) {
+            // Must rethrow here too: the reconstruction is a suspend call, so a
+            // bare catch-all would re-swallow — one frame up — the very
+            // cancellation the probe inside the handler deliberately rethrows,
+            // and load would silently continue on a cancelled coroutine.
+            throw cancellation
+        } catch (_: Throwable) {
+            // Best-effort otherwise: a reconstruction failure must not block
+            // handing the loaded wallets to the host — the durable breadcrumbs
+            // stay in Room, so the pending-repair state re-seeds next launch.
         }
 
         // Room is the source of truth for the restorable id list — the same
