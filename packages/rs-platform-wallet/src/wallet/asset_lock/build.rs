@@ -13,7 +13,7 @@ use dashcore::{OutPoint, Transaction, TxOut};
 use key_wallet::account::AccountType;
 use key_wallet::bip32::DerivationPath;
 use key_wallet::managed_account::managed_account_trait::ManagedAccountTrait;
-use key_wallet::signer::ExtendedPubKeySigner;
+use key_wallet::signer::{ExtendedPubKeySigner, Signer};
 use key_wallet::wallet::managed_wallet_info::asset_lock_builder::{
     AssetLockFundingType, CreditOutputFunding,
 };
@@ -38,6 +38,83 @@ use super::tracked::{AssetLockStatus, TrackedAssetLock};
 // `crate::wallet::funding_privacy`, so the send path and the asset-lock path
 // share one definition (and one place to read the rule).
 use crate::wallet::funding_privacy::is_signable_funding_account;
+
+/// A [`Signer`] that answers ONE pre-fetched credit-output `public_key` request
+/// from cache and delegates everything else to the real signer.
+///
+/// ## Why this exists (dashpay/platform#4184 review)
+///
+/// The pinned `ManagedWalletInfo::build_asset_lock_with_signer` — the delegated
+/// builder every NON-shielded funding type uses — runs its credit-output
+/// bookkeeping *after* `build_signed` has already RESERVED the transaction's
+/// inputs on the BIP44 account: peek the next unused path, ask the signer for
+/// the matching public key, then mark the index used. `build_signed` itself
+/// rolls its reservation back when input signing fails, but a failure in that
+/// post-signing loop abandons a fully signed transaction with its inputs still
+/// reserved, and the error carries no transaction — so the caller has nothing to
+/// hand `ManagedCoreFundsAccount::release_reservation`, and the account's
+/// `ReservationSet` is `pub(crate)` to key-wallet. At this pin the stranded
+/// inputs are therefore *unreleasable* from platform-wallet and stay withheld
+/// from every other send until the reservation-TTL backstop.
+///
+/// Since the abandon path cannot be rolled back, it is instead **removed**: of
+/// the loop's fallible steps only the external `signer.public_key` round-trip is
+/// genuinely reachable (a transient Keychain/resolver failure). The other steps
+/// — resolving the credit account, `peek_next_path`, and
+/// `mark_first_pool_index_used` — cannot fail once
+/// [`AssetLockManager::peek_next_funding_address`] has resolved and peeked that
+/// same account earlier in the same call, under the same held wallet write lock,
+/// with nothing in between able to mutate it (`mark_first_pool_index_used` only
+/// rejects Standard accounts and empty pools, both already excluded by the
+/// successful peek). So the caller performs the signer round-trip ONCE, up
+/// front, *before* anything is reserved, and hands the builder this wrapper: the
+/// loop's `public_key` call hits the cache and is infallible, leaving no
+/// reachable post-reservation failure.
+///
+/// The cache is keyed by the exact path and holds a single entry captured
+/// microseconds earlier; any other path — including every `sign_ecdsa` input
+/// signature — goes straight to the real signer, so this narrows nothing about
+/// what the device is asked to authorize.
+struct PrefetchedCreditKeySigner<'a, S: Signer> {
+    inner: &'a S,
+    /// The credit-output path whose public key was pre-fetched.
+    path: DerivationPath,
+    /// The pre-fetched public key at [`Self::path`].
+    public_key: dashcore::secp256k1::PublicKey,
+}
+
+#[async_trait::async_trait]
+impl<S: Signer> key_wallet::signer::Signer for PrefetchedCreditKeySigner<'_, S> {
+    type Error = S::Error;
+
+    fn supported_methods(&self) -> &[key_wallet::signer::SignerMethod] {
+        self.inner.supported_methods()
+    }
+
+    async fn sign_ecdsa(
+        &self,
+        path: &DerivationPath,
+        sighash: [u8; 32],
+    ) -> Result<
+        (
+            dashcore::secp256k1::ecdsa::Signature,
+            dashcore::secp256k1::PublicKey,
+        ),
+        Self::Error,
+    > {
+        self.inner.sign_ecdsa(path, sighash).await
+    }
+
+    async fn public_key(
+        &self,
+        path: &DerivationPath,
+    ) -> Result<dashcore::secp256k1::PublicKey, Self::Error> {
+        if *path == self.path {
+            return Ok(self.public_key);
+        }
+        self.inner.public_key(path).await
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Asset lock transaction building
@@ -114,8 +191,9 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
         }
 
         // 1. Peek at the next unused address from the funding account to
-        //    build the credit output P2PKH script.
-        let funding_address = Self::peek_next_funding_address(
+        //    build the credit output P2PKH script, plus that entry's
+        //    derivation path (the delegated builder re-peeks the same one).
+        let (funding_address, credit_path) = Self::peek_next_funding_address(
             &mut info.core_wallet,
             wallet,
             funding_type,
@@ -160,6 +238,35 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
                 .await;
         }
 
+        // Pre-fetch the credit-output public key BEFORE delegating, so the
+        // builder's post-signing credit-key loop cannot fail on a signer
+        // round-trip once it has reserved the BIP44 inputs.
+        //
+        // The delegated builder reserves the transaction's inputs inside
+        // `build_signed` and only rolls that back when *input* signing fails.
+        // Its credit-key loop runs afterwards, and an error there abandons a
+        // fully-signed transaction whose inputs stay reserved — with no
+        // transaction in the `Err` to hand `release_reservation`, and no way to
+        // reach the account's `pub(crate)` `ReservationSet` from here, those
+        // inputs are unreleasable at this pin and stay withheld from every other
+        // send until the reservation-TTL backstop (dashpay/platform#4184
+        // review). The abandon path is therefore removed rather than rolled
+        // back: the only genuinely reachable failure in that loop is this
+        // external signer round-trip, so it happens HERE, before anything is
+        // reserved, and the builder gets a wrapper that answers the repeat
+        // request from cache. See [`PrefetchedCreditKeySigner`] for why the
+        // loop's remaining steps cannot fail after the peek above.
+        let credit_public_key = signer.public_key(&credit_path).await.map_err(|e| {
+            PlatformWalletError::AssetLockTransaction(format!(
+                "signer public_key failed for credit output at {credit_path}: {e}"
+            ))
+        })?;
+        let prefetched_signer = PrefetchedCreditKeySigner {
+            inner: signer,
+            path: credit_path,
+            public_key: credit_public_key,
+        };
+
         // Delegate to the key-wallet signer-driven builder (single BIP44 account).
         let result = info
             .core_wallet
@@ -168,7 +275,7 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
                 account_index,
                 vec![funding],
                 DEFAULT_FEE_PER_KB,
-                signer,
+                &prefetched_signer,
             )
             .await
             .map_err(|e| {
@@ -184,17 +291,41 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
         // variant. The `Private` arm would only come from the soft-
         // wallet `build_asset_lock` path which we no longer call from
         // platform-wallet — defensively bail if it appears.
+        // `build_asset_lock_with_signer` has already RESERVED the transaction's
+        // inputs on the BIP44 account at `account_index`. The two error arms
+        // below abandon that signed-but-un-broadcast transaction, so — like the
+        // shielded path above — each must roll the reservation back or the
+        // inputs stay stranded until the reservation-TTL backstop
+        // (dashpay/platform#4184 review). These arms are defensive (the
+        // signer-driven builder always returns a non-empty `Public`), but the
+        // rollback keeps the invariant total: no abandon path strands inputs.
         use key_wallet::wallet::managed_wallet_info::asset_lock_builder::AssetLockCreditKeys;
         let path = match result.keys {
-            AssetLockCreditKeys::Public(mut keys) => {
-                let (_pubkey, path) = keys.drain(..).next().ok_or_else(|| {
-                    PlatformWalletError::AssetLockTransaction(
+            AssetLockCreditKeys::Public(mut keys) => match keys.drain(..).next() {
+                Some((_pubkey, path)) => path,
+                None => {
+                    if let Some(acc) = info
+                        .core_wallet
+                        .accounts
+                        .standard_bip44_accounts
+                        .get(&account_index)
+                    {
+                        acc.release_reservation(&result.transaction);
+                    }
+                    return Err(PlatformWalletError::AssetLockTransaction(
                         "Builder returned no credit-output keys".to_string(),
-                    )
-                })?;
-                path
-            }
+                    ));
+                }
+            },
             AssetLockCreditKeys::Private(_) => {
+                if let Some(acc) = info
+                    .core_wallet
+                    .accounts
+                    .standard_bip44_accounts
+                    .get(&account_index)
+                {
+                    acc.release_reservation(&result.transaction);
+                }
                 return Err(PlatformWalletError::AssetLockTransaction(
                     "Builder returned Private keys; signer-driven path expected Public".to_string(),
                 ));
@@ -466,39 +597,91 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
         // mirroring the pinned single-account builder's phase-1/2/3 sequence
         // (peek without marking → signer round-trip → commit the index) so a
         // signer failure never irreversibly consumes a pool index.
-        let (path, index) = {
-            let credit_account = info
-                .core_wallet
-                .accounts
-                .asset_lock_shielded_address_topup
-                .as_mut()
-                .ok_or_else(|| {
-                    PlatformWalletError::AssetLockTransaction(
-                        "Asset lock shielded address top-up account not found".to_string(),
-                    )
-                })?;
-            credit_account
-                .peek_next_path()
-                .map_err(|e| PlatformWalletError::AssetLockTransaction(e.to_string()))?
-        };
-        signer.public_key(&path).await.map_err(|e| {
-            PlatformWalletError::AssetLockTransaction(format!("signer public_key failed: {e}"))
-        })?;
-        {
-            let credit_account = info
-                .core_wallet
-                .accounts
-                .asset_lock_shielded_address_topup
-                .as_mut()
-                .ok_or_else(|| {
-                    PlatformWalletError::AssetLockTransaction(
-                        "Asset lock shielded address top-up account not found".to_string(),
-                    )
-                })?;
-            credit_account
-                .mark_first_pool_index_used(index)
-                .map_err(|e| PlatformWalletError::AssetLockTransaction(e.to_string()))?;
+        //
+        // `build_signed` above already RESERVED this transaction's inputs in the
+        // selected account's `ReservationSet`, and the reservation is normally
+        // held all the way to broadcast. But every step below can still fail
+        // (missing shielded-topup account, `peek_next_path`, the signer
+        // round-trip, `mark_first_pool_index_used`), and each such failure
+        // abandons a signed transaction that never reaches the wire. Without a
+        // rollback those reserved inputs would stay stranded until the
+        // reservation-TTL backstop (~24 blocks), silently withholding the coins
+        // from any other send in the meantime (dashpay/platform#4184 review,
+        // thepastaclaw). So derive the key inside an inner future whose `Result`
+        // we inspect, and on ANY error release the reservation before
+        // propagating. The lookup mirrors `release_asset_lock_funding_reservation`
+        // (match the selected funds account by `funding_path`); it must run on a
+        // fresh shared borrow of `info` because the `&mut selected` used for
+        // `set_funding` cannot be revived across the credit-account borrows above.
+        let derive_credit_key = async {
+            let (path, index) = {
+                let credit_account = info
+                    .core_wallet
+                    .accounts
+                    .asset_lock_shielded_address_topup
+                    .as_mut()
+                    .ok_or_else(|| {
+                        PlatformWalletError::AssetLockTransaction(
+                            "Asset lock shielded address top-up account not found".to_string(),
+                        )
+                    })?;
+                credit_account
+                    .peek_next_path()
+                    .map_err(|e| PlatformWalletError::AssetLockTransaction(e.to_string()))?
+            };
+            signer.public_key(&path).await.map_err(|e| {
+                PlatformWalletError::AssetLockTransaction(format!("signer public_key failed: {e}"))
+            })?;
+            {
+                let credit_account = info
+                    .core_wallet
+                    .accounts
+                    .asset_lock_shielded_address_topup
+                    .as_mut()
+                    .ok_or_else(|| {
+                        PlatformWalletError::AssetLockTransaction(
+                            "Asset lock shielded address top-up account not found".to_string(),
+                        )
+                    })?;
+                credit_account
+                    .mark_first_pool_index_used(index)
+                    .map_err(|e| PlatformWalletError::AssetLockTransaction(e.to_string()))?;
+            }
+            Ok::<DerivationPath, PlatformWalletError>(path)
         }
+        .await;
+
+        let path = match derive_credit_key {
+            Ok(path) => path,
+            Err(e) => {
+                // Abandon path: roll back the reservation `build_signed` placed
+                // on the selected funds account so its inputs are immediately
+                // reselectable, rather than stranded until the reservation-TTL
+                // backstop.
+                let mut released = false;
+                for acc in info.core_wallet.accounts.all_funding_accounts() {
+                    if acc
+                        .managed_account_type()
+                        .to_account_type()
+                        .derivation_path(network)
+                        .map(|p| p == funding_path)
+                        .unwrap_or(false)
+                    {
+                        acc.release_reservation(&transaction);
+                        released = true;
+                        break;
+                    }
+                }
+                if !released {
+                    tracing::warn!(
+                        %funding_path,
+                        "abandoned signed asset-lock tx but could not release its reservation: \
+                         no funds account matches the funding path (inputs will free on TTL)"
+                    );
+                }
+                return Err(e);
+            }
+        };
 
         tracing::debug!(
             selected_inputs = transaction.input.len(),
@@ -578,16 +761,25 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
     }
 
     /// Peek at the next unused address from a funding account without
-    /// consuming it (i.e. without marking it as used).
+    /// consuming it (i.e. without marking it as used), together with that
+    /// entry's derivation path.
     ///
     /// The key-wallet builder's `next_private_key` will later find the same
     /// address, derive the private key, and mark it as used.
+    ///
+    /// The returned path is the *same* pool entry the delegated builder's
+    /// credit-output loop re-peeks: both resolve this account's first address
+    /// pool through `next_unused*`, and nothing between the two peeks mutates it
+    /// (the wallet write lock is held across the whole build, and the builder
+    /// itself only touches funds accounts). Returning it here lets the caller
+    /// pre-fetch the credit public key BEFORE any input is reserved — see
+    /// [`PrefetchedCreditKeySigner`].
     fn peek_next_funding_address(
         wallet_info: &mut ManagedWalletInfo,
         wallet: &Wallet,
         funding_type: AssetLockFundingType,
         identity_index: u32,
-    ) -> Result<DashAddress, PlatformWalletError> {
+    ) -> Result<(DashAddress, DerivationPath), PlatformWalletError> {
         let (managed_account, account_xpub) = match funding_type {
             AssetLockFundingType::IdentityRegistration => {
                 let xpub = wallet
@@ -699,14 +891,25 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
         // state so the builder's `next_private_key` can find it. The
         // address is NOT marked as used yet — that happens inside the
         // builder after a successful transaction build.
-        managed_account
+        let address = managed_account
             .next_address(account_xpub.as_ref(), false)
             .map_err(|e| {
                 PlatformWalletError::AssetLockTransaction(format!(
                     "Failed to get next funding address: {}",
                     e
                 ))
-            })
+            })?;
+
+        // Same pool entry, read back as a path. `peek_next_path` does not mark
+        // the index used, so this stays a pure peek.
+        let (path, _index) = managed_account.peek_next_path().map_err(|e| {
+            PlatformWalletError::AssetLockTransaction(format!(
+                "Failed to peek next funding derivation path: {}",
+                e
+            ))
+        })?;
+
+        Ok((address, path))
     }
 
     /// Idempotently derive + insert the per-index `IdentityTopUp`
@@ -1113,6 +1316,21 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
         if let Err(e) = pool_durability {
             tracing::error!(error = %e, "failed to persist asset-lock funding index");
             if funding_type == AssetLockFundingType::IdentityInvitation {
+                // Aborting a SIGNED but un-broadcast transaction: `build`'s inputs
+                // are still reserved (the reservation is held from build through
+                // broadcast). Roll it back before bailing, or the funding inputs
+                // stay stranded until the reservation-TTL backstop
+                // (dashpay/platform#4184 review — abandon before broadcast). Safe
+                // to route through `release_asset_lock_funding_reservation` here:
+                // `build_asset_lock_transaction` already dropped the wallet write
+                // lock on return, so re-acquiring the read lock does not deadlock.
+                self.release_asset_lock_funding_reservation(
+                    &tx,
+                    account_index,
+                    funding_type,
+                    &funding_path,
+                )
+                .await;
                 return Err(PlatformWalletError::AssetLockTransaction(format!(
                     "aborted before broadcast: could not durably record the invitation \
                      funding index (broadcasting anyway would risk voucher-key reuse on \
@@ -1297,8 +1515,11 @@ mod tests {
     use crate::wallet::persister::WalletPersister;
     use crate::wallet::platform_wallet::PlatformWalletInfo;
     use crate::wallet::platform_wallet::WalletId;
-    use key_wallet::bip32::DerivationPath;
     use crate::{AssetLockFundingType, PlatformWalletError};
+    use dashcore::Address as DashAddress;
+    use key_wallet::bip32::DerivationPath;
+    use key_wallet::signer::{ExtendedPubKeySigner, Signer};
+    use key_wallet::ManagedAccountType;
 
     /// prior-no-utxos-846 (dashpay/platform#4074): the zero-spendable-candidate
     /// selection error must surface the SAME typed shortfall as a partial
@@ -2265,7 +2486,10 @@ mod tests {
         // Change must land on the transparent BIP44 account (the OP_RETURN burn
         // is the AssetLock output; any non-OP_RETURN output is wallet change).
         let has_change = tx.output.iter().any(|o| !o.script_pubkey.is_op_return());
-        assert!(has_change, "a CoinJoin-funded lock must return change to BIP44");
+        assert!(
+            has_change,
+            "a CoinJoin-funded lock must return change to BIP44"
+        );
 
         // Per-account signing: every selected input must carry a signature.
         assert!(!tx.input.is_empty(), "asset lock must have selected inputs");
@@ -2603,6 +2827,365 @@ mod tests {
             "a rejected selected-account broadcast must release the CoinJoin \
              reservation so the coin is reselectable, got {rebuild:?}"
         );
+    }
+
+    /// A [`WalletSigner`] that signs transaction inputs normally but fails
+    /// every `public_key` request — a transient Keychain/resolver outage that
+    /// hits the credit-output round-trip only.
+    struct CreditKeyFailingSigner {
+        inner: WalletSigner,
+    }
+
+    #[async_trait::async_trait]
+    impl Signer for CreditKeyFailingSigner {
+        type Error = String;
+
+        fn supported_methods(&self) -> &[key_wallet::signer::SignerMethod] {
+            self.inner.supported_methods()
+        }
+
+        async fn sign_ecdsa(
+            &self,
+            path: &DerivationPath,
+            sighash: [u8; 32],
+        ) -> Result<
+            (
+                dashcore::secp256k1::ecdsa::Signature,
+                dashcore::secp256k1::PublicKey,
+            ),
+            Self::Error,
+        > {
+            self.inner.sign_ecdsa(path, sighash).await
+        }
+
+        async fn public_key(
+            &self,
+            _path: &DerivationPath,
+        ) -> Result<dashcore::secp256k1::PublicKey, Self::Error> {
+            Err("simulated transient Keychain failure".to_string())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExtendedPubKeySigner for CreditKeyFailingSigner {
+        async fn extended_public_key(
+            &self,
+            path: &DerivationPath,
+        ) -> Result<key_wallet::bip32::ExtendedPubKey, Self::Error> {
+            self.inner.extended_public_key(path).await
+        }
+    }
+
+    /// dashpay/platform#4184 reservation regression, DELEGATED (non-shielded)
+    /// path: a credit-output signer failure must not strand the BIP44 inputs.
+    ///
+    /// The pinned `build_asset_lock_with_signer` reserves the transaction's
+    /// inputs inside `build_signed` and rolls that back only when *input*
+    /// signing fails. Its credit-output loop runs afterwards and asks the signer
+    /// for the credit public key; before the fix, a transient failure there
+    /// returned `Err` with the inputs still reserved — and the error carries no
+    /// transaction, so nothing downstream could release them. The single funded
+    /// UTXO was therefore withheld from every later send until the
+    /// reservation-TTL backstop.
+    ///
+    /// Proven via the observable proxy the other reservation tests use: a fresh
+    /// build over the same single-UTXO account must succeed. Reverting the
+    /// pre-fetch makes the rebuild fail at input selection.
+    #[tokio::test]
+    async fn delegated_builder_credit_key_failure_does_not_strand_bip44_inputs() {
+        let (manager, signer, _persistence) =
+            funded_asset_lock_manager(Arc::new(AlwaysOkBroadcaster)).await;
+
+        // The whole 0.1 DASH balance rides on one UTXO, so a leaked reservation
+        // is immediately visible as a shortfall on the next build.
+        let failing = CreditKeyFailingSigner {
+            inner: signer.clone(),
+        };
+        let abandoned = manager
+            .build_asset_lock_transaction(
+                5_000_000,
+                0,
+                AssetLockFundingType::IdentityRegistration,
+                0,
+                &failing,
+                None,
+            )
+            .await;
+        assert!(
+            abandoned.is_err(),
+            "a failing credit-output signer must abandon the build, got {abandoned:?}"
+        );
+
+        let rebuild = manager
+            .build_asset_lock_transaction(
+                5_000_000,
+                0,
+                AssetLockFundingType::IdentityRegistration,
+                0,
+                &signer,
+                None,
+            )
+            .await;
+        assert!(
+            rebuild.is_ok(),
+            "the abandoned delegated build must leave its BIP44 input reselectable, \
+             got {rebuild:?}"
+        );
+    }
+
+    /// A [`WalletSigner`] that records every `public_key` request and answers
+    /// only the FIRST one — every later request is a hard error. A delegated
+    /// build can therefore only succeed if the credit key it needs is served
+    /// from the prefetch cache rather than re-requested downstream.
+    struct RecordingCreditKeySigner {
+        inner: WalletSigner,
+        public_key_requests: Arc<Mutex<Vec<DerivationPath>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Signer for RecordingCreditKeySigner {
+        type Error = String;
+
+        fn supported_methods(&self) -> &[key_wallet::signer::SignerMethod] {
+            self.inner.supported_methods()
+        }
+
+        async fn sign_ecdsa(
+            &self,
+            path: &DerivationPath,
+            sighash: [u8; 32],
+        ) -> Result<
+            (
+                dashcore::secp256k1::ecdsa::Signature,
+                dashcore::secp256k1::PublicKey,
+            ),
+            Self::Error,
+        > {
+            self.inner.sign_ecdsa(path, sighash).await
+        }
+
+        async fn public_key(
+            &self,
+            path: &DerivationPath,
+        ) -> Result<dashcore::secp256k1::PublicKey, Self::Error> {
+            let is_first = {
+                let mut seen = self.public_key_requests.lock().expect("requests lock");
+                seen.push(path.clone());
+                seen.len() == 1
+            };
+            if !is_first {
+                return Err(format!(
+                    "underlying signer re-queried for {path} after the prefetch"
+                ));
+            }
+            self.inner.public_key(path).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExtendedPubKeySigner for RecordingCreditKeySigner {
+        async fn extended_public_key(
+            &self,
+            path: &DerivationPath,
+        ) -> Result<key_wallet::bip32::ExtendedPubKey, Self::Error> {
+            self.inner.extended_public_key(path).await
+        }
+    }
+
+    /// dashpay/platform#4184 review: the delegated builder must be served the
+    /// credit key from [`PrefetchedCreditKeySigner`]'s cache.
+    ///
+    /// The sibling failure test above only proves that a *prefetch* failure is
+    /// reservation-free — its signer rejects every `public_key` call, so that
+    /// build dies during the up-front prefetch and the wrapper is never
+    /// exercised. This pins the load-bearing other half: the prefetch asks the
+    /// underlying signer for exactly ONE key, that key's path is exactly the
+    /// credit path the builder returns, and the builder's own later request is
+    /// answered from cache without touching the underlying signer again.
+    ///
+    /// This fails if the prefetch and delegated paths ever diverge (the
+    /// wrapper's `*path == self.path` guard misses, so the request delegates
+    /// and hits the poisoned second call) or if the wrapper stops caching.
+    #[tokio::test]
+    async fn delegated_builder_serves_credit_key_from_prefetch_cache() {
+        let (manager, signer, _persistence) =
+            funded_asset_lock_manager(Arc::new(AlwaysOkBroadcaster)).await;
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recording = RecordingCreditKeySigner {
+            inner: signer.clone(),
+            public_key_requests: Arc::clone(&requests),
+        };
+
+        let (_tx, credit_path) = manager
+            .build_asset_lock_transaction(
+                5_000_000,
+                0,
+                AssetLockFundingType::IdentityRegistration,
+                0,
+                &recording,
+                None,
+            )
+            .await
+            .expect("the delegated build must succeed when the credit key is cached");
+
+        let seen = requests.lock().expect("requests lock").clone();
+        assert_eq!(
+            seen.len(),
+            1,
+            "the underlying signer must be asked for a public key exactly once (the \
+             prefetch) — the builder's own credit-key request must hit the cache, saw {seen:?}"
+        );
+        assert_eq!(
+            seen[0], credit_path,
+            "the prefetched path must be exactly the credit path the builder returns"
+        );
+    }
+
+    /// dashpay/platform#4184 review: an explicitly-selected **Standard BIP32**
+    /// funding account must have its own xpub passed to `set_funding`.
+    ///
+    /// `TransactionBuilder::set_funding(funds_acc, acc)` calls
+    /// `funds_acc.next_change_address(Some(&acc.account_xpub), true)` before the
+    /// `set_change_address` override. When the selected BIP32 account has no
+    /// pre-generated unused internal address, that call *derives* one — so
+    /// passing the BIP44 change account as `acc` (the pre-fix behaviour) derives
+    /// `[1, index]` from the BIP44 xpub while recording it under the BIP32
+    /// account's own path. Overriding this transaction's change output does not
+    /// undo the pool mutation: a later normal BIP32 send can pick that entry as
+    /// change and record a derivation path whose signer key does not match the
+    /// address.
+    ///
+    /// The existing 25-test suite covers default BIP44 and explicit
+    /// CoinJoin/DashPay funding only — for those the xpub is either already
+    /// correct or immaterial (non-Standard change derivation fails and is
+    /// swallowed), so reverting the lookup leaves them all green. This test
+    /// exhausts the BIP32 internal pool first to force the derivation, then
+    /// asserts every pool entry is still signable at its recorded path.
+    #[tokio::test]
+    async fn shielded_selected_bip32_account_change_pool_derives_from_its_own_xpub() {
+        use key_wallet::managed_account::managed_account_trait::ManagedAccountTrait;
+
+        let (wallet_manager, wallet_id, _balance, signer) =
+            crate::test_support::funded_wallet_manager_with_outputs(
+                StandardAccountType::BIP32Account,
+                &[20_000_000],
+            )
+            .await;
+        let sdk = Arc::new(dash_sdk::SdkBuilder::new_mock().build().expect("mock sdk"));
+        let manager = Arc::new(AssetLockManager::new(
+            sdk,
+            Arc::clone(&wallet_manager),
+            wallet_id,
+            Arc::new(Notify::new()),
+            Arc::new(AlwaysOkBroadcaster),
+            WalletPersister::new(
+                wallet_id,
+                Arc::new(CapturingPersistence::default()) as Arc<dyn PlatformWalletPersistence>,
+            ),
+        ));
+
+        // The account-level path naming BIP32 account 0 as the single funding
+        // source, and the BIP44 xpub whose derivations must NOT appear in the
+        // BIP32 pool.
+        let bip32_path = {
+            let wm = wallet_manager.read().await;
+            let (_, info) = wm.get_wallet_and_info(&wallet_id).expect("wallet present");
+            let network = info.core_wallet.network();
+            info.core_wallet
+                .accounts
+                .standard_bip32_accounts
+                .get(&0)
+                .expect("fixture has BIP32 account 0")
+                .managed_account_type()
+                .to_account_type()
+                .derivation_path(network)
+                .expect("BIP32 account-level path")
+        };
+
+        // Exhaust the BIP32 account's pre-generated unused internal entries, so
+        // `set_funding`'s `next_change_address` has to derive a fresh one from
+        // whichever xpub it was handed — the branch this fix governs.
+        {
+            let mut wm = wallet_manager.write().await;
+            let (_, info) = wm
+                .get_wallet_mut_and_info_mut(&wallet_id)
+                .expect("wallet present");
+            let account = info
+                .core_wallet
+                .first_bip32_managed_account_mut()
+                .expect("fixture has a managed BIP32 account 0");
+            if let ManagedAccountType::Standard {
+                internal_addresses, ..
+            } = account.managed_account_type_mut()
+            {
+                let generated: Vec<u32> = internal_addresses.addresses.keys().copied().collect();
+                assert!(
+                    !generated.is_empty(),
+                    "fixture should pre-generate some internal addresses to exhaust"
+                );
+                for index in generated {
+                    internal_addresses.mark_index_used(index);
+                }
+            } else {
+                panic!("BIP32 account 0 should be a Standard managed account");
+            }
+        }
+
+        manager
+            .build_asset_lock_transaction(
+                15_000_000,
+                0,
+                AssetLockFundingType::AssetLockShieldedAddressTopUp,
+                0,
+                &signer,
+                Some(bip32_path),
+            )
+            .await
+            .expect("explicit BIP32-account shielded build should succeed");
+
+        // Every internal-pool entry must be spendable with the key at its own
+        // recorded path. An entry derived from the BIP44 xpub but filed under the
+        // BIP32 account's path fails exactly here — the address and the signer
+        // key disagree.
+        let entries: Vec<(DerivationPath, DashAddress)> = {
+            let mut wm = wallet_manager.write().await;
+            let (_, info) = wm
+                .get_wallet_mut_and_info_mut(&wallet_id)
+                .expect("wallet present");
+            let account = info
+                .core_wallet
+                .first_bip32_managed_account_mut()
+                .expect("managed BIP32 account 0");
+            match account.managed_account_type_mut() {
+                ManagedAccountType::Standard {
+                    internal_addresses, ..
+                } => internal_addresses
+                    .addresses
+                    .values()
+                    .map(|info| (info.path.clone(), info.address.clone()))
+                    .collect(),
+                _ => panic!("BIP32 account 0 should be a Standard managed account"),
+            }
+        };
+        assert!(
+            entries.len() > 1,
+            "the build should have appended a freshly-derived internal address"
+        );
+        for (path, address) in entries {
+            let public_key = signer
+                .public_key(&path)
+                .await
+                .expect("test wallet can derive any of its own paths");
+            let expected = DashAddress::p2pkh(
+                &dashcore::PublicKey::new(public_key),
+                dashcore::Network::Testnet,
+            );
+            assert_eq!(
+                expected, address,
+                "BIP32 internal-pool entry at {path} was derived from the wrong xpub"
+            );
+        }
     }
 
     /// On-device regression: a real CoinJoin account holds many small mixed
