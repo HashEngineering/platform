@@ -272,6 +272,16 @@ pub enum PlatformWalletFFIResultCode {
     /// #4247/#4256; 34-36 the #4185 deferred-token trio), and 28/30 are vacated
     /// but RESERVED, so 37 is the only correct allocation.
     ErrorShieldedInviteAlreadyClaimed = 37,
+    /// A quiesce/drain barrier did not complete within its budget: an
+    /// in-flight sync pass was still running when a Clear / reset /
+    /// sync-stop needed it provably drained. The operation failed closed
+    /// (no state was wiped) and the host should retry once sync is idle.
+    /// NOT returned by `platform_wallet_manager_destroy` — with owned
+    /// callback contexts (`release_fn`) a straggling worker keeps its
+    /// context alive and releases it on exit, so destroy logs a non-clean
+    /// join instead of erroring. Swift mirror:
+    /// `PlatformWalletResultCode.errorShutdownIncomplete`.
+    ErrorShutdownIncomplete = 27,
     /// Maps `PlatformWalletError::TransactionBuild`. A Core transaction could
     /// not be assembled from the request — the request itself is at fault, and
     /// the host must change it rather than retry it verbatim. It is the code
@@ -644,6 +654,12 @@ impl PlatformWalletFFIResultCode {
                 if s.starts_with(rs_sdk_ffi::DASH_SDK_SIGNER_ERR_KEY_UNAVAILABLE_PREFIX) =>
             {
                 PlatformWalletFFIResultCode::ErrorSigningKeyUnavailable
+            }
+            // A quiesce/drain barrier that did not complete within budget
+            // (clear/reset paths). The host must fail closed: keep its
+            // callback context alive and skip any paired persistence wipe.
+            PlatformWalletError::ShutdownIncomplete(..) => {
+                PlatformWalletFFIResultCode::ErrorShutdownIncomplete
             }
             _ => PlatformWalletFFIResultCode::ErrorUnknown,
         }

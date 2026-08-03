@@ -281,6 +281,7 @@ sealed class DashSdkError(
             }
         }
 
+        /**
          * `ErrorTransactionBroadcastRejected` (native code 26). Core
          * DEFINITIVELY rejected the core transaction: it is not on the network
          * and will not get there. The build's UTXO reservation was released and,
