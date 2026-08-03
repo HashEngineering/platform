@@ -171,7 +171,16 @@ afterEvaluate {
             if (githubPackagesCredentialsPresent) {
                 maven {
                     name = "githubPackages"
-                    url = uri("https://maven.pkg.github.com/dashpay/platform")
+                    // Publishing a package requires WRITE on the DESTINATION
+                    // repo; fork-based contributors do not have it on
+                    // dashpay/platform. Pre-release QA AARs therefore default
+                    // to the consumer repo, whose own CI resolves them with
+                    // the workflow's automatic GITHUB_TOKEN. Override with
+                    // -PgithubPackagesRepo=owner/repo.
+                    url = uri(
+                        "https://maven.pkg.github.com/" +
+                            (findProperty("githubPackagesRepo") as String? ?: "dashpay/dash-wallet")
+                    )
                     credentials {
                         username = githubPackagesUser
                         password = githubPackagesToken
