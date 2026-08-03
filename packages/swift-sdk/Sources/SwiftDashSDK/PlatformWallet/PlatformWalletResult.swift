@@ -69,24 +69,33 @@ public enum PlatformWalletResultCode: Int32, Sendable {
     /// Core definitively rejected the transaction. Its reserved inputs were
     /// released and a corrected transaction may be submitted again.
     case errorTransactionBroadcastRejected = 26
+    // Codes 27-33 are claimed outside this PR and must not be reused here:
+    // 27 errorShutdownIncomplete (dashpay/platform#4268, merged), 29
+    // errorAssetLockInsufficientFunds (#4184), 31 errorSigningKeyUnavailable
+    // (#4183/#4259), 32 errorTransactionBuild (#4247/#4256), 33
+    // errorTransactionSigning (#4256); 28 and 30 are free. The deferred-token
+    // trio therefore occupies the contiguous block 34-36. These raw values
+    // MUST match `PlatformWalletFFIResultCode` in
+    // packages/rs-platform-wallet-ffi/src/error.rs — there is no compile-time
+    // check across the ABI. See ERROR_CODE_REGISTRY.md (#4261).
     /// A deferred (BIP70/BIP270) reservation token has outlived its funding
     /// reservation's lifetime: key-wallet's TTL may already have swept and
     /// re-selected the inputs, so acting on it could touch a newer, unrelated
     /// reservation. The call did NOT touch the network. NOT retryable in place —
     /// rebuild the payment.
-    case errorStaleReservationToken = 27
+    case errorStaleReservationToken = 34
     /// A deferred reservation token is unknown, already broadcast, or already
     /// released — the guard that turns a double-broadcast (or a broadcast after
     /// release) into a typed error instead of a second send. The call did NOT
     /// touch the network. NOT retryable: rebuild the payment. (Release is
     /// idempotent and never surfaces this.)
-    case errorReservationTokenConsumed = 28
+    case errorReservationTokenConsumed = 35
     /// A deferred reservation token was minted against a different wallet
     /// *generation* than the one broadcasting it (e.g. a wallet re-created under
     /// the same id); its reservation lives in that other generation's reservation
     /// set. The call did NOT touch the network and did NOT consume the rightful
     /// owner's token. NOT retryable through this handle: rebuild the payment.
-    case errorReservationWalletMismatch = 30
+    case errorReservationWalletMismatch = 36
     /// The named thing does not exist. Besides the handle/lookup failures this
     /// has always covered, BOTH deferred-send paths report the
     /// wallet-was-REMOVED case here.
@@ -102,7 +111,7 @@ public enum PlatformWalletResultCode: Int32, Sendable {
     /// handle whose generation is gone.
     ///
     /// Every one of these reconciles the build's UTXO reservation before
-    /// returning. Distinct from `errorReservationWalletMismatch` (30), where a
+    /// returning. Distinct from `errorReservationWalletMismatch` (36), where a
     /// *different* live generation answers to the same id. The call did NOT touch
     /// the network and is NOT retryable — the wallet is gone.
     case notFound = 98
