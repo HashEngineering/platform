@@ -206,15 +206,23 @@ pub enum PlatformWalletFFIResultCode {
     /// host may safely retry after addressing the rejection reason.
     ErrorTransactionBroadcastRejected = 26,
     // Code 26 above (ErrorTransactionBroadcastRejected) landed on v4.1-dev.
-    // Post-reintegration allocation of the 27-32 range:
-    //   27  ErrorStaleReservationToken          (#4185)
-    //   28  ErrorReservationTokenConsumed        (#4185)
+    // Post-reintegration allocation of the 27-37 range, per the registry
+    // (ERROR_CODE_REGISTRY.md, dashpay/platform#4261):
+    //   27  ErrorShutdownIncomplete              (#4268, MERGED on v4.2-dev)
+    //   28  vacated but RESERVED
     //   29  ErrorAssetLockInsufficientFunds      (#4184)
-    //   30  reserved: ErrorAssetLockCrossDomainConsentRequired (#4184, not yet
-    //       allocated in any merged branch)
-    //   31  ErrorSigningKeyUnavailable           (#4183)
-    //   32  ErrorReservationWalletMismatch       (#4185, renumbered off 29 which
-    //       #4184 took under the reserved-slot plan)
+    //   30  vacated but RESERVED (was #4184's
+    //       ErrorAssetLockCrossDomainConsentRequired, never allocated)
+    //   31  ErrorSigningKeyUnavailable           (#4183, #4259)
+    //   32  ErrorTransactionBuild                (#4247, also carried by #4256)
+    //   33  ErrorTransactionSigning              (#4256)
+    //   34  ErrorStaleReservationToken           (#4185)
+    //   35  ErrorReservationTokenConsumed        (#4185)
+    //   36  ErrorReservationWalletMismatch       (#4185)
+    //   37  ErrorShieldedInviteAlreadyClaimed    (#4204)
+    // The deferred-token trio moved off 27/28/32 once #4268 merged
+    // ErrorShutdownIncomplete = 27 into the v4.2-dev ABI; the contiguous block
+    // 34-36 sits above every current claim and ends the renumbering churn.
     // The variants themselves are declared below in source order, not numeric
     // order.
     /// Asset-lock coin selection came up short over the *permitted* funding set
@@ -264,7 +272,86 @@ pub enum PlatformWalletFFIResultCode {
     /// #4247/#4256; 34-36 the #4185 deferred-token trio), and 28/30 are vacated
     /// but RESERVED, so 37 is the only correct allocation.
     ErrorShieldedInviteAlreadyClaimed = 37,
+    /// Maps `PlatformWalletError::TransactionBuild`. A Core transaction could
+    /// not be assembled from the request — the request itself is at fault, and
+    /// the host must change it rather than retry it verbatim. It is the code
+    /// every `build_signed_payment` rejection lands on EXCEPT a signing
+    /// failure, which is [`Self::ErrorTransactionSigning`] (33):
+    ///
+    /// * the named `funding_path` matches no spendable funds account, or names
+    ///   a watch-only one whose coins the local mnemonic cannot sign — the two
+    ///   failure modes the single-account design rests on
+    ///   (dashpay/platform#4184);
+    /// * the request violates a monetary bound (`MAX_MONEY` output total,
+    ///   `MAX_FEE_PER_KB` fee rate, a below-dust recipient output, or an
+    ///   over-`MAX_STANDARD_TX_SIZE` recipient list);
+    /// * the recipients blob failed to decode.
+    ///
+    /// These previously flattened to `ErrorUnknown` (99), reaching Kotlin as
+    /// `DashSdkError.PlatformWallet.Generic` and leaving the host to
+    /// string-match the message to tell a bad funding path from a bad amount
+    /// (dashpay/platform#4247 review). The specific cause still travels in the
+    /// result `message` via the typed `Display`.
+    ///
+    /// Numbering: 32, per the registry (dashpay/platform#4261). 27 is
+    /// `ErrorShutdownIncomplete` (merged, #4268), 29 is
+    /// `ErrorAssetLockInsufficientFunds` (#4184) and 31 is
+    /// `ErrorSigningKeyUnavailable` (#4183/#4259); 28 and 30 are
+    /// vacated-but-reserved. The signing sibling
+    /// [`Self::ErrorTransactionSigning`] takes 33 and the deferred-token trio
+    /// sits above at 34-36.
+    ErrorTransactionBuild = 32,
 
+    /// Maps `PlatformWalletError::TransactionSigning`. The request was valid
+    /// and the transaction was fully assembled — only the input signatures
+    /// could not be produced. The host should repair the signer (unlock the
+    /// Keychain/Keystore, restore the mnemonic, fix the resolver callback) and
+    /// may then resubmit the IDENTICAL request: key-wallet
+    /// `release_if_owner`-releases this build's owner-stamped input
+    /// reservation before returning, so the coins are selectable again.
+    ///
+    /// Split out of [`Self::ErrorTransactionBuild`] (32), whose contract is the
+    /// opposite — "the request is at fault, a verbatim retry fails
+    /// identically". That was false for the production
+    /// `MnemonicResolverCoreSigner`, where a locked or missing Keychain
+    /// mnemonic surfaces as `BuilderError::SigningFailed`
+    /// (dashpay/platform#4256 review).
+    ///
+    /// Numbering: 33, per the registry (dashpay/platform#4261). 27 is
+    /// `ErrorShutdownIncomplete` (merged, #4268), 29 is
+    /// `ErrorAssetLockInsufficientFunds` (#4184), 31 is
+    /// `ErrorSigningKeyUnavailable` (#4183/#4259) and 32 is the sibling
+    /// [`Self::ErrorTransactionBuild`]; 28 and 30 are vacated-but-reserved. The
+    /// deferred-token trio sits above at 34-36.
+    ///
+    /// The review suggested reusing 31. That code is genuinely reserved, but
+    /// for a *different* contract: #4183's `ErrorSigningKeyUnavailable` is a
+    /// **state-transition** failure asserting that the signer holds no usable
+    /// private key for a requested public key, restored from the typed
+    /// `DashSDKSignerErrorCode::SigningKeyUnavailable` completion code. This
+    /// code is a **Core L1 input** signing failure with no such provenance:
+    /// `BuilderError::SigningFailed` also covers an unresolved input
+    /// derivation path, a sighash computation failure, and a malformed
+    /// signature encoding, so mapping it onto 31 would assert "the key is
+    /// unavailable" for failures that are nothing of the kind. Kept separate
+    /// so neither contract has to be weakened.
+    ErrorTransactionSigning = 33,
+
+    // Codes 27-33 are claimed outside this PR and MUST NOT be reused here.
+    // The deferred-token trio below therefore occupies the contiguous block
+    // 34-36. Current owners (see ERROR_CODE_REGISTRY.md, dashpay/platform#4261):
+    //
+    //   27  ErrorShutdownIncomplete         MERGED on v4.2-dev (dashpay/platform#4268)
+    //   28  (free — vacated by this PR)
+    //   29  ErrorAssetLockInsufficientFunds dashpay/platform#4184
+    //   30  (free — vacated by this PR)
+    //   31  ErrorSigningKeyUnavailable      dashpay/platform#4183, #4259
+    //   32  ErrorTransactionBuild           dashpay/platform#4247, #4256
+    //   33  ErrorTransactionSigning         dashpay/platform#4256
+    //
+    // This trio previously sat at 26-28, then 27/28/30. It moved to 34-36 after
+    // #4268 merged `ErrorShutdownIncomplete = 27` into the v4.2-dev ABI; the
+    // contiguous block above every current claim ends the renumbering churn.
     /// Maps `SignedPaymentError::StaleReservationToken` from the deferred
     /// build → broadcast/release core-send lifecycle (`core_wallet_signed_payment_*`):
     /// the token has outlived the registry's `RESERVATION_MAX_AGE_BLOCKS` bound
@@ -274,19 +361,19 @@ pub enum PlatformWalletFFIResultCode {
     /// place — the host must rebuild the payment.
     ///
     /// Sibling codes split out the other two deferred-token failures that this
-    /// code used to conflate: [`Self::ErrorReservationTokenConsumed`] (28,
+    /// code used to conflate: [`Self::ErrorReservationTokenConsumed`] (35,
     /// unknown / already broadcast / already released) and
-    /// [`Self::ErrorReservationWalletMismatch`] (32, minted against a different
+    /// [`Self::ErrorReservationWalletMismatch`] (36, minted against a different
     /// wallet generation). All three are non-retryable-in-place and none touched
     /// the network; they are distinct codes so a host can message each precisely.
-    ErrorStaleReservationToken = 27,
+    ErrorStaleReservationToken = 34,
 
     /// Maps `SignedPaymentError::StaleToken`. The deferred reservation token is
     /// unknown, already broadcast, or already released — the guard that turns a
     /// double-broadcast (or a broadcast after release) into a typed error
     /// instead of a second send. Did NOT touch the network; NOT retryable
     /// (rebuild the payment). Release is idempotent and never surfaces this.
-    ErrorReservationTokenConsumed = 28,
+    ErrorReservationTokenConsumed = 35,
 
     /// Maps `SignedPaymentError::WalletMismatch`. The deferred reservation token
     /// was minted against a different wallet *generation* than the one it is
@@ -295,14 +382,26 @@ pub enum PlatformWalletFFIResultCode {
     /// touch the network and did NOT consume the rightful owner's token; NOT
     /// retryable through this handle (rebuild the payment).
     ///
-    /// Renumbered 29 → 32 during the v4.1 re-integration: code 29 was taken by
-    /// [`Self::ErrorAssetLockInsufficientFunds`] (dashpay/platform#4184) under
-    /// the reserved-slot plan, and 30/31 are reserved/allocated
-    /// (AssetLockCrossDomainConsentRequired / ErrorSigningKeyUnavailable), so
-    /// this sibling reservation-token error moved to the first free slot, 32.
-    ErrorReservationWalletMismatch = 32,
+    ErrorReservationWalletMismatch = 36,
 
-    NotFound = 98, // Used exclusively for all the Option that are retuned as errors
+    /// The named thing does not exist.
+    ///
+    /// Originally (and still mostly) the code for every `Option` returned as an
+    /// error — a handle that resolves to nothing, a lookup that came back empty.
+    ///
+    /// The deferred build → broadcast/release lifecycle also reports its
+    /// wallet-was-REMOVED case here rather than minting a fourth
+    /// deferred-token code, because it *is* that same "does not exist" case:
+    /// `core_wallet_signed_payment_broadcast` maps
+    /// `SignedPaymentError::WalletRemoved` (the token's wallet is no longer
+    /// registered in the manager), and `core_wallet_signed_payment_finalize`
+    /// refuses to register a payment whose wallet was removed while it was being
+    /// signed — reconciling that build's reservation before returning. Neither
+    /// touched the network. Contrast [`Self::ErrorReservationWalletMismatch`]
+    /// (36), where a DIFFERENT live generation answers to the same wallet id;
+    /// here there is no live generation at all, so there is nothing to retry
+    /// against (`dashpay/platform#4185`).
+    NotFound = 98,
     ErrorUnknown = 99,
 }
 
@@ -479,6 +578,26 @@ impl PlatformWalletFFIResultCode {
             PlatformWalletError::CoreInsufficientFunds { .. }
             | PlatformWalletError::PaymentInsufficientFunds { .. } => {
                 PlatformWalletFFIResultCode::ErrorCoreInsufficientFunds
+            }
+            // A valid request whose signatures could not be produced. Must NOT
+            // share `ErrorTransactionBuild`'s "retrying cannot help" contract:
+            // the reservation was released and unlocking the signer makes the
+            // identical request succeed (dashpay/platform#4256 review).
+            PlatformWalletError::TransactionSigning(..) => {
+                PlatformWalletFFIResultCode::ErrorTransactionSigning
+            }
+            // Every `build_signed_payment` rejection that is neither a shortfall
+            // nor a signing failure arrives here: an unmatched or watch-only
+            // `funding_path`, a monetary-bound violation (MAX_MONEY /
+            // MAX_FEE_PER_KB / dust / MAX_STANDARD_TX_SIZE), or a
+            // recipients-blob decode failure.
+            // Without this arm they all flattened to `ErrorUnknown` (99), so
+            // the two failure modes the single-account design rests on —
+            // "that path names no spendable account" and "that path is
+            // watch-only" — were distinguishable only by string-matching the
+            // message (dashpay/platform#4247 review).
+            PlatformWalletError::TransactionBuild(..) => {
+                PlatformWalletFFIResultCode::ErrorTransactionBuild
             }
             PlatformWalletError::AssetLockNotTracked(..) => {
                 PlatformWalletFFIResultCode::ErrorAssetLockNotTracked
@@ -873,6 +992,120 @@ mod tests {
                 PlatformWalletFFIResultCode::ErrorCoreInsufficientFunds
             );
         }
+    }
+
+    /// The one-shot payment primitive's shortfall shares code 22 with the
+    /// atomic builder's. Pinned separately from
+    /// `atomic_core_insufficient_funds_maps_to_dedicated_code`, which only ever
+    /// constructs `CoreInsufficientFunds`: if a cleanup dropped
+    /// `PaymentInsufficientFunds` from that arm it would silently fall through
+    /// to `ErrorUnknown` and no existing test would notice.
+    #[test]
+    fn payment_insufficient_funds_shares_the_core_shortfall_code() {
+        let result: PlatformWalletFFIResult = PlatformWalletError::PaymentInsufficientFunds {
+            available: 9_000_000,
+            required: 15_000_000,
+        }
+        .into();
+        assert_eq!(
+            result.code,
+            PlatformWalletFFIResultCode::ErrorCoreInsufficientFunds
+        );
+        let msg = unsafe { std::ffi::CStr::from_ptr(result.message) }.to_string_lossy();
+        assert!(
+            msg.contains("9000000") && msg.contains("15000000"),
+            "the single-account available/required duffs must survive in the \
+             message: {msg}"
+        );
+    }
+
+    /// Every `build_signed_payment` rejection that is not a shortfall is a
+    /// `TransactionBuild`, and must reach the host as its own code rather than
+    /// `ErrorUnknown` (99) — otherwise "that funding path names no spendable
+    /// account" and "that funding path is watch-only", the two failure modes
+    /// the single-account design rests on, are distinguishable only by
+    /// string-matching (dashpay/platform#4247 review).
+    #[test]
+    fn transaction_build_failures_map_to_a_dedicated_code() {
+        for message in [
+            "no spendable funds account matches funding derivation path m/44'/5'/7'",
+            "funding derivation path m/9'/5'/4'/0' names a watch-only account",
+            "output amounts overflow or exceed MAX_MONEY",
+            "fee rate 99999999999 duffs/kB exceeds the maximum",
+            "recipients blob declares 4294967295 outputs but holds at most 0",
+        ] {
+            let result: PlatformWalletFFIResult =
+                PlatformWalletError::TransactionBuild(message.to_string()).into();
+            assert_eq!(
+                result.code,
+                PlatformWalletFFIResultCode::ErrorTransactionBuild,
+                "{message:?} must not flatten to ErrorUnknown"
+            );
+            let rendered = unsafe { std::ffi::CStr::from_ptr(result.message) }.to_string_lossy();
+            assert!(
+                rendered.contains(message),
+                "the specific cause must survive in the message: {rendered}"
+            );
+        }
+    }
+
+    /// The new code must not silently collide with a sibling v4.1 stack PR's
+    /// (27–31 are claimed; see the variant's doc comment).
+    #[test]
+    fn transaction_build_code_is_thirty_two() {
+        assert_eq!(
+            PlatformWalletFFIResultCode::ErrorTransactionBuild as i32,
+            32
+        );
+    }
+
+    /// A signing failure must NOT arrive as `ErrorTransactionBuild`, whose
+    /// contract promises the request itself is invalid and a verbatim retry
+    /// cannot succeed. A locked or missing Keychain mnemonic is the common
+    /// cause, and key-wallet releases the input reservation on that path, so
+    /// the identical request succeeds after an unlock (dashpay/platform#4256
+    /// review).
+    #[test]
+    fn signing_failures_do_not_share_the_request_invalid_code() {
+        for message in [
+            "payment signing failed: mnemonic unavailable: keychain is locked",
+            "payment signing failed: resolver callback returned 0",
+            "payment signing failed: no derivation path for input address \
+             yWrbmMHFj9xTUJTS7Nb1Y2WJmwLbCzTLDX",
+        ] {
+            let result: PlatformWalletFFIResult =
+                PlatformWalletError::TransactionSigning(message.to_string()).into();
+            assert_ne!(
+                result.code,
+                PlatformWalletFFIResultCode::ErrorTransactionBuild,
+                "{message:?} is retryable after a signer repair and must not \
+                 claim the request-invalid contract"
+            );
+            assert_eq!(
+                result.code,
+                PlatformWalletFFIResultCode::ErrorTransactionSigning
+            );
+            let rendered = unsafe { std::ffi::CStr::from_ptr(result.message) }.to_string_lossy();
+            assert!(
+                rendered.contains(message),
+                "the specific cause must survive in the message: {rendered}"
+            );
+        }
+    }
+
+    /// 27–32 are claimed across the sibling v4.1 stack (see the variant doc),
+    /// so the signing code takes 33. Pinned so a rebase that renumbers the
+    /// range cannot silently move a code the hosts already switch on.
+    #[test]
+    fn transaction_signing_code_is_thirty_three() {
+        assert_eq!(
+            PlatformWalletFFIResultCode::ErrorTransactionSigning as i32,
+            33
+        );
+        assert_ne!(
+            PlatformWalletFFIResultCode::ErrorTransactionSigning as i32,
+            PlatformWalletFFIResultCode::ErrorTransactionBuild as i32,
+        );
     }
 
     #[test]

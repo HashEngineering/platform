@@ -7,7 +7,7 @@
 //! the **signed serialized transaction bytes** plus the computed fee and change
 //! amount. It does NOT broadcast and does NOT persist a debit — the caller
 //! commits/broadcasts the returned bytes itself (dashj during the Android
-//! transition; a later SDK-broadcast mode afterwards).
+//! transition; an SDK-broadcast mode afterwards).
 //!
 //! Coin selection never unions funding accounts: `funding_path` names exactly
 //! one, defaulting to the unmixed BIP44 account. See
@@ -51,17 +51,23 @@ fn decode_payment_outputs(
     // (Android armeabi-v7a) can overflow and panic inside this `extern "C"`
     // frame, where the JNI guard cannot safely recover it.
     let read_u32 = |buf: &[u8], at: &mut usize| -> Result<u32, PlatformWalletError> {
-        let end = at.checked_add(4).filter(|e| *e <= buf.len()).ok_or_else(|| {
-            PlatformWalletError::TransactionBuild("truncated recipients blob (u32)".to_string())
-        })?;
+        let end = at
+            .checked_add(4)
+            .filter(|e| *e <= buf.len())
+            .ok_or_else(|| {
+                PlatformWalletError::TransactionBuild("truncated recipients blob (u32)".to_string())
+            })?;
         let v = u32::from_be_bytes([buf[*at], buf[*at + 1], buf[*at + 2], buf[*at + 3]]);
         *at = end;
         Ok(v)
     };
     let read_u64 = |buf: &[u8], at: &mut usize| -> Result<u64, PlatformWalletError> {
-        let end = at.checked_add(8).filter(|e| *e <= buf.len()).ok_or_else(|| {
-            PlatformWalletError::TransactionBuild("truncated recipients blob (u64)".to_string())
-        })?;
+        let end = at
+            .checked_add(8)
+            .filter(|e| *e <= buf.len())
+            .ok_or_else(|| {
+                PlatformWalletError::TransactionBuild("truncated recipients blob (u64)".to_string())
+            })?;
         let mut b = [0u8; 8];
         b.copy_from_slice(&buf[*at..end]);
         *at = end;
@@ -81,9 +87,9 @@ fn decode_payment_outputs(
         )));
     }
     let mut outputs = Vec::new();
-    outputs.try_reserve_exact(count).map_err(|e| {
-        err(format!("cannot allocate {count} recipient outputs: {e}"))
-    })?;
+    outputs
+        .try_reserve_exact(count)
+        .map_err(|e| err(format!("cannot allocate {count} recipient outputs: {e}")))?;
     for _ in 0..count {
         let addr_len = read_u32(blob, &mut cursor)? as usize;
         let end = cursor
@@ -97,9 +103,11 @@ fn decode_payment_outputs(
 
         let parsed = DashAddress::from_str(addr_str)
             .map_err(|e| err(format!("invalid recipient address {addr_str:?}: {e}")))?;
-        let address = parsed
-            .require_network(network)
-            .map_err(|e| err(format!("recipient address {addr_str:?} network mismatch: {e}")))?;
+        let address = parsed.require_network(network).map_err(|e| {
+            err(format!(
+                "recipient address {addr_str:?} network mismatch: {e}"
+            ))
+        })?;
         outputs.push((address, amount));
     }
     Ok(outputs)
@@ -290,7 +298,7 @@ pub unsafe extern "C" fn core_wallet_build_signed_payment_with_token(
     let c_txid = match CString::new(payment.transaction.txid().to_string()) {
         Ok(s) => s,
         Err(_) => {
-            runtime().block_on(core.abandon_payment(&payment));
+            runtime().block_on(core.abandon_payment(payment));
             return PlatformWalletFFIResult::err(
                 PlatformWalletFFIResultCode::ErrorUtf8Conversion,
                 "txid string contained an interior NUL".to_string(),
@@ -311,14 +319,18 @@ pub unsafe extern "C" fn core_wallet_build_signed_payment_with_token(
             core.clone(),
             payment.transaction.clone(),
             payment.funding.clone(),
-            Some(payment.reservation_height),
+            // The height sampled inside the funding critical section, mandatory
+            // since #4185: the age guard must baseline off the build's own clock.
+            payment.reservation_height,
             payment.reservation_token,
         ),
     );
 
     *out_tx_bytes = Box::into_raw(serialized.into_boxed_slice()) as *mut u8;
     *out_tx_len = len;
-    *out_token = token;
+    // `ReservationToken` is a newtype since #4185; `as_u64` is the one
+    // conversion, applied here at the C ABI boundary.
+    *out_token = token.as_u64();
     *out_fee = payment.fee;
     *out_change = payment.change_amount;
     *out_txid = c_txid.into_raw();
@@ -335,5 +347,279 @@ pub unsafe extern "C" fn core_wallet_build_signed_payment_with_token(
 pub unsafe extern "C" fn core_wallet_free_payment_bytes(bytes: *mut u8, len: usize) {
     if !bytes.is_null() && len > 0 {
         let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(bytes, len));
+    }
+}
+
+/// Release the UTXO reservation a [`core_wallet_build_signed_payment`] call
+/// took, for a build the caller has decided NOT to broadcast.
+///
+/// `build_signed_payment` leaves its selected inputs reserved on success,
+/// because the expected next step is a broadcast. A caller that abandons the
+/// build instead — the user backed out, an upstream check failed, the app is
+/// tearing down — must call this, or those coins stay unselectable until
+/// key-wallet's 24-block TTL backstop reclaims them. Before the first sync
+/// completes that backstop never fires at all (`ReservationSet::sweep`
+/// early-returns at height 0), so without this call a single abandoned build
+/// on a freshly restored wallet can strand the whole balance for the life of
+/// the process (dashpay/platform#4247 review). This call consults no height.
+///
+/// Releases ONLY this build's own inputs: the transaction is the ownership
+/// signal, since a reserved outpoint is skipped by every other build's coin
+/// selection, so no concurrent build can hold a reservation on any input of
+/// `tx_bytes`.
+///
+/// Idempotent, and a silent no-op when the transaction was in fact broadcast —
+/// safe to wire into an unconditional cleanup path without tracking whether the
+/// broadcast succeeded.
+///
+/// * `handle` — a core-wallet handle (`platform_wallet_get_core`).
+/// * `tx_bytes`/`tx_bytes_len` — the consensus-serialized signed transaction
+///   exactly as `core_wallet_build_signed_payment` returned it.
+/// * `funding_path_ptr`/`funding_path_len` — the SAME optional funding path the
+///   build was given, so the release lands on the account holding the
+///   reservation. `null` / `0` means the unmixed BIP44 account, as it does for
+///   the build. A path naming a different account is harmless but frees
+///   nothing.
+///
+/// # Safety
+/// `tx_bytes` must be readable for `tx_bytes_len` bytes; `funding_path_ptr`,
+/// when non-null, must point to `funding_path_len` readable bytes for the
+/// duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn core_wallet_release_payment_reservation(
+    handle: Handle,
+    tx_bytes: *const u8,
+    tx_bytes_len: usize,
+    funding_path_ptr: *const u8,
+    funding_path_len: usize,
+) -> PlatformWalletFFIResult {
+    check_ptr!(tx_bytes);
+
+    let funding_path = match parse_optional_derivation_path(funding_path_ptr, funding_path_len) {
+        Ok(p) => p,
+        Err(result) => return result,
+    };
+
+    let raw = std::slice::from_raw_parts(tx_bytes, tx_bytes_len);
+    let transaction: dashcore::Transaction =
+        match dashcore::consensus::deserialize(raw).map_err(|e| {
+            PlatformWalletFFIResult::err(
+                PlatformWalletFFIResultCode::ErrorInvalidParameter,
+                format!("tx_bytes is not a consensus-serialized transaction: {e}"),
+            )
+        }) {
+            Ok(tx) => tx,
+            Err(result) => return result,
+        };
+
+    let option = CORE_WALLET_STORAGE.with_item(handle, |wallet| {
+        runtime().block_on(wallet.release_payment_reservation(&transaction, funding_path.clone()))
+    });
+
+    let result = unwrap_option_or_return!(option);
+    unwrap_result_or_return!(result);
+
+    PlatformWalletFFIResult::ok()
+}
+
+/// Decoder hardening tests.
+///
+/// `decode_payment_outputs` parses a caller-controlled blob inside an
+/// `extern "C"` frame, where a panic or an allocation abort cannot be recovered
+/// by the JNI guard. Every bound below was a blocking review finding on
+/// dashpay/platform#4247 and shipped without coverage; these pin them so a
+/// later cleanup cannot quietly reintroduce `Vec::with_capacity(count)` or
+/// unchecked cursor arithmetic.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dashcore::Network;
+
+    /// Encode one recipient row in the wire layout `decode_payment_outputs`
+    /// documents: `u32 addr_len`, the UTF-8 address, `u64 amount`.
+    fn row(address: &str, amount: u64) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&(address.len() as u32).to_be_bytes());
+        v.extend_from_slice(address.as_bytes());
+        v.extend_from_slice(&amount.to_be_bytes());
+        v
+    }
+
+    fn blob(rows: &[(&str, u64)]) -> Vec<u8> {
+        let mut v = (rows.len() as u32).to_be_bytes().to_vec();
+        for (a, amt) in rows {
+            v.extend_from_slice(&row(a, *amt));
+        }
+        v
+    }
+
+    fn testnet_address(id: usize) -> String {
+        DashAddress::dummy(Network::Testnet, id).to_string()
+    }
+
+    #[test]
+    fn decodes_a_well_formed_blob() {
+        let (a, b) = (testnet_address(1), testnet_address(2));
+        let decoded = decode_payment_outputs(
+            &blob(&[(a.as_str(), 1_000_000), (b.as_str(), 546)]),
+            Network::Testnet,
+        )
+        .expect("a well-formed blob decodes");
+
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].0.to_string(), a);
+        assert_eq!(decoded[0].1, 1_000_000);
+        assert_eq!(decoded[1].0.to_string(), b);
+        assert_eq!(decoded[1].1, 546);
+    }
+
+    #[test]
+    fn zero_outputs_decode_to_an_empty_vec() {
+        let decoded = decode_payment_outputs(&0u32.to_be_bytes(), Network::Testnet)
+            .expect("an empty list is a decode success");
+        assert!(
+            decoded.is_empty(),
+            "emptiness is rejected upstream, not here"
+        );
+    }
+
+    /// THE allocation blocker: a four-byte blob declaring `u32::MAX` outputs
+    /// must produce a decode error, never a ~64 GiB `Vec::with_capacity` that
+    /// takes Rust's process-aborting allocation-failure path inside
+    /// `extern "C"`.
+    #[test]
+    fn an_impossible_count_is_rejected_without_allocating() {
+        for count in [u32::MAX, u32::MAX / 2, 1_000_000, 1] {
+            let err = decode_payment_outputs(&count.to_be_bytes(), Network::Testnet)
+                .expect_err("a header-only blob cannot hold any output");
+            let PlatformWalletError::TransactionBuild(m) = err else {
+                panic!("expected a decode error for count {count}");
+            };
+            assert!(
+                m.contains("holds at most 0"),
+                "count {count} must be bounded by the blob length, got {m:?}"
+            );
+        }
+    }
+
+    /// The bound is computed from the remaining bytes, so a count that merely
+    /// overstates a non-empty blob is refused too.
+    #[test]
+    fn a_count_exceeding_the_rows_present_is_rejected() {
+        let a = testnet_address(1);
+        let mut b = blob(&[(a.as_str(), 1_000)]);
+        b[0..4].copy_from_slice(&9u32.to_be_bytes());
+
+        let err = decode_payment_outputs(&b, Network::Testnet).expect_err("9 rows are not present");
+        assert!(
+            matches!(err, PlatformWalletError::TransactionBuild(ref m) if m.contains("declares 9")),
+            "got {err:?}"
+        );
+    }
+
+    /// Checked cursor arithmetic: a truncated blob is a clean error at every
+    /// field boundary, never an out-of-bounds slice or a `cursor + len`
+    /// overflow panic (reachable on 32-bit Android targets).
+    #[test]
+    fn truncation_at_any_boundary_is_a_clean_error() {
+        let a = testnet_address(1);
+        let full = blob(&[(a.as_str(), 1_000)]);
+
+        for cut in 1..full.len() {
+            let err = decode_payment_outputs(&full[..cut], Network::Testnet)
+                .expect_err("a truncated blob must not decode");
+            assert!(
+                matches!(err, PlatformWalletError::TransactionBuild(_)),
+                "truncation at {cut} must be a decode error, got {err:?}"
+            );
+        }
+
+        // The full blob still decodes, so the loop above proved truncation is
+        // the cause rather than the fixture being malformed.
+        assert!(decode_payment_outputs(&full, Network::Testnet).is_ok());
+    }
+
+    /// A declared address length far beyond the blob must not panic on
+    /// `cursor + addr_len`.
+    #[test]
+    fn an_absurd_address_length_is_rejected() {
+        let mut b = 1u32.to_be_bytes().to_vec();
+        b.extend_from_slice(&u32::MAX.to_be_bytes());
+        b.extend_from_slice(&[0u8; 16]);
+
+        let err = decode_payment_outputs(&b, Network::Testnet)
+            .expect_err("an address longer than the blob must not decode");
+        assert!(
+            matches!(err, PlatformWalletError::TransactionBuild(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_non_utf8_address_is_rejected() {
+        let mut b = 1u32.to_be_bytes().to_vec();
+        b.extend_from_slice(&4u32.to_be_bytes());
+        b.extend_from_slice(&[0xff, 0xfe, 0xfd, 0xfc]);
+        b.extend_from_slice(&1_000u64.to_be_bytes());
+
+        let err = decode_payment_outputs(&b, Network::Testnet).expect_err("invalid UTF-8");
+        assert!(
+            matches!(err, PlatformWalletError::TransactionBuild(ref m) if m.contains("UTF-8")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_address_is_rejected() {
+        let err = decode_payment_outputs(&blob(&[("not-an-address", 1_000)]), Network::Testnet)
+            .expect_err("garbage is not an address");
+        assert!(
+            matches!(err, PlatformWalletError::TransactionBuild(ref m) if m.contains("invalid recipient address")),
+            "got {err:?}"
+        );
+    }
+
+    /// Network confusion is a funds-loss shape: a mainnet address accepted on a
+    /// testnet wallet (or the reverse) sends real coins to an address the user
+    /// did not intend.
+    #[test]
+    fn a_wrong_network_address_is_rejected() {
+        let mainnet = DashAddress::dummy(Network::Mainnet, 1).to_string();
+        let err = decode_payment_outputs(&blob(&[(mainnet.as_str(), 1_000)]), Network::Testnet)
+            .expect_err("a mainnet address must not decode for a testnet wallet");
+        assert!(
+            matches!(err, PlatformWalletError::TransactionBuild(ref m) if m.contains("network mismatch")),
+            "got {err:?}"
+        );
+
+        // …and it decodes fine against its own network, proving the rejection
+        // is the network check rather than the address being malformed.
+        assert!(
+            decode_payment_outputs(&blob(&[(mainnet.as_str(), 1_000)]), Network::Mainnet).is_ok()
+        );
+    }
+
+    /// `core_wallet_free_payment_bytes` tolerates the null/zero pair its own
+    /// documented contract permits.
+    #[test]
+    fn freeing_null_payment_bytes_is_a_no_op() {
+        unsafe {
+            core_wallet_free_payment_bytes(std::ptr::null_mut(), 0);
+            core_wallet_free_payment_bytes(std::ptr::null_mut(), 32);
+        }
+    }
+
+    /// Round-trip through the real allocation path: what
+    /// `core_wallet_build_signed_payment` hands out is what
+    /// `core_wallet_free_payment_bytes` takes back.
+    #[test]
+    fn payment_bytes_round_trip_through_the_free_function() {
+        let payload = vec![7u8; 128];
+        let len = payload.len();
+        let ptr = Box::into_raw(payload.into_boxed_slice()) as *mut u8;
+        unsafe {
+            assert_eq!(std::slice::from_raw_parts(ptr, len), [7u8; 128]);
+            core_wallet_free_payment_bytes(ptr, len);
+        }
     }
 }

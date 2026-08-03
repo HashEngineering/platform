@@ -35,7 +35,7 @@ use tokio::sync::RwLock;
 
 #[cfg(test)]
 use crate::broadcaster::{BroadcastError, TransactionBroadcaster};
-use crate::wallet::core::WalletBalance;
+use crate::wallet::core::WalletGeneration;
 use crate::wallet::identity::IdentityManager;
 use crate::wallet::platform_wallet::{PlatformWalletInfo, WalletId};
 
@@ -186,7 +186,7 @@ pub(crate) async fn funded_wallet_manager(
 ) -> (
     Arc<RwLock<WalletManager<PlatformWalletInfo>>>,
     WalletId,
-    Arc<WalletBalance>,
+    Arc<WalletGeneration>,
     WalletSigner,
 ) {
     funded_wallet_manager_with_outputs(account_type, &[10_000_000]).await
@@ -201,7 +201,7 @@ pub(crate) async fn funded_wallet_manager_with_outputs(
 ) -> (
     Arc<RwLock<WalletManager<PlatformWalletInfo>>>,
     WalletId,
-    Arc<WalletBalance>,
+    Arc<WalletGeneration>,
     WalletSigner,
 ) {
     let mut ctx = TestWalletContext::new_random();
@@ -251,10 +251,10 @@ pub(crate) async fn funded_wallet_manager_with_outputs(
         wallet: ctx.wallet.clone(),
     };
 
-    let balance = Arc::new(WalletBalance::new());
+    let generation = Arc::new(WalletGeneration::new());
     let info = PlatformWalletInfo {
         core_wallet: ctx.managed_wallet,
-        balance: Arc::clone(&balance),
+        generation: Arc::clone(&generation),
         identity_manager: IdentityManager::new(),
         tracked_asset_locks: BTreeMap::new(),
     };
@@ -262,7 +262,7 @@ pub(crate) async fn funded_wallet_manager_with_outputs(
     let mut wm = WalletManager::<PlatformWalletInfo>::new(Network::Testnet);
     let wallet_id = wm.insert_wallet(ctx.wallet, info).expect("insert wallet");
 
-    (Arc::new(RwLock::new(wm)), wallet_id, balance, signer)
+    (Arc::new(RwLock::new(wm)), wallet_id, generation, signer)
 }
 
 /// Like [`funded_wallet_manager`] but funds the wallet's CoinJoin account 0
@@ -278,7 +278,7 @@ pub(crate) async fn funded_wallet_manager_with_outputs(
 pub(crate) async fn funded_coinjoin_wallet_manager() -> (
     Arc<RwLock<WalletManager<PlatformWalletInfo>>>,
     WalletId,
-    Arc<WalletBalance>,
+    Arc<WalletGeneration>,
     WalletSigner,
 ) {
     let mut ctx = TestWalletContext::new_random();
@@ -322,10 +322,10 @@ pub(crate) async fn funded_coinjoin_wallet_manager() -> (
         wallet: ctx.wallet.clone(),
     };
 
-    let balance = Arc::new(WalletBalance::new());
+    let generation = Arc::new(WalletGeneration::new());
     let info = PlatformWalletInfo {
         core_wallet: ctx.managed_wallet,
-        balance: Arc::clone(&balance),
+        generation: Arc::clone(&generation),
         identity_manager: IdentityManager::new(),
         tracked_asset_locks: BTreeMap::new(),
     };
@@ -333,47 +333,17 @@ pub(crate) async fn funded_coinjoin_wallet_manager() -> (
     let mut wm = WalletManager::<PlatformWalletInfo>::new(Network::Testnet);
     let wallet_id = wm.insert_wallet(ctx.wallet, info).expect("insert wallet");
 
-    (Arc::new(RwLock::new(wm)), wallet_id, balance, signer)
+    (Arc::new(RwLock::new(wm)), wallet_id, generation, signer)
 }
 
-/// Funded SPV-backed Core wallet for downstream FFI lifecycle tests. The SPV
-/// runtime is intentionally not started; abandon/free only need wallet state.
-pub async fn funded_spv_core_wallet(
-    account_type: StandardAccountType,
-) -> (
-    crate::CoreWallet<crate::broadcaster::SpvBroadcaster>,
-    WalletSigner,
-) {
-    let (manager, wallet_id, balance, signer) = funded_wallet_manager(account_type).await;
-    let spv = Arc::new(crate::spv::SpvRuntime::new(
-        Arc::clone(&manager),
-        Arc::new(crate::events::PlatformEventManager::new(Vec::new())),
-    ));
-    let broadcaster = Arc::new(crate::broadcaster::SpvBroadcaster::new(spv));
-    let sdk = Arc::new(dash_sdk::SdkBuilder::new_mock().build().expect("mock sdk"));
-    (
-        crate::CoreWallet::new(sdk, manager, wallet_id, broadcaster, balance),
-        signer,
-    )
-}
-
-/// Builds a testnet wallet manager whose balance is SPLIT across two
-/// derivation accounts: BIP44 standard account 0 holds a single spendable
-/// UTXO of `bip44_duffs`, and the DIP-9 CoinJoin account 0 holds a single
-/// spendable UTXO of `coinjoin_duffs`. Mirrors the live S22/testnet wallet in
-/// dashpay/platform#4073 whose ~1.44 DASH of previously-mixed coins sit on the
-/// CoinJoin path while only ~0.09 DASH rides on BIP44 — the asset-lock coin
-/// selector must span BOTH to shield the union.
+/// Builds a testnet wallet manager whose balance is split across TWO privacy
+/// domains: `bip44_duffs` on BIP44 account 0 and `coinjoin_duffs` on the DIP-9
+/// CoinJoin account 0. Lets the funding-domain tests prove that coin selection
+/// never crosses from one account into the other.
 ///
-/// Returns the manager, the wallet id, and a soft signer over the wallet's
-/// seed (which can derive keys for BOTH accounts, so per-account signing of a
-/// mixed-input asset lock can be exercised end-to-end).
-///
-/// Like the broadcasters above, this and the other split fixtures are consumed
-/// only by this crate's own `#[cfg(test)]` unit tests (never via the
-/// `test-utils` feature alone), so they're gated on `cfg(test)` directly —
-/// otherwise `--all-features` builds without `--tests` compile them with no
-/// consumer and clippy flags them as dead code.
+/// Returns the manager, the wallet id, and a soft signer over the wallet's seed
+/// (which can derive keys for BOTH accounts, so per-account signing can be
+/// exercised end-to-end).
 #[cfg(test)]
 pub(crate) async fn split_funded_wallet_manager(
     bip44_duffs: u64,
@@ -383,11 +353,12 @@ pub(crate) async fn split_funded_wallet_manager(
     WalletId,
     WalletSigner,
 ) {
-    use key_wallet::managed_account::managed_account_trait::ManagedAccountTrait;
+    use key_wallet::managed_account::managed_account_trait::ManagedAccountTrait as _;
 
     let mut ctx = TestWalletContext::new_random();
 
-    // Fund BIP44 account 0 (the primary) at its pre-derived receive address.
+    // Fund BIP44 account 0 (the default funding account) at its pre-derived
+    // receive address.
     let bip44_tx = Transaction::dummy(&ctx.receive_address, 0..1, &[bip44_duffs]);
     let bip44_result = ctx
         .check_transaction(
@@ -439,10 +410,10 @@ pub(crate) async fn split_funded_wallet_manager(
         wallet: ctx.wallet.clone(),
     };
 
-    let balance = Arc::new(WalletBalance::new());
+    let generation = Arc::new(WalletGeneration::new());
     let info = PlatformWalletInfo {
         core_wallet: ctx.managed_wallet,
-        balance,
+        generation,
         identity_manager: IdentityManager::new(),
         tracked_asset_locks: BTreeMap::new(),
     };
@@ -459,7 +430,14 @@ pub(crate) async fn split_funded_wallet_manager(
 /// are fund-bearing and both are covered by the vendored asset-lock router fix
 /// (`get_relevant_account_types(AssetLock)` lists `DashpayReceivingFunds` AND
 /// `DashpayExternalAccount` alongside `CoinJoin`).
+///
+/// Kept verbatim from #4184 so the two copies reconcile cleanly when both
+/// land: only the `ReceivingFunds` arm has a consumer in THIS crate's tests
+/// (the finalize funding-path tests), while #4184's asset-lock tests drive
+/// the watch-only `ExternalAccount` arm — hence the `dead_code` allowance
+/// rather than trimming the variant.
 #[cfg(test)]
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum DashpayLeg {
     /// Incoming DashPay funds account (`user_id/friend_id`).
@@ -652,10 +630,10 @@ pub(crate) async fn split_funded_wallet_manager_dashpay(
         wallet: ctx.wallet.clone(),
     };
 
-    let balance = Arc::new(WalletBalance::new());
+    let generation = Arc::new(WalletGeneration::new());
     let info = PlatformWalletInfo {
         core_wallet: ctx.managed_wallet,
-        balance,
+        generation,
         identity_manager: IdentityManager::new(),
         tracked_asset_locks: BTreeMap::new(),
     };
@@ -664,6 +642,27 @@ pub(crate) async fn split_funded_wallet_manager_dashpay(
     let wallet_id = wm.insert_wallet(ctx.wallet, info).expect("insert wallet");
 
     (Arc::new(RwLock::new(wm)), wallet_id, signer)
+}
+
+/// Funded SPV-backed Core wallet for downstream FFI lifecycle tests. The SPV
+/// runtime is intentionally not started; abandon/free only need wallet state.
+pub async fn funded_spv_core_wallet(
+    account_type: StandardAccountType,
+) -> (
+    crate::CoreWallet<crate::broadcaster::SpvBroadcaster>,
+    WalletSigner,
+) {
+    let (manager, wallet_id, generation, signer) = funded_wallet_manager(account_type).await;
+    let spv = Arc::new(crate::spv::SpvRuntime::new(
+        Arc::clone(&manager),
+        Arc::new(crate::events::PlatformEventManager::new(Vec::new())),
+    ));
+    let broadcaster = Arc::new(crate::broadcaster::SpvBroadcaster::new(spv));
+    let sdk = Arc::new(dash_sdk::SdkBuilder::new_mock().build().expect("mock sdk"));
+    (
+        crate::CoreWallet::new(sdk, manager, wallet_id, broadcaster, generation),
+        signer,
+    )
 }
 
 /// Like [`split_funded_wallet_manager`] but seeds CoinJoin account 0 with
@@ -751,10 +750,10 @@ pub(crate) async fn split_funded_wallet_manager_many_coinjoin(
         wallet: ctx.wallet.clone(),
     };
 
-    let balance = Arc::new(WalletBalance::new());
+    let generation = Arc::new(WalletGeneration::new());
     let info = PlatformWalletInfo {
         core_wallet: ctx.managed_wallet,
-        balance,
+        generation,
         identity_manager: IdentityManager::new(),
         tracked_asset_locks: BTreeMap::new(),
     };
@@ -800,7 +799,8 @@ impl crate::events::PlatformEventHandler for NoopTestEventHandler {}
 /// `Arc<PlatformWallet>`) alongside the wallet id.
 ///
 /// Used by FFI-layer tests that need genuine `PlatformWallet` aliases, e.g. the
-/// `platform_wallet_destroy` final-alias registry-sweep gating.
+/// `platform_wallet_destroy` regression asserting that destroying wrapper
+/// aliases never sweeps an independently-owned deferred-payment token.
 pub async fn test_platform_wallet_manager() -> (
     Arc<crate::PlatformWalletManager<NoopTestPersister>>,
     WalletId,

@@ -126,8 +126,8 @@ mod guardrail {
 
     use crate::test_support::{split_funded_wallet_manager, AlwaysRejectedBroadcaster};
     use crate::wallet::asset_lock::manager::AssetLockManager;
-    use crate::wallet::core::balance::WalletBalance;
     use crate::wallet::core::CoreWallet;
+    use crate::wallet::core::WalletGeneration;
     use crate::wallet::persister::WalletPersister;
     use crate::{AssetLockFundingType, PlatformWalletError};
 
@@ -274,7 +274,7 @@ mod guardrail {
             Arc::clone(&wm),
             wallet_id,
             Arc::new(AlwaysRejectedBroadcaster),
-            Arc::new(WalletBalance::new()),
+            Arc::new(WalletGeneration::new()),
         );
         let payment = core
             .build_signed_payment(
@@ -310,14 +310,7 @@ mod guardrail {
             AssetLockFundingType::IdentityRegistration,
         ] {
             let lock = manager
-                .build_asset_lock_transaction(
-                    CROSS_DOMAIN_ONLY,
-                    0,
-                    funding_type,
-                    0,
-                    &signer,
-                    None,
-                )
+                .build_asset_lock_transaction(CROSS_DOMAIN_ONLY, 0, funding_type, 0, &signer, None)
                 .await;
             assert!(
                 lock.is_err(),
@@ -339,7 +332,9 @@ mod guardrail {
         let (bip44_ops, coinjoin_ops, coinjoin_path) = {
             use key_wallet::managed_account::managed_account_trait::ManagedAccountTrait;
             let guard = wm.read().await;
-            let (_, info) = guard.get_wallet_and_info(&wallet_id).expect("wallet present");
+            let (_, info) = guard
+                .get_wallet_and_info(&wallet_id)
+                .expect("wallet present");
             let network = info.core_wallet.network();
             let bip44: HashSet<OutPoint> = info
                 .core_wallet
@@ -369,7 +364,7 @@ mod guardrail {
             wm,
             wallet_id,
             Arc::new(AlwaysRejectedBroadcaster),
-            Arc::new(WalletBalance::new()),
+            Arc::new(WalletGeneration::new()),
         );
         let payment = core
             .build_signed_payment(

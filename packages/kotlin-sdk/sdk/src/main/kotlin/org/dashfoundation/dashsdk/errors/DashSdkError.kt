@@ -89,6 +89,53 @@ sealed class DashSdkError(
         class CoreInsufficientFunds(message: String, cause: Throwable? = null) :
             PlatformWallet(message, cause)
 
+        /**
+         * `ErrorTransactionBuild` (native code 32). A Core transaction could
+         * not be assembled from the request. The REQUEST is at fault, so a
+         * verbatim retry fails identically — the caller must change it.
+         *
+         * It is what every `buildSignedPayment` rejection that is neither a
+         * shortfall nor a signing failure ([TransactionSigning]) surfaces as:
+         * a `fundingPath` matching no spendable funds account or
+         * naming a watch-only one (the two failure modes the single-account
+         * send design rests on, dashpay/platform#4184), a request breaching a
+         * monetary bound (MAX_MONEY total, max fee rate, a below-dust
+         * recipient, an over-100 kB recipient list), or a malformed recipients
+         * blob. Before this code existed they all arrived as [Generic] with
+         * native code 99 and could only be told apart by string-matching the
+         * message. The specific cause is still in [message].
+         */
+        class TransactionBuild(message: String, cause: Throwable? = null) :
+            PlatformWallet(message, cause)
+
+        /**
+         * `ErrorTransactionSigning` (native code 33). The request was valid and
+         * the transaction was fully assembled — only the input signatures could
+         * not be produced, typically because the Keystore/Keychain mnemonic is
+         * locked or missing.
+         *
+         * Unlike [TransactionBuild], the REQUEST is fine: the native layer
+         * released this build's input reservation before returning, so once the
+         * signer is usable again the caller may resubmit the identical
+         * recipients, amount, fee and funding path. Surface this as "unlock to
+         * continue", never as "this payment is invalid"
+         * (dashpay/platform#4256).
+         *
+         * Retryable in the same sense as [ShieldedNoRecordedAnchor]: nothing
+         * was committed and the reservation was released, so the retry
+         * succeeds once its precondition is met. Gate it on the unlock — do
+         * not spin on it.
+         *
+         * Distinct from the sibling stack's `SigningKeyUnavailable` (native
+         * code 31, dashpay/platform#4183), which is a Platform
+         * state-transition signer failure reporting a specific identity key
+         * that must be re-derived.
+         */
+        class TransactionSigning(message: String, cause: Throwable? = null) :
+            PlatformWallet(message, cause) {
+            override val isRetryable: Boolean get() = true
+        }
+
         class AssetLockNotTracked(message: String, cause: Throwable? = null) :
             PlatformWallet(message, cause)
 
@@ -234,8 +281,25 @@ sealed class DashSdkError(
             }
         }
 
+         * `ErrorTransactionBroadcastRejected` (native code 26). Core
+         * DEFINITIVELY rejected the core transaction: it is not on the network
+         * and will not get there. The build's UTXO reservation was released and,
+         * on the deferred (BIP70/BIP270) path, the token was consumed at the
+         * same time — so the inputs are spendable again and the token is gone.
+         *
+         * The definitive counterpart to [TransactionBroadcastUnconfirmed] (20),
+         * whose outcome is AMBIGUOUS and which therefore keeps its inputs
+         * reserved. Because the reservation and token are already gone, this is
+         * NOT retryable in place: address the rejection reason carried in the
+         * message, then rebuild with
+         * [buildSignedPayment][org.dashfoundation.dashsdk.wallet.ManagedPlatformWallet.buildSignedPayment]
+         * (deferred) or re-issue the send.
+         */
+        class TransactionBroadcastRejected(message: String, cause: Throwable? = null) :
+            PlatformWallet(message, cause)
+
         /**
-         * `ErrorStaleReservationToken` (native code 27). A deferred
+         * `ErrorStaleReservationToken` (native code 34). A deferred
          * (BIP70/BIP270) [broadcastSigned][org.dashfoundation.dashsdk.wallet.ManagedPlatformWallet.broadcastSigned]
          * token has outlived its funding reservation's lifetime: key-wallet's
          * TTL may already have swept and re-selected the inputs, so acting on it
@@ -252,7 +316,7 @@ sealed class DashSdkError(
             PlatformWallet(message, cause)
 
         /**
-         * `ErrorReservationTokenConsumed` (native code 28). A deferred
+         * `ErrorReservationTokenConsumed` (native code 35). A deferred
          * (BIP70/BIP270) [broadcastSigned][org.dashfoundation.dashsdk.wallet.ManagedPlatformWallet.broadcastSigned]
          * token is unknown, already broadcast, or already released — the guard
          * that turns a double-broadcast (or a broadcast after release) into a
@@ -265,9 +329,7 @@ sealed class DashSdkError(
             PlatformWallet(message, cause)
 
         /**
-         * `ErrorReservationWalletMismatch` (native code 32; renumbered off 29
-         * during the v4.1 re-integration, where 29 is
-         * [AssetLockInsufficientFunds]). A deferred
+         * `ErrorReservationWalletMismatch` (native code 36). A deferred
          * (BIP70/BIP270) [broadcastSigned][org.dashfoundation.dashsdk.wallet.ManagedPlatformWallet.broadcastSigned]
          * token was minted against a different wallet *generation* than the one
          * broadcasting it (e.g. a wallet re-created under the same id); its
@@ -424,21 +486,27 @@ sealed class DashSdkError(
             23 -> PlatformWallet.AssetLockNotTracked(message, cause) // ErrorAssetLockNotTracked
             24 -> PlatformWallet.AssetLockAlreadyConsumed(message, cause) // ErrorAssetLockAlreadyConsumed
             25 -> PlatformWallet.AssetLockFundingMismatch(message, cause) // ErrorAssetLockFundingMismatch
-            27 -> PlatformWallet.StaleReservationToken(message, cause) // ErrorStaleReservationToken
-            28 -> PlatformWallet.ReservationTokenConsumed(message, cause) // ErrorReservationTokenConsumed
+            26 -> PlatformWallet.TransactionBroadcastRejected(message, cause) // ErrorTransactionBroadcastRejected
             29 -> PlatformWallet.AssetLockInsufficientFunds(message, cause) // ErrorAssetLockInsufficientFunds
             // ErrorSigningKeyUnavailable — the STRUCTURED signer
             // discriminator (dashpay/platform#4060 finding 7): the typed
             // completion code rides the whole Rust round-trip, no message
-            // sniffing involved. (Code 30 remains reserved by sibling PR
-            // #4184 — see PlatformWalletFFIResultCode.)
+            // sniffing involved.
             31 -> PlatformWallet.SigningKeyUnavailable(message, cause)
-            // ErrorReservationWalletMismatch — renumbered off 29 during the
-            // v4.1 re-integration (29 is ErrorAssetLockInsufficientFunds).
-            32 -> PlatformWallet.ReservationWalletMismatch(message, cause) // ErrorReservationWalletMismatch
-            // ErrorShieldedInviteAlreadyClaimed. Allocated 37 (not 32, which
-            // belongs to ErrorTransactionBuild — dashpay/platform#4247/#4256);
-            // see packages/rs-platform-wallet-ffi/ERROR_CODE_REGISTRY.md.
+            32 -> PlatformWallet.TransactionBuild(message, cause) // ErrorTransactionBuild
+            33 -> PlatformWallet.TransactionSigning(message, cause) // ErrorTransactionSigning
+            // The deferred-token trio sits at the contiguous block 34-36 because
+            // 27-33 are claimed elsewhere: 27 ErrorShutdownIncomplete
+            // (dashpay/platform#4268, merged), 29 ErrorAssetLockInsufficientFunds
+            // (#4184), 31 ErrorSigningKeyUnavailable (#4183/#4259), 32
+            // ErrorTransactionBuild (#4247/#4256), 33 ErrorTransactionSigning
+            // (#4256); 28 and 30 are vacated but reserved. See
+            // packages/rs-platform-wallet-ffi/ERROR_CODE_REGISTRY.md (#4261).
+            34 -> PlatformWallet.StaleReservationToken(message, cause) // ErrorStaleReservationToken
+            35 -> PlatformWallet.ReservationTokenConsumed(message, cause) // ErrorReservationTokenConsumed
+            36 -> PlatformWallet.ReservationWalletMismatch(message, cause) // ErrorReservationWalletMismatch
+            // ErrorShieldedInviteAlreadyClaimed — 37, the allocation frontier;
+            // it briefly held 32, which belongs to ErrorTransactionBuild.
             37 -> PlatformWallet.ShieldedInviteAlreadyClaimed(message, cause)
             else ->
                 // @Deprecated fallback — see the code-6 arm; code 31 is the

@@ -1070,14 +1070,11 @@ pub extern "system" fn Java_org_dashfoundation_dashsdk_ffi_WalletManagerNative_c
         // (without the trailing NUL) + length. Uses the STRICT reader: a genuine
         // read error must throw, not silently degrade this money-source param to
         // the default BIP44 account (which would spend the wrong coins).
-        let funding_path = match crate::funding::read_cstring_opt_strict(
-            env,
-            &funding_path,
-            "fundingPath",
-        ) {
-            Ok(v) => v,
-            Err(()) => return ptr::null_mut(),
-        };
+        let funding_path =
+            match crate::funding::read_cstring_opt_strict(env, &funding_path, "fundingPath") {
+                Ok(v) => v,
+                Err(()) => return ptr::null_mut(),
+            };
         let (funding_path_ptr, funding_path_len) =
             funding_path.as_ref().map_or((ptr::null(), 0usize), |c| {
                 let b = c.as_bytes();
@@ -1126,6 +1123,82 @@ pub extern "system" fn Java_org_dashfoundation_dashsdk_ffi_WalletManagerNative_c
         env.byte_array_from_slice(&packed)
             .map(|a| a.into_raw())
             .unwrap_or(ptr::null_mut())
+    })
+}
+
+/// `core_wallet_release_payment_reservation` — release the UTXO reservation a
+/// [coreWalletBuildSignedPayment] call took, for a build that will NOT be
+/// broadcast.
+///
+/// `build_signed_payment` leaves its selected inputs reserved on success,
+/// expecting a broadcast to follow. A caller that abandons the build instead
+/// must call this or the coins stay unselectable until key-wallet's 24-block
+/// TTL backstop reclaims them — and that backstop never fires before the first
+/// sync completes (`ReservationSet::sweep` early-returns at height 0), so an
+/// abandoned build on a freshly restored wallet can otherwise strand the whole
+/// balance for the life of the process (dashpay/platform#4247 review). This
+/// call consults no height.
+///
+/// `core_handle` is the transient core-wallet `Handle` from
+/// [platformWalletGetCore]. `tx_bytes` is the consensus-serialized signed
+/// transaction exactly as [coreWalletBuildSignedPayment] returned it — the
+/// transaction is the ownership signal, so only this build's own inputs are
+/// released. `funding_path` must be the SAME optional path the build was given
+/// (null = the unmixed BIP44 account).
+///
+/// Idempotent, and a silent no-op after a successful broadcast, so it is safe
+/// in an unconditional cleanup path. Throws only on an invalid handle,
+/// undecodable transaction bytes, or an unresolvable funding path.
+#[no_mangle]
+pub extern "system" fn Java_org_dashfoundation_dashsdk_ffi_WalletManagerNative_coreWalletReleasePaymentReservation(
+    mut env: JNIEnv,
+    _class: JClass,
+    core_handle: jlong,
+    tx_bytes: JByteArray,
+    funding_path: JString,
+) {
+    guard(&mut env, (), |env| {
+        if core_handle == 0 {
+            throw_sdk_exception(env, 1, "core handle is 0");
+            return;
+        }
+        let raw = match env.convert_byte_array(&tx_bytes) {
+            Ok(b) => b,
+            Err(_) => {
+                let _ = env.exception_clear();
+                throw_sdk_exception(env, 1, "txBytes byte[] was invalid");
+                return;
+            }
+        };
+        if raw.is_empty() {
+            throw_sdk_exception(env, 1, "txBytes must not be empty");
+            return;
+        }
+        // STRICT reader, matching the build: a genuine read error must throw
+        // rather than silently degrade to the default BIP44 account, which
+        // would release against the wrong ledger and leave the real
+        // reservation stranded — the exact failure this export exists to fix.
+        let funding_path =
+            match crate::funding::read_cstring_opt_strict(env, &funding_path, "fundingPath") {
+                Ok(v) => v,
+                Err(()) => return,
+            };
+        let (funding_path_ptr, funding_path_len) =
+            funding_path.as_ref().map_or((ptr::null(), 0usize), |c| {
+                let b = c.as_bytes();
+                (b.as_ptr(), b.len())
+            });
+
+        let result = unsafe {
+            platform_wallet_ffi::core_wallet_release_payment_reservation(
+                core_handle as Handle,
+                raw.as_ptr(),
+                raw.len(),
+                funding_path_ptr,
+                funding_path_len,
+            )
+        };
+        take_pwffi_error(env, result);
     })
 }
 
@@ -1625,9 +1698,9 @@ pub extern "system" fn Java_org_dashfoundation_dashsdk_ffi_WalletManagerNative_c
 /// `core_wallet_signed_payment_broadcast` — broadcast the payment behind
 /// `token`, releasing/keeping its reservation per the broadcast outcome and
 /// consuming the token. Rather than double-broadcasting, an unusable token
-/// throws one of three sibling codes: `ErrorStaleReservationToken` (26, aged
-/// out), `ErrorReservationTokenConsumed` (27, unknown / already broadcast /
-/// already released), or `ErrorReservationWalletMismatch` (28, different wallet
+/// throws one of three sibling codes: `ErrorStaleReservationToken` (34, aged
+/// out), `ErrorReservationTokenConsumed` (35, unknown / already broadcast /
+/// already released), or `ErrorReservationWalletMismatch` (36, different wallet
 /// generation). `coreHandle` must resolve to the wallet the token was minted
 /// against. Returns the txid as a lowercase hex string.
 #[no_mangle]
@@ -3253,30 +3326,6 @@ fn read_id32(env: &mut JNIEnv, arr: &JByteArray) -> Option<[u8; 32]> {
     Some(id)
 }
 
-/// Read a required 20-byte `byte[]` (e.g. a voting-key hash160) into `[u8; 20]`;
-/// throws + returns None on a null/invalid array or a wrong length.
-fn read_id20(env: &mut JNIEnv, arr: &JByteArray) -> Option<[u8; 20]> {
-    let bytes = match env.convert_byte_array(arr) {
-        Ok(b) => b,
-        Err(_) => {
-            let _ = env.exception_clear();
-            throw_sdk_exception(env, 1, "votingKeyId byte[] was null/invalid");
-            return None;
-        }
-    };
-    if bytes.len() != 20 {
-        throw_sdk_exception(
-            env,
-            1,
-            &format!("votingKeyId must be 20 bytes, got {}", bytes.len()),
-        );
-        return None;
-    }
-    let mut id = [0u8; 20];
-    id.copy_from_slice(&bytes);
-    Some(id)
-}
-
 /// Read a required Java `String` into an owned `CString`; throws + returns
 /// None on JVM null, a JNI error, an empty string, or an interior NUL.
 fn read_cstring_required(env: &mut JNIEnv, s: &JString, field: &str) -> Option<std::ffi::CString> {
@@ -3595,43 +3644,6 @@ pub extern "system" fn Java_org_dashfoundation_dashsdk_ffi_WalletManagerNative_w
         let result = unsafe {
             platform_wallet_ffi::platform_wallet_list_in_memory_watched_identity_ids(
                 wallet_handle as Handle,
-                &mut out as *mut IdentifierArray,
-            )
-        };
-        if take_pwffi_error(env, result) {
-            return ptr::null_mut();
-        }
-        identifier_array_to_flat(env, out)
-    })
-}
-
-/// The proTxHashes of every masternode whose voting key hash matches the
-/// 20-byte `votingKeyId`, as a flat `byte[]` (concatenated 32-byte
-/// proTxHashes; Kotlin splits into 32-byte rows). Replaces dashj's
-/// `MasternodeListManager.getMasternodesByVotingKey(votingKeyId)` used by
-/// contested-username voting. Returns an empty `byte[]` when the masternode
-/// list hasn't synced (SPV client not running / DML unavailable) or no
-/// masternode uses the key. Bridges
-/// `platform_wallet_manager_masternodes_by_voting_key`.
-#[no_mangle]
-pub extern "system" fn Java_org_dashfoundation_dashsdk_ffi_WalletManagerNative_masternodesByVotingKey(
-    mut env: JNIEnv,
-    _class: JClass,
-    manager_handle: jlong,
-    voting_key_id: JByteArray,
-) -> jbyteArray {
-    guard(&mut env, ptr::null_mut(), |env| {
-        let Some(key) = read_id20(env, &voting_key_id) else {
-            return ptr::null_mut();
-        };
-        let mut out = IdentifierArray {
-            items: ptr::null_mut(),
-            count: 0,
-        };
-        let result = unsafe {
-            platform_wallet_ffi::platform_wallet_manager_masternodes_by_voting_key(
-                manager_handle as Handle,
-                key.as_ptr(),
                 &mut out as *mut IdentifierArray,
             )
         };

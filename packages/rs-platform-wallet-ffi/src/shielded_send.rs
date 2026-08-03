@@ -59,10 +59,10 @@ use rs_sdk_ffi::{MnemonicResolverCoreSigner, MnemonicResolverHandle, SignerHandl
 use crate::check_ptr;
 use crate::core_wallet_types::OutPointFFI;
 use crate::error::*;
-use crate::utils::parse_optional_derivation_path;
 use crate::handle::*;
 use crate::identity_registration_with_signer::{decode_identity_pubkeys, IdentityPubkeyFFI};
 use crate::runtime::{block_on_worker, runtime};
+use crate::utils::parse_optional_derivation_path;
 
 /// A serialized `PlatformAddress` is exactly 21 bytes (1-byte variant tag + 20-byte hash).
 const PLATFORM_ADDRESS_LEN: usize = 21;

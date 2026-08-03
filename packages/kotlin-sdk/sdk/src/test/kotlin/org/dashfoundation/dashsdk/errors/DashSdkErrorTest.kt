@@ -132,9 +132,25 @@ class DashSdkErrorTest {
         // The message must warn against retrying (distinct from the anchor case).
         assertTrue(broadcastUnconfirmed.message!!.contains("do NOT retry"))
 
+        // Definitive broadcast rejection (26) must reach callers as its own type,
+        // NOT as Generic: it is the definitive counterpart to the ambiguous
+        // TransactionBroadcastUnconfirmed (20), and on the deferred path the
+        // reservation was released and the token consumed — so it is not
+        // retryable in place, it must be rebuilt.
+        val rejected = DashSdkError.fromNative(DashSDKException(offset + 26, "bad-txns-inputs-spent"))
+        assertTrue(
+            "code 26 must not fall through to Generic",
+            rejected is DashSdkError.PlatformWallet.TransactionBroadcastRejected,
+        )
+        assertFalse(
+            "TransactionBroadcastRejected must NOT be retryable in place (rebuild the payment)",
+            rejected.isRetryable,
+        )
+        assertEquals("bad-txns-inputs-spent", rejected.message)
+
         // Deferred build/broadcast: the three sibling reservation-token failures
         // map to three distinct typed errors, none retryable.
-        val agedOut = DashSdkError.fromNative(DashSDKException(offset + 27, "stale token 7"))
+        val agedOut = DashSdkError.fromNative(DashSDKException(offset + 34, "stale token 7"))
         assertTrue(agedOut is DashSdkError.PlatformWallet.StaleReservationToken)
         assertFalse(
             "StaleReservationToken must NOT be retryable (rebuild the payment)",
@@ -142,7 +158,7 @@ class DashSdkErrorTest {
         )
         assertEquals("stale token 7", agedOut.message)
 
-        val consumed = DashSdkError.fromNative(DashSDKException(offset + 28, "already broadcast"))
+        val consumed = DashSdkError.fromNative(DashSDKException(offset + 35, "already broadcast"))
         assertTrue(consumed is DashSdkError.PlatformWallet.ReservationTokenConsumed)
         assertFalse(
             "ReservationTokenConsumed must NOT be retryable (rebuild the payment)",
@@ -156,13 +172,68 @@ class DashSdkErrorTest {
         // the mapping it was testing. #4185/#4256 move this trio to 34-36 and
         // update the assertion with it; until those land, 32 is correct here.
         val walletMismatch =
-            DashSdkError.fromNative(DashSDKException(offset + 32, "different generation"))
+            DashSdkError.fromNative(DashSDKException(offset + 36, "different generation"))
         assertTrue(walletMismatch is DashSdkError.PlatformWallet.ReservationWalletMismatch)
         assertFalse(
             "ReservationWalletMismatch must NOT be retryable (rebuild the payment)",
             walletMismatch.isRetryable,
         )
         assertEquals("different generation", walletMismatch.message)
+    }
+
+    /**
+     * `ErrorTransactionBuild` (32) must reach callers as its own type. Every
+     * non-shortfall `buildSignedPayment` rejection maps to it — including the
+     * two failure modes the single-account send design rests on, an unmatched
+     * `fundingPath` and a watch-only one. They previously arrived as
+     * [DashSdkError.PlatformWallet.Generic] with code 99, distinguishable only
+     * by string-matching the message (dashpay/platform#4247 review).
+     */
+    @Test
+    fun transactionBuildFailuresGetTheirOwnType() {
+        val offset = DashSdkError.PLATFORM_WALLET_CODE_OFFSET
+        val message = "no spendable funds account matches funding derivation path m/44'/5'/7'"
+
+        val mapped = DashSdkError.fromNative(DashSDKException(offset + 32, message))
+        assertTrue(
+            "code 32 must not fall through to Generic",
+            mapped is DashSdkError.PlatformWallet.TransactionBuild,
+        )
+        assertEquals(message, mapped.message)
+        assertFalse(
+            "the request itself is at fault, so a verbatim retry cannot help",
+            mapped.isRetryable,
+        )
+    }
+
+    /**
+     * `ErrorTransactionSigning` (33) must be its own type with the OPPOSITE
+     * retry contract to [DashSdkError.PlatformWallet.TransactionBuild] (32).
+     * Signing failures used to fold into 32, so a locked Keychain told the
+     * host its payment was invalid and a retry was pointless — when in fact
+     * the native layer released the inputs and the identical request succeeds
+     * after an unlock (dashpay/platform#4256 review).
+     */
+    @Test
+    fun signingFailuresAreRetryableAndNotRequestInvalid() {
+        val offset = DashSdkError.PLATFORM_WALLET_CODE_OFFSET
+        val message = "payment signing failed: mnemonic unavailable: keychain is locked"
+
+        val mapped = DashSdkError.fromNative(DashSDKException(offset + 33, message))
+        assertTrue(
+            "code 33 must not fall through to Generic",
+            mapped is DashSdkError.PlatformWallet.TransactionSigning,
+        )
+        assertFalse(
+            "a signing failure must not be typed as a request-invalid build",
+            mapped is DashSdkError.PlatformWallet.TransactionBuild,
+        )
+        assertEquals(message, mapped.message)
+        assertTrue(
+            "the request was valid and its inputs were released, so retrying " +
+                "after an unlock can succeed",
+            mapped.isRetryable,
+        )
     }
 
     @Test

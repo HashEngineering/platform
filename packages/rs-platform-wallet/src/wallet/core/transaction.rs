@@ -19,7 +19,7 @@ use key_wallet::wallet::managed_wallet_info::transaction_building::AccountTypePr
 use key_wallet::wallet::managed_wallet_info::wallet_info_interface::WalletInfoInterface;
 use key_wallet::{Account, DerivationPath, ReservationToken, Utxo};
 
-use super::CoreWallet;
+use super::{CoreWallet, WalletGeneration};
 use crate::broadcaster::TransactionBroadcaster;
 use crate::PlatformWalletError;
 
@@ -124,6 +124,22 @@ pub struct SignedCoreTransaction {
     /// [`ManagedCoreFundsAccount::release_reservation_if_owner`] releases only
     /// inputs still owned by this token, closing that window.
     reservation_token: Option<ReservationToken>,
+    /// The per-generation balance `Arc` of the wallet this payment was
+    /// **finalized against** — captured from the originating `CoreWallet` inside
+    /// `finalize_transaction`. It is the same unforgeable generation-identity
+    /// marker [`CoreWallet::is_same_generation`] compares (a fresh `Arc` per
+    /// wallet generation; two aliases of one generation share it, a
+    /// remove-then-recreate under the same id gets a new one).
+    ///
+    /// The deferred-payment registry validates the wallet it is asked to bind
+    /// this payment to against **this** marker before it mints a token
+    /// ([`SignedPaymentRegistry::register`](crate::SignedPaymentRegistry::register)),
+    /// so a caller cannot finalize through wallet A and then register/broadcast
+    /// through an unrelated wallet B — the registry would otherwise treat B as
+    /// the owner, submit A's transaction through B's broadcaster, and run B's
+    /// cleanup while A's real reservation leaked until its TTL
+    /// (`dashpay/platform#4185`).
+    origin_generation: Arc<WalletGeneration>,
 }
 
 impl SignedCoreTransaction {
@@ -158,6 +174,80 @@ impl SignedCoreTransaction {
     /// or abandoned send frees only reservations this build still owns.
     pub fn reservation_token(&self) -> Option<ReservationToken> {
         self.reservation_token
+    }
+
+    /// The per-generation balance `Arc` of the wallet this payment was finalized
+    /// against — the unforgeable generation-identity marker the deferred-payment
+    /// registry pointer-compares before binding the payment to a wallet (see
+    /// [`origin_generation`](Self::origin_generation) field docs). Borrowed, not
+    /// consumed, so the check can run before
+    /// [`into_registered_parts`](Self::into_registered_parts) takes ownership.
+    pub(crate) fn origin_generation(&self) -> &Arc<WalletGeneration> {
+        &self.origin_generation
+    }
+
+    /// Consume this finalized transaction into the owned parts the deferred
+    /// [`SignedPaymentRegistry`](crate::SignedPaymentRegistry) stores.
+    ///
+    /// Consuming (rather than cloning) is what enforces unique reservation
+    /// ownership: `SignedCoreTransaction` is deliberately not `Clone`, so a
+    /// finalize yields exactly one ownership object and the registry can be
+    /// handed it exactly once — a caller cannot mint two live tokens that name
+    /// the same held reservation (`dashpay/platform#4185`). The transaction,
+    /// funding account, and reservation height are derived here, not supplied
+    /// independently by the caller.
+    pub(crate) fn into_registered_parts(self) -> RegisteredPaymentParts {
+        RegisteredPaymentParts {
+            transaction: self.transaction,
+            funding_account_type: self.funding_account_type,
+            funding_account_index: self.funding_account_index,
+            reservation_height: self.reservation_height,
+            reservation_token: self.reservation_token,
+        }
+    }
+}
+
+/// The owned facts the deferred-payment registry takes over when it registers a
+/// finalized transaction. Produced only by
+/// [`SignedCoreTransaction::into_registered_parts`], which consumes the
+/// non-`Clone` ownership object exactly once.
+pub(crate) struct RegisteredPaymentParts {
+    pub(crate) transaction: Transaction,
+    pub(crate) funding_account_type: AccountTypePreference,
+    pub(crate) funding_account_index: u32,
+    pub(crate) reservation_height: u32,
+    pub(crate) reservation_token: Option<ReservationToken>,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl SignedCoreTransaction {
+    /// Build a `SignedCoreTransaction` directly, for tests that need a finalized
+    /// ownership object without running the full funding + signing pipeline
+    /// (e.g. the registry and FFI destroy/lifecycle tests).
+    ///
+    /// `origin_generation` is the per-generation balance `Arc` the payment is to
+    /// be treated as finalized against — a test that registers it must hand the
+    /// registry the SAME generation
+    /// ([`CoreWallet::test_generation_marker`](crate::CoreWallet::test_generation_marker)),
+    /// exactly as the production path binds a token to the finalizing wallet.
+    pub fn new_for_test(
+        transaction: Transaction,
+        fee: u64,
+        funding_account_type: AccountTypePreference,
+        funding_account_index: u32,
+        reservation_height: u32,
+        reservation_token: Option<ReservationToken>,
+        origin_generation: Arc<WalletGeneration>,
+    ) -> Self {
+        Self {
+            transaction,
+            fee,
+            funding_account_type,
+            funding_account_index,
+            reservation_height,
+            reservation_token,
+            origin_generation,
+        }
     }
 }
 
@@ -322,6 +412,10 @@ impl<B: TransactionBroadcaster + ?Sized> CoreWallet<B> {
             funding_account_index: account_index,
             reservation_height: height,
             reservation_token,
+            // Capture the finalizing wallet's generation identity so the
+            // deferred registry can refuse to bind this payment to any other
+            // wallet (`dashpay/platform#4185`).
+            origin_generation: Arc::clone(self.generation()),
         })
     }
 
@@ -403,7 +497,7 @@ impl<B: TransactionBroadcaster + ?Sized> CoreWallet<B> {
             );
             return;
         };
-        if !Arc::ptr_eq(&info.balance, self.generation()) {
+        if !Arc::ptr_eq(&info.generation, self.generation()) {
             // The wallet under this id is a different (re-created) generation:
             // releasing by outpoint could free ITS reservation. Leave it — the
             // original generation's reservation ceased to exist with it.

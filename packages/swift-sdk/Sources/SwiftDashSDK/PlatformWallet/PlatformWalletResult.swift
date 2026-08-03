@@ -69,32 +69,50 @@ public enum PlatformWalletResultCode: Int32, Sendable {
     /// Core definitively rejected the transaction. Its reserved inputs were
     /// released and a corrected transaction may be submitted again.
     case errorTransactionBroadcastRejected = 26
+    // Allocation of the 27-37 range on this integration, per the registry
+    // (ERROR_CODE_REGISTRY.md, dashpay/platform#4261): 27
+    // errorShutdownIncomplete (#4268, merged upstream, not mirrored here); 28
+    // and 30 vacated but RESERVED; 29 errorAssetLockInsufficientFunds (#4184);
+    // 31 errorSigningKeyUnavailable (#4183/#4259); 32 errorTransactionBuild
+    // (#4247); 33 errorTransactionSigning (#4256); 34-36 the #4185
+    // deferred-token trio; 37 errorShieldedInviteAlreadyClaimed (#4204).
+    // The cases below are declared in source order, not numeric order. These
+    // raw values MUST match `PlatformWalletFFIResultCode` in
+    // packages/rs-platform-wallet-ffi/src/error.rs — there is no compile-time
+    // check across the ABI.
+    /// A Core transaction could not be assembled from the request: a
+    /// `fundingPath` matching no spendable funds account or naming a
+    /// watch-only one, a request breaching a monetary bound (MAX_MONEY total,
+    /// max fee rate, a below-dust recipient, an over-100 kB recipient list), or
+    /// a malformed recipients blob. The REQUEST is at fault, so a verbatim
+    /// retry fails identically — the caller must change it. Nothing was
+    /// reserved or broadcast.
+    case errorTransactionBuild = 32
+    /// The request was valid and the transaction was fully assembled — only the
+    /// input signatures could not be produced (a locked or missing
+    /// Keychain/Keystore mnemonic, an unresolved input derivation path, a
+    /// sighash failure). Unlike `errorTransactionBuild` the REQUEST is fine:
+    /// the native layer released this build's owner-stamped input reservation
+    /// before returning, so once the signer is usable the IDENTICAL request may
+    /// be resubmitted. Surface as "unlock to continue", never "payment invalid".
+    case errorTransactionSigning = 33
     /// A deferred (BIP70/BIP270) reservation token has outlived its funding
     /// reservation's lifetime: key-wallet's TTL may already have swept and
     /// re-selected the inputs, so acting on it could touch a newer, unrelated
     /// reservation. The call did NOT touch the network. NOT retryable in place —
     /// rebuild the payment.
-    case errorStaleReservationToken = 27
+    case errorStaleReservationToken = 34
     /// A deferred reservation token is unknown, already broadcast, or already
     /// released — the guard that turns a double-broadcast (or a broadcast after
     /// release) into a typed error instead of a second send. The call did NOT
     /// touch the network. NOT retryable: rebuild the payment. (Release is
     /// idempotent and never surfaces this.)
-    case errorReservationTokenConsumed = 28
+    case errorReservationTokenConsumed = 35
     /// Asset-lock coin selection came up short over the permitted funding set
     /// (dashpay/platform#4073 request 3). The structured available/required
     /// duffs travel in the message string. Distinct from
     /// `errorCoreInsufficientFunds` (22), which is the atomic Core-send selector.
     case errorAssetLockInsufficientFunds = 29
-    // Raw value 26 above (errorTransactionBroadcastRejected) landed on
-    // v4.1-dev. NOTE: this integration does NOT carry #4185/#4256, so the
-    // deferred-token trio still sits at 27/28/32 below rather than the
-    // 34-36 those branches move it to, and 32 is errorReservationWalletMismatch
-    // rather than #4247's errorTransactionBuild. 37 is allocated from the
-    // frontier and is stable across that future renumber. These raw values
-    // MUST match `PlatformWalletFFIResultCode` in
-    // packages/rs-platform-wallet-ffi/src/error.rs — there is no compile-time
-    // check across the ABI. See ERROR_CODE_REGISTRY.md (#4261).
     /// A state transition could not be signed because the signer has no
     /// usable private key for the requested public key — restored from the
     /// structured signer completion code (dashpay/platform#4060 finding 7).
@@ -105,9 +123,25 @@ public enum PlatformWalletResultCode: Int32, Sendable {
     /// the same id); its reservation lives in that other generation's reservation
     /// set. The call did NOT touch the network and did NOT consume the rightful
     /// owner's token. NOT retryable through this handle: rebuild the payment.
-    /// Renumbered 29 → 32 during the v4.1 re-integration (code 29 is
-    /// `errorAssetLockInsufficientFunds`; 30/31 are reserved/allocated).
-    case errorReservationWalletMismatch = 32
+    case errorReservationWalletMismatch = 36
+    /// The named thing does not exist. Besides the handle/lookup failures this
+    /// has always covered, BOTH deferred-send paths report the
+    /// wallet-was-REMOVED case here.
+    ///
+    /// Deferred (BIP70/BIP270) *token* path: a signed-payment broadcast refuses
+    /// a token whose wallet is no longer registered in the manager, and a
+    /// signed-payment finalize refuses to register a payment whose wallet was
+    /// removed while it was being signed.
+    ///
+    /// Finalized-transaction *handle* (V2) path: `finalizeAtomic` publishes no
+    /// handle when the wallet was removed or re-created during signing, and
+    /// `broadcastTransactionWithOutcome(_: FinalizedCoreTransaction)` refuses a
+    /// handle whose generation is gone.
+    ///
+    /// Every one of these reconciles the build's UTXO reservation before
+    /// returning. Distinct from `errorReservationWalletMismatch` (36), where a
+    /// *different* live generation answers to the same id. The call did NOT touch
+    /// the network and is NOT retryable — the wallet is gone.
     /// A one-time-key (shielded invitation) claim found the invitation note's
     /// nullifier already spent on chain, with no positive evidence that this
     /// claim created an identity. TERMINAL and NOT retryable — the note is
@@ -178,6 +212,10 @@ public enum PlatformWalletResultCode: Int32, Sendable {
             self = .errorAssetLockFundingMismatch
         case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_TRANSACTION_BROADCAST_REJECTED:
             self = .errorTransactionBroadcastRejected
+        case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_TRANSACTION_BUILD:
+            self = .errorTransactionBuild
+        case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_TRANSACTION_SIGNING:
+            self = .errorTransactionSigning
         case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_STALE_RESERVATION_TOKEN:
             self = .errorStaleReservationToken
         case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_RESERVATION_TOKEN_CONSUMED:
@@ -315,6 +353,22 @@ public enum PlatformWalletError: LocalizedError {
     /// Core definitively rejected the transaction and its input reservation
     /// was released. Unlike `transactionBroadcastUnconfirmed`, retry is safe.
     case transactionBroadcastRejected(String)
+    /// A Core transaction could not be assembled from the request — an
+    /// unresolvable or watch-only funding path, a breached monetary bound, or a
+    /// malformed recipients blob. The REQUEST is at fault: a verbatim retry
+    /// fails identically. Nothing was reserved or broadcast.
+    case transactionBuild(String)
+    /// The transaction was assembled but its inputs could not be signed —
+    /// typically a locked or missing Keychain/Keystore mnemonic. The build's
+    /// input reservation was released, so the identical request may be
+    /// resubmitted once the signer is usable.
+    case transactionSigning(String)
+    /// A one-time-key (shielded invitation) claim found the invitation note's
+    /// nullifier already spent on chain, with no positive evidence that this
+    /// claim created an identity. TERMINAL and NOT retryable — the note is
+    /// consumed, so no retry can spend it again, and no identity id is
+    /// produced. Surface the invitation as spent.
+    case shieldedInviteAlreadyClaimed(String)
     /// Definitively-failed address-nonce race (shield, or identity
     /// top-up-from-addresses): Platform rejected the transition because the
     /// submitted address nonce raced its expected value. The transition did
@@ -343,6 +397,13 @@ public enum PlatformWalletError: LocalizedError {
     /// the same id). Nothing was broadcast and the rightful owner's token was
     /// not consumed. NOT retryable through this handle; rebuild the payment.
     case reservationWalletMismatch(String)
+    /// The named thing does not exist. For the deferred payment calls this is
+    /// the wallet-was-REMOVED case: the token's wallet (or the wallet a payment
+    /// was just signed against) is no longer registered in the manager, so there
+    /// is no live generation to act through. Nothing was broadcast; the
+    /// finalize path reconciles the build's reservation before returning. NOT
+    /// retryable — unlike `reservationWalletMismatch`, no other generation holds
+    /// this payment either.
     case notFound(String)
     case unknown(String)
 
@@ -365,6 +426,8 @@ public enum PlatformWalletError: LocalizedError {
              .shieldedNoRecordedAnchor(let m),
              .transactionBroadcastUnconfirmed(let m),
              .transactionBroadcastRejected(let m),
+             .transactionBuild(let m), .transactionSigning(let m),
+             .shieldedInviteAlreadyClaimed(let m),
              .addressNonceMismatch(let m),
              .signingKeyUnavailable(let m),
              .staleReservationToken(let m), .reservationTokenConsumed(let m),
@@ -409,6 +472,10 @@ public enum PlatformWalletError: LocalizedError {
             self = .transactionBroadcastUnconfirmed(detail)
         case .errorTransactionBroadcastRejected:
             self = .transactionBroadcastRejected(detail)
+        case .errorTransactionBuild:
+            self = .transactionBuild(detail)
+        case .errorTransactionSigning:
+            self = .transactionSigning(detail)
         case .errorAddressNonceMismatch:
             self = .addressNonceMismatch(detail)
         case .errorSigningKeyUnavailable:
@@ -419,6 +486,8 @@ public enum PlatformWalletError: LocalizedError {
             self = .reservationTokenConsumed(detail)
         case .errorReservationWalletMismatch:
             self = .reservationWalletMismatch(detail)
+        case .errorShieldedInviteAlreadyClaimed:
+            self = .shieldedInviteAlreadyClaimed(detail)
         case .notFound:               self = .notFound(detail)
         case .errorUnknown:           self = .unknown(detail)
         }

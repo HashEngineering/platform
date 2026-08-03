@@ -94,6 +94,11 @@ impl From<CoreAccountTypeFFI> for AccountTypePreference {
 /// On success `out_transaction_handle` receives an opaque V2 handle. Consume
 /// it with `core_wallet_broadcast_signed_transaction_v2` or
 /// `core_wallet_abandon_signed_transaction_v2`.
+///
+/// If the host removes (or re-creates) this wallet while the external signer is
+/// running, no handle is published: the build's reservation is reconciled and
+/// this returns `NotFound` (98), the same code the deferred-token sibling
+/// `core_wallet_signed_payment_finalize` uses for that case.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn core_wallet_tx_builder_finalize(
@@ -130,6 +135,43 @@ pub unsafe extern "C" fn core_wallet_tx_builder_finalize(
         &signer,
     ));
     let finalized = unwrap_result_or_return!(finalized);
+
+    // Publishing the V2 handle is gated exactly like the deferred-token sibling
+    // below (`core_wallet_signed_payment_finalize`). `finalize_transaction` drops
+    // the wallet-manager write lock before awaiting the (external, possibly slow)
+    // signer, so the host can have removed this wallet while we were signing —
+    // and that removal's V2-handle sweep has then ALREADY run. Inserting now
+    // would publish a live handle for a removed generation that no later sweep
+    // catches, and `core_wallet_broadcast_signed_transaction_v2` would happily
+    // push it to the network: its `is_same_generation` check compares two
+    // handles, and a removed generation matches itself (`dashpay/platform#4185`).
+    //
+    // Hold THIS generation's lifecycle gate across BOTH the liveness check and
+    // the insert, so a teardown cannot interleave between them. Acquired AFTER
+    // the signer await, never around it: holding it across an open signing prompt
+    // would stall this wallet's teardown for as long as the user takes, and the
+    // check makes that unnecessary.
+    let (_lifecycle, wallet_is_live) = runtime().block_on(async {
+        let gate = wallet.core().generation_payment_guard().await;
+        let live = wallet.core().is_current_generation().await;
+        (gate, live)
+    });
+    if !wallet_is_live {
+        // No handle was published, so nothing would ever release this build's
+        // reservation. Reconcile it here: the release is generation-bound, so on
+        // a genuine removal it is a logged no-op (the `ReservationSet` died with
+        // the generation), and on a re-create it correctly declines to touch the
+        // new generation's inputs.
+        runtime().block_on(wallet.core().abandon_transaction(&finalized));
+        return PlatformWalletFFIResult::err(
+            PlatformWalletFFIResultCode::NotFound,
+            "wallet is no longer registered in the manager (removed or re-created while the \
+             transaction was being signed); no transaction handle was published and its \
+             reservation was reconciled"
+                .to_string(),
+        );
+    }
+
     *out_transaction_handle =
         CORE_SIGNED_TRANSACTION_V2_STORAGE.insert(FFICoreSignedTransactionV2 {
             wallet: wallet.core().clone(),
@@ -217,6 +259,41 @@ pub unsafe extern "C" fn core_wallet_signed_payment_finalize(
     ));
     let finalized = unwrap_result_or_return!(finalized);
 
+    // `finalize_transaction` drops the wallet-manager write lock before awaiting
+    // the (external, possibly slow) signer, so the host can have removed this
+    // wallet while we were signing — and that removal's registry sweep has then
+    // ALREADY run. Registering now would insert a live token for a removed
+    // generation, which no later sweep would catch, defeating the teardown
+    // invariant that dropping tokens makes stale handles inert
+    // (`dashpay/platform#4185`).
+    //
+    // Take THIS wallet generation's lifecycle gate (shared — concurrent payments
+    // are unaffected) and hold it across BOTH the liveness check and the
+    // synchronous `register`, so a teardown cannot interleave between them.
+    // Deliberately acquired AFTER the signer await rather than around it: holding
+    // it across an open signing prompt would stall this wallet's teardown for as
+    // long as the user takes, and the check below makes that unnecessary.
+    let (_lifecycle, wallet_is_live) = runtime().block_on(async {
+        let gate = wallet.core().generation_payment_guard().await;
+        let live = wallet.core().is_current_generation().await;
+        (gate, live)
+    });
+    if !wallet_is_live {
+        // Nothing was registered, so no token would ever release this build's
+        // reservation. Reconcile it here: the release is generation-bound, so on
+        // a genuine removal it is a logged no-op (the `ReservationSet` died with
+        // the generation), and on a re-create it correctly declines to touch the
+        // new generation's inputs.
+        runtime().block_on(wallet.core().abandon_transaction(&finalized));
+        return PlatformWalletFFIResult::err(
+            PlatformWalletFFIResultCode::NotFound,
+            "wallet is no longer registered in the manager (removed or re-created while the \
+             payment was being signed); the payment was not registered and its reservation was \
+             reconciled"
+                .to_string(),
+        );
+    }
+
     let txid = finalized.transaction().txid();
     let fee = finalized.fee();
 
@@ -240,37 +317,39 @@ pub unsafe extern "C" fn core_wallet_signed_payment_finalize(
     let len = serialized.len();
 
     // Register the reserved+signed tx for deferred submission. `finalize` already
-    // committed the reservation; register just takes ownership of the built tx so
-    // a later broadcast/release can reconcile it, capturing the wallet instance
-    // whose `ReservationSet` holds the inputs.
-    let token = runtime().block_on(
-        crate::core_wallet::signed_payment::SIGNED_PAYMENT_REGISTRY.register(
-            wallet.core().clone(),
-            finalized.transaction().clone(),
-            // Retain the FULL account handle (CoinJoin included), not just the
-            // `StandardAccountType` subset: `finalize` reserved the selected
-            // inputs regardless of variant, so a CoinJoin-funded deferred payment
-            // must be able to release them immediately on rejection/abandon
-            // rather than stranding them until the 24-block TTL.
-            account_type.into(),
-            account_index,
-            // Baseline the age guard on the reservation's OWN stamp height,
-            // captured inside finalize's funding critical section before the
-            // external signer ran — never a fresh post-signing sample.
-            Some(finalized.reservation_height()),
-            // The key-wallet reservation token finalize stamped onto the funding
-            // inputs, so a later broadcast-reject or release frees only inputs
-            // this build still owns (owner-guarded; `dashpay/platform#4185`).
-            finalized.reservation_token(),
-        ),
-    );
+    // committed the reservation; `register` CONSUMES the `SignedCoreTransaction`
+    // ownership object (deriving its transaction, funding account, reservation
+    // height, and owner-guard token internally) and binds the token to the wallet
+    // whose `ReservationSet` holds the inputs. Because the object is consumed
+    // exactly once, this finalize can yield at most one token — no second token
+    // can ever name the same reservation (`dashpay/platform#4185`, blocker 1).
+    //
+    // `register` is SYNCHRONOUS: its reservation-owning insert runs inline with
+    // no future that could be dropped before its first poll and silently strand
+    // the consumed reservation (`dashpay/platform#4185`). It also validates that
+    // this wallet is the exact generation `finalize` bound the payment to; that
+    // always holds here (we register through the very wallet that finalized), but
+    // on the impossible mismatch it hands the finalized payment back so we
+    // release its reservation (owner-guarded) rather than leaking it.
+    let token = match crate::core_wallet::signed_payment::SIGNED_PAYMENT_REGISTRY
+        .register(wallet.core().clone(), finalized)
+    {
+        Ok(token) => token,
+        Err(err) => {
+            runtime().block_on(wallet.core().abandon_transaction(&err.signed));
+            return PlatformWalletFFIResult::err(
+                PlatformWalletFFIResultCode::ErrorReservationWalletMismatch,
+                "deferred payment was finalized against a different wallet generation".to_string(),
+            );
+        }
+    };
 
     *out_tx = FFICoreTransaction {
         tx_bytes: Box::into_raw(serialized.into_boxed_slice()) as *mut u8,
         tx_len: len,
         fee,
     };
-    *out_token = token;
+    *out_token = token.as_u64();
     *out_fee = fee;
     *out_txid = c_txid.into_raw();
     // Borrowed view into the just-written `out_tx` buffer; the caller copies the

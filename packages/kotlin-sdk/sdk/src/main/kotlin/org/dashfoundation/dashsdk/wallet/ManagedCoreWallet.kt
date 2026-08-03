@@ -91,6 +91,15 @@ class ManagedCoreWallet internal constructor(handle: Long) : AutoCloseable {
         )
 
     /**
+     * Release the UTXO reservation a [buildSignedPayment] call took, for a
+     * build that will not be broadcast. See
+     * [ManagedPlatformWallet.releasePaymentReservation] for the full contract;
+     * drive this through it, not directly.
+     */
+    internal fun releasePaymentReservation(txBytes: ByteArray, fundingPath: String?) =
+        WalletManagerNative.coreWalletReleasePaymentReservation(handle, txBytes, fundingPath)
+
+    /**
      * Build + sign a payment from ONE signable funds account AND register it for
      * deferred submission. Returns the packed native result (`u64 token,
      * u64 fee, u64 change, u32 txidLen, txid, u32 txLen, txBytes`, big-endian) —

@@ -32,6 +32,29 @@ use std::os::raw::c_char;
 pub(crate) static SIGNED_PAYMENT_REGISTRY: Lazy<SignedPaymentRegistry<SpvBroadcaster>> =
     Lazy::new(SignedPaymentRegistry::new);
 
+/// Serializes tests that reason about the process-global registry's *contents*.
+///
+/// [`SIGNED_PAYMENT_REGISTRY`] is one static shared by every test in the binary,
+/// and the harness runs tests in parallel threads by default. Any test that
+/// captures an `outstanding()` baseline and then asserts a delta against it is
+/// therefore racing every other test that mints or consumes a token — the
+/// baseline can be captured while a sibling's token is outstanding and compared
+/// after that sibling consumed it.
+///
+/// Tests take this around their whole body. Poisoning is recovered rather than
+/// propagated (mirroring `SignedPaymentRegistry`'s own lock): a panic in one
+/// test should fail that test, not cascade into every sibling.
+#[cfg(test)]
+pub(crate) static REGISTRY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take [`REGISTRY_TEST_LOCK`], recovering from poisoning.
+#[cfg(test)]
+pub(crate) fn registry_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    REGISTRY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Broadcast the payment behind `token` (built earlier via
 /// [`core_wallet_signed_payment_finalize`](super::transaction_builder::core_wallet_signed_payment_finalize)),
 /// reconciling its UTXO reservation on
@@ -39,11 +62,11 @@ pub(crate) static SIGNED_PAYMENT_REGISTRY: Lazy<SignedPaymentRegistry<SpvBroadca
 ///
 /// The token is consumed atomically before the send, so a repeated or
 /// concurrent broadcast of the same token gets `ErrorReservationTokenConsumed`
-/// (28) rather than a second send. `core_handle` must resolve to the same wallet
+/// (35) rather than a second send. `core_handle` must resolve to the same wallet
 /// *generation* the token was minted against; a wallet re-created under the same
-/// id yields `ErrorReservationWalletMismatch` (29). A token whose reservation
+/// id yields `ErrorReservationWalletMismatch` (36). A token whose reservation
 /// may already have aged out of key-wallet's TTL yields
-/// `ErrorStaleReservationToken` (27). These three deferred-token failures are
+/// `ErrorStaleReservationToken` (34). These three deferred-token failures are
 /// distinct codes so a host can message each precisely. Writes `out_txid` (a
 /// heap C string freed with `core_wallet_free_address`) on success.
 ///
@@ -60,7 +83,7 @@ pub unsafe extern "C" fn core_wallet_signed_payment_broadcast(
     let core = unwrap_option_or_return!(CORE_WALLET_STORAGE.with_item(core_handle, |w| w.clone()));
 
     let result =
-        runtime().block_on(SIGNED_PAYMENT_REGISTRY.broadcast(token as ReservationToken, &core));
+        runtime().block_on(SIGNED_PAYMENT_REGISTRY.broadcast(ReservationToken::from(token), &core));
 
     match result {
         Ok(txid) => {
@@ -91,6 +114,16 @@ pub unsafe extern "C" fn core_wallet_signed_payment_broadcast(
             PlatformWalletFFIResultCode::ErrorReservationWalletMismatch,
             e.to_string(),
         ),
+        // The wallet was REMOVED from the manager, so there is no live
+        // generation to broadcast through. Reported as the existing `NotFound`
+        // (98) rather than a new code: it is exactly the "the thing you named
+        // does not exist" case 98 already means, and both hosts already map it.
+        // Distinct from `ErrorReservationWalletMismatch` (36), where a DIFFERENT
+        // live generation answers to the same id. Did NOT touch the network and
+        // is NOT retryable — the wallet is gone.
+        Err(e @ SignedPaymentError::WalletRemoved(_)) => {
+            PlatformWalletFFIResult::err(PlatformWalletFFIResultCode::NotFound, e.to_string())
+        }
         // Preserve the typed underlying wallet error (keeps the ambiguous
         // "may already be on the network" retry semantics intact).
         Err(SignedPaymentError::Broadcast(e)) => PlatformWalletFFIResult::from(e),
@@ -107,6 +140,6 @@ pub unsafe extern "C" fn core_wallet_signed_payment_broadcast(
 /// Always safe to call; `token` is a plain value.
 #[no_mangle]
 pub unsafe extern "C" fn core_wallet_signed_payment_release(token: u64) -> PlatformWalletFFIResult {
-    runtime().block_on(SIGNED_PAYMENT_REGISTRY.release(token as ReservationToken));
+    runtime().block_on(SIGNED_PAYMENT_REGISTRY.release(ReservationToken::from(token)));
     PlatformWalletFFIResult::ok()
 }
