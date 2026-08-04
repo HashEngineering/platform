@@ -358,6 +358,15 @@ class ManagedPlatformWallet internal constructor(
      * @param network the wallet network — see [sendToAddresses].
      * @param coreSignerHandle the manager's `MnemonicResolverHandle` — see
      *   [sendToAddresses]. No private key crosses the boundary.
+     * @param opReturnData when non-null, a zero-value OP_RETURN output
+     *   carrying these bytes is appended after the recipients (a
+     *   MAYACHAIN-style deposit memo; ≤ 80 bytes or the build throws
+     *   pre-reservation). Mirror of Swift's `CoreTransactionBuilder.addOpReturn`.
+     * @param preserveOutputOrder keep outputs in insertion order instead of
+     *   BIP-69 sorting (MAYACHAIN requires vault = VOUT0, memo = VOUT1).
+     * @param changeToFirstInput route change to the first selected input's
+     *   address instead of a fresh change address — MAYACHAIN identifies
+     *   the depositor by VIN0 and pays refunds there.
      */
     suspend fun buildSignedPayment(
         recipients: List<Pair<String, Long>>,
@@ -365,6 +374,9 @@ class ManagedPlatformWallet internal constructor(
         coreSignerHandle: Long,
         accountType: AccountType = AccountType.ALL_SPENDABLE,
         accountIndex: Int = 0,
+        opReturnData: ByteArray? = null,
+        preserveOutputOrder: Boolean = false,
+        changeToFirstInput: Boolean = false,
     ): SignedCoreTransaction = gate.opWithCleanupOnCancellation(
         // Native finalization mints the token and transfers reservation ownership
         // to it before the blocking JNI call returns, so the token already exists
@@ -398,6 +410,17 @@ class ManagedPlatformWallet internal constructor(
             CoreTransactionBuilder(network).use { builder ->
                 for ((address, amount) in recipients) {
                     builder.addOutput(address, amount)
+                }
+                // MAYACHAIN-style deposit options. The OP_RETURN is appended
+                // AFTER the recipients so preserveOutputOrder yields the
+                // documented vault=VOUT0 / memo=VOUT1 shape; an over-long
+                // payload throws here, before anything is reserved.
+                opReturnData?.let { builder.addOpReturn(it) }
+                if (preserveOutputOrder) {
+                    builder.preserveOutputOrder()
+                }
+                if (changeToFirstInput) {
+                    builder.changeToFirstInput()
                 }
                 builder.finalizeSignedPayment(
                     this@ManagedPlatformWallet,
