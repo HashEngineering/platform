@@ -2200,13 +2200,29 @@ class PlatformWalletManager(
             val drainSigner =
                 KeystoreSigner(walletStorage, network, biometricGate, database.platformAddressDao())
             try {
-                mapNativeErrors {
+                val drained = mapNativeErrors {
                     DashpayNative.drainPendingContactCrypto(
                         walletHandle,
                         drainSigner.nativeHandle,
                         drainResolver.nativeHandle,
                     )
                 }
+                // Log on COMPLETION of the background drain (not when it was
+                // scheduled above): the drained count is the only signal that
+                // the queue actually moved, and it was previously discarded.
+                // The residual count is the same in-memory counter the 1 Hz
+                // poll publishes as `pendingAccountBuilds`; it is read
+                // best-effort because the wallet handle can go away
+                // (NotFound) while a long drain is in flight, and a failed
+                // read must not turn a SUCCESSFUL drain into a caught error.
+                val stillPending = runCatching {
+                    DashpayNative.pendingContactCryptoCount(walletHandle)
+                }.getOrNull()
+                android.util.Log.i(
+                    "PlatformWalletManager",
+                    "contact-crypto drain completed: $drained entries drained, " +
+                        "${stillPending ?: "unknown"} account-build ops still pending",
+                )
             } catch (_: Exception) {
                 // Not fatal: the next signer-present DashPay action (or the
                 // next unlock) re-attempts; the queue rebuilds via the sweep.
