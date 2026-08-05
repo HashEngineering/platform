@@ -17,13 +17,13 @@ use key_wallet::wallet::managed_wallet_info::wallet_info_interface::WalletInfoIn
 use key_wallet::wallet::managed_wallet_info::ManagedWalletInfo;
 use key_wallet::wallet::Wallet;
 use key_wallet::AddressInfo;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use std::str::FromStr;
 
 use crate::types::{FFINetwork, Network};
 use platform_wallet::changeset::{
     AccountAddressPoolEntry, AccountRegistrationEntry, ClientStartState, ClientWalletStartState,
-    Merge, PersistenceCapabilities, PersistenceError, PlatformWalletChangeSet,
+    PersistenceCapabilities, PersistenceError, PlatformWalletChangeSet,
     PlatformWalletPersistence, ProviderKeyAccountEntry, ProviderKeyExtendedPubKey,
     PERSISTENCE_CAPABILITIES_VERSION,
 };
@@ -787,14 +787,20 @@ impl RoundGuardState {
     }
 }
 
-/// In-memory persister that accumulates changesets and notifies via callbacks.
+/// Write-through persister that fans each changeset out to the host over the
+/// callback vtable and keeps no changeset state of its own.
+///
+/// `store()` delivers every field of the changeset to the host inside a single
+/// begin→per-kind→end round, and the host commits that round in its own
+/// transaction. Nothing is buffered on the Rust side: `flush()` is a bare
+/// notification (`on_flush_fn` takes only the wallet id), so there is no
+/// deferred payload for it to hand over.
 pub struct FFIPersister {
     callbacks: PersistenceCallbacks,
     /// Semantic capability declaration supplied separately from the callback
     /// vtable by the additive manager-create API. Keeping this out of
     /// `PersistenceCallbacks` preserves that established C struct's size.
     declared_capabilities: PersistenceCapabilities,
-    pending: RwLock<BTreeMap<WalletId, PlatformWalletChangeSet>>,
     /// Serializes the ENTIRE begin→per-kind→end callback round of
     /// [`Self::store`]. Every round producer (the core-changeset bridge,
     /// platform-address sync, shielded sync, spawned DashPay tasks) shares
@@ -845,7 +851,6 @@ impl FFIPersister {
         Self {
             callbacks,
             declared_capabilities,
-            pending: RwLock::new(BTreeMap::new()),
             round_lock: Mutex::new(RoundGuardState::default()),
         }
     }
@@ -1985,14 +1990,16 @@ impl PlatformWalletPersistence for FFIPersister {
             ));
         }
 
-        // Merge into pending changesets. No secret rides the changeset any
-        // more — the client derives identity keys on demand from the Keychain
-        // seed at the breadcrumb path, so nothing here needs scrubbing.
-        let mut pending = self.pending.write();
-        pending
-            .entry(wallet_id)
-            .and_modify(|existing| existing.merge(changeset.clone()))
-            .or_insert(changeset);
+        // The changeset has been delivered in full to the host by the round
+        // above and is dropped here. It is deliberately NOT accumulated: this
+        // persister used to merge a clone of every changeset into a per-wallet
+        // `pending` map that only `flush()` ever touched — to drop it — so the
+        // accumulated copy was never read by anything. On a long scan that
+        // write-only map grew without bound (hundreds of MB to multiple GB)
+        // and each merge rebuilt O(N) dedup `HashSet`s over the accumulation
+        // several times a second. No secret rides the changeset (the client
+        // derives identity keys on demand from the Keychain seed at the
+        // breadcrumb path), so nothing here needs scrubbing on the way out.
 
         // Notify caller.
         if let Some(cb) = self.callbacks.on_store_fn {
@@ -2025,9 +2032,9 @@ impl PlatformWalletPersistence for FFIPersister {
             }
         }
 
-        // Clear pending after successful flush notification.
-        let mut pending = self.pending.write();
-        pending.remove(&wallet_id);
+        // Nothing to clear: `store()` is write-through, so this persister
+        // holds no buffered changeset for `wallet_id`. The notification above
+        // is the whole of `flush()` for FFI hosts.
 
         Ok(())
     }
