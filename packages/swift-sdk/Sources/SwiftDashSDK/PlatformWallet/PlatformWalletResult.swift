@@ -160,6 +160,20 @@ public enum PlatformWalletResultCode: Int32, Sendable {
     /// (Not returned by `destroy`: Rust owns the callback contexts, so a
     /// straggling worker is memory-safe and merely logged there.)
     case errorShutdownIncomplete = 27
+    // Raw values 28-30 are NOT claimed here: 28 and 30 are reserved (vacated by
+    // the deferred-payment reservation-token trio on dashpay/platform#4185 /
+    // #4256 when it moved to 34-36) and 29 belongs to the asset-lock funding
+    // shortfall on dashpay/platform#4184.
+    /// A state transition could not be signed because the signer has no
+    /// usable private key for the requested public key — restored from the
+    /// structured signer completion code (dashpay/platform#4060 finding 7).
+    /// Route to key repair; not retryable as-is.
+    ///
+    /// Also produced with no signer round-trip by
+    /// `ManagedCoreWallet.signMessage`, for a message-signing address this
+    /// wallet does not own — or owns only watch-only, a DashPay *external*
+    /// account holding a contact's addresses.
+    case errorSigningKeyUnavailable = 31
     case notFound = 98
     case errorUnknown = 99
 
@@ -390,6 +404,10 @@ public enum PlatformWalletError: LocalizedError {
     /// Restored from the structured signer completion code
     /// (dashpay/platform#4060 finding 7); route to key repair. Kotlin
     /// parity: `DashSdkError.PlatformWallet.SigningKeyUnavailable`.
+    ///
+    /// `signMessage` also raises it for an address the wallet does not own.
+    /// Distinct from `invalidParameter`, which means the address itself is
+    /// unusable (unparseable, wrong network, or not P2PKH).
     case signingKeyUnavailable(String)
     /// A deferred (BIP70/BIP270) reservation token has outlived its funding
     /// reservation's lifetime — key-wallet's TTL may already have swept and
