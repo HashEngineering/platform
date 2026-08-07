@@ -578,7 +578,13 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
             // is the SELECTED account's own wallet-level `Account` (see above), so
             // its xpub — not the BIP44 change account's — governs any pool mutation
             // `set_funding` performs on `selected`.
-            .set_funding(selected, funding_wallet_acc)
+            // `add_funding` is `set_funding` renamed by rust-dashcore#925 when
+            // funding became additive. Called EXACTLY ONCE on a builder created
+            // fresh above with no seeded inputs, so it is equivalent to the
+            // assigning `set_funding` it replaces: the asset lock still funds
+            // from the ONE selected account. Asset locks are deliberately NOT
+            // pooled by dashpay/platform#4329.
+            .add_funding(selected, funding_wallet_acc)
             .set_change_address(change_addr)
             .require_final_inputs();
 

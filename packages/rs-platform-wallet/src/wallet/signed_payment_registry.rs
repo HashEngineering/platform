@@ -69,11 +69,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use dashcore::{Transaction, Txid};
-// Named only by the intra-doc links below now that `RegisteredPayment` holds a
-// `FundingAccountRef` (which is what carries the account-type variant) instead
-// of a bare type+index pair.
-#[allow(unused_imports)]
-use key_wallet::wallet::managed_wallet_info::transaction_building::AccountTypePreference;
 // key-wallet's UTXO-reservation token, distinct from this registry's own
 // `ReservationToken` (the u64 payment handle below). Aliased so the two never
 // blur: the funding token identifies the reserved *inputs* for an owner-guarded
@@ -81,7 +76,7 @@ use key_wallet::wallet::managed_wallet_info::transaction_building::AccountTypePr
 use key_wallet::ReservationToken as FundingReservationToken;
 
 use crate::broadcaster::TransactionBroadcaster;
-use crate::wallet::core::{CoreWallet, FundingAccountRef, SignedCoreTransaction};
+use crate::wallet::core::{CoreWallet, SignedCoreTransaction};
 use crate::PlatformWalletError;
 
 /// Opaque handle to a registered, signed-but-unsent payment. Minted by
@@ -251,24 +246,13 @@ struct RegisteredPayment<B: TransactionBroadcaster + ?Sized> {
     core: CoreWallet<B>,
     /// The signed transaction to broadcast.
     tx: Transaction,
-    /// The releasable funding-account handle — the account whose reservation the
-    /// build took and which a rejected broadcast or an explicit release must
-    /// reconcile.
-    ///
-    /// A [`FundingAccountRef`], not a bare `StandardAccountType`, so every
-    /// funding domain retains a releasable handle:
-    ///
-    /// * [`FundingAccountRef::Standard`] covers BIP44/BIP32 **and** CoinJoin —
-    ///   `finalize` reserves the selected inputs for every account variant, so a
-    ///   CoinJoin token must be able to release them immediately on
-    ///   rejection/abandon rather than stranding them until the key-wallet TTL
-    ///   backstop.
-    /// * [`FundingAccountRef::Path`] covers accounts key-wallet's
-    ///   [`AccountTypePreference`] cannot name at all — above all a **DashPay
-    ///   receiving-funds** account, whose reservation would otherwise be
-    ///   unreleasable, and whose release keyed on BIP44 instead would free an
-    ///   unrelated account's inputs.
-    funding: FundingAccountRef,
+    /// Every account whose reservation `finalize` took — a pooled build spans
+    /// the standard families and DashPay receiving accounts, and a rejected
+    /// broadcast or an explicit release must reconcile EACH of them (the one
+    /// build token stamps every account's reserved inputs). Concrete
+    /// [`AccountType`]s so CoinJoin- and DashPay-funded deferred payments
+    /// retain releasable handles too.
+    funding_accounts: Vec<key_wallet::account::AccountType>,
     /// Wallet `last_processed_height` captured inside the funding critical
     /// section — the exact clock the build stamps the funding reservation with
     /// (`SignedCoreTransaction::reservation_height` on the
@@ -418,14 +402,7 @@ impl<B: TransactionBroadcaster + ?Sized> SignedPaymentRegistry<B> {
             RegisteredPayment {
                 core,
                 tx: parts.transaction,
-                // `finalize_transaction` selects through key-wallet's
-                // `AccountTypePreference`, so this path can only ever name a
-                // standard-shaped account. The `Path` arm exists for
-                // `register_funded_by` below.
-                funding: FundingAccountRef::standard(
-                    parts.funding_account_type,
-                    parts.funding_account_index,
-                ),
+                funding_accounts: parts.funding_accounts,
                 registered_height: parts.reservation_height,
                 funding_reservation_token: parts.reservation_token,
             },
@@ -433,21 +410,25 @@ impl<B: TransactionBroadcaster + ?Sized> SignedPaymentRegistry<B> {
         Ok(token)
     }
 
-    /// [`register`](Self::register) for a payment funded from the single funds
-    /// account named by its **account-level derivation path** — the shape
-    /// [`CoreWallet::finalize_signed_payment_from_funding_path`] produces.
+    /// [`register`](Self::register) for a payment funded from the funds
+    /// account(s) resolved by
+    /// [`CoreWallet::finalize_signed_payment_from_funding_path`].
     ///
-    /// This is the only registration form that can hold a **DashPay
-    /// receiving-funds** payment: key-wallet's [`AccountTypePreference`] has no
-    /// variant for that account, so registering such a payment through
-    /// [`register`](Self::register) would have to lie about its funding account
-    /// and a later release would then free BIP44's inputs instead of the
-    /// receival account's.
+    /// That selector names exactly ONE account (by its account-level derivation
+    /// path), so `funding_accounts` is normally a single-element list — but it
+    /// is the same concrete [`AccountType`] list [`register`](Self::register)
+    /// stores, so both registration forms release through one code path.
     ///
-    /// `funding` MUST be the account the build actually selected from
-    /// (`FinalizedCorePayment::funding`), not the caller's requested path:
-    /// `None` requests resolve to the unmixed BIP44 account's path, and the
-    /// release must name the resolved account.
+    /// Concrete `AccountType`s are what make a **DashPay receiving-funds**
+    /// payment registrable at all: key-wallet's `AccountTypePreference` has no
+    /// variant naming an individual receival account, so a registration keyed on
+    /// a preference would have to lie about its funding account and a later
+    /// release would free BIP44's inputs instead of the receival account's.
+    ///
+    /// `funding_accounts` MUST be the account(s) the build actually selected
+    /// from (`FinalizedCorePayment::funding_accounts`), not the caller's
+    /// requested path: `None` requests resolve to the unmixed BIP44 account's
+    /// path, and the release must name the resolved account.
     ///
     /// `registered_height` MUST be `FinalizedCorePayment::reservation_height` —
     /// the `last_processed_height` sampled inside the funding critical section,
@@ -471,11 +452,12 @@ impl<B: TransactionBroadcaster + ?Sized> SignedPaymentRegistry<B> {
     ///
     /// [`CoreWallet::finalize_signed_payment_from_funding_path`]:
     ///     crate::CoreWallet::finalize_signed_payment_from_funding_path
+    /// [`AccountType`]: key_wallet::account::AccountType
     pub async fn register_funded_by(
         &self,
         core: CoreWallet<B>,
         tx: Transaction,
-        funding: FundingAccountRef,
+        funding_accounts: Vec<key_wallet::account::AccountType>,
         registered_height: u32,
         funding_reservation_token: Option<FundingReservationToken>,
     ) -> ReservationToken {
@@ -485,7 +467,7 @@ impl<B: TransactionBroadcaster + ?Sized> SignedPaymentRegistry<B> {
             RegisteredPayment {
                 core,
                 tx,
-                funding,
+                funding_accounts,
                 registered_height,
                 funding_reservation_token,
             },
@@ -602,7 +584,7 @@ impl<B: TransactionBroadcaster + ?Sized> SignedPaymentRegistry<B> {
         let txid = entry
             .core
             .broadcast_payment_releasing_reservation(
-                &entry.funding,
+                &entry.funding_accounts,
                 &entry.tx,
                 entry.funding_reservation_token,
             )
@@ -626,7 +608,11 @@ impl<B: TransactionBroadcaster + ?Sized> SignedPaymentRegistry<B> {
         }
         entry
             .core
-            .release_reservation_for(&entry.funding, &entry.tx, entry.funding_reservation_token)
+            .release_transaction_reservation(
+                &entry.funding_accounts,
+                &entry.tx,
+                entry.funding_reservation_token,
+            )
             .await;
     }
 
@@ -880,7 +866,7 @@ mod tests {
         let mut builder = TransactionBuilder::new()
             .set_current_height(current_height)
             .set_selection_strategy(SelectionStrategy::LargestFirst)
-            .set_funding(managed_account, account);
+            .add_funding(managed_account, account);
         for (addr, amount) in outputs {
             builder = builder.add_output(addr, *amount);
         }
@@ -893,8 +879,9 @@ mod tests {
         Ok(SignedCoreTransaction::new_for_test(
             tx,
             fee,
-            preference(account_type),
-            account_index,
+            vec![preference(account_type)
+                .account_type(account_index)
+                .expect("standard preference resolves to one account")],
             current_height,
             reservation_token,
             // Stamp the finalizing generation so registering through this same
@@ -1017,7 +1004,7 @@ mod tests {
         let finalized = core
             .finalize_transaction(
                 sweep_builder(&recipient),
-                AccountTypePreference::CoinJoin,
+                &[AccountTypePreference::CoinJoin],
                 0,
                 &signer,
             )
@@ -1032,7 +1019,7 @@ mod tests {
         let blocked = core
             .finalize_transaction(
                 sweep_builder(&recipient),
-                AccountTypePreference::CoinJoin,
+                &[AccountTypePreference::CoinJoin],
                 0,
                 &signer,
             )
@@ -1053,7 +1040,7 @@ mod tests {
         let rebuilt = core
             .finalize_transaction(
                 sweep_builder(&recipient),
-                AccountTypePreference::CoinJoin,
+                &[AccountTypePreference::CoinJoin],
                 0,
                 &signer,
             )
@@ -1930,7 +1917,7 @@ mod tests {
         let finalized = core
             .finalize_transaction(
                 payment_builder(&outputs),
-                AccountTypePreference::BIP44,
+                &[AccountTypePreference::BIP44],
                 0,
                 &signer,
             )
@@ -1952,7 +1939,7 @@ mod tests {
         let retaken = core
             .finalize_transaction(
                 payment_builder(&outputs),
-                AccountTypePreference::BIP44,
+                &[AccountTypePreference::BIP44],
                 0,
                 &signer,
             )
@@ -1978,7 +1965,7 @@ mod tests {
         let third = core
             .finalize_transaction(
                 payment_builder(&outputs),
-                AccountTypePreference::BIP44,
+                &[AccountTypePreference::BIP44],
                 0,
                 &signer,
             )
