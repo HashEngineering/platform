@@ -471,7 +471,7 @@ mod tests {
     use crate::wallet::identity::IdentityManager;
     use crate::wallet::persister::WalletPersister;
     use crate::wallet::platform_wallet::PlatformWalletInfo;
-    use crate::AssetLockFundingType;
+    use crate::{AssetLockFundingAccount, AssetLockFundingType};
 
     /// Persistence stub that records every stored changeset so the test
     /// can replay the registration rounds the way the FFI load path does.
@@ -546,7 +546,8 @@ mod tests {
         let (transaction, _path) = manager
             .build_asset_lock_transaction(
                 1_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::IdentityRegistration,
                 4,
                 &signer,
@@ -688,7 +689,8 @@ mod tests {
         let (tx, path) = manager
             .build_asset_lock_transaction(
                 1_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::IdentityTopUp,
                 TOPUP_INDEX,
                 &signer,

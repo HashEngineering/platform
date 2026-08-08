@@ -26,7 +26,9 @@ pub mod wallet;
 
 pub use error::PlatformWalletError;
 pub use events::{PlatformEventHandler, PlatformEventManager};
-pub use key_wallet::wallet::managed_wallet_info::asset_lock_builder::AssetLockFundingType;
+pub use key_wallet::wallet::managed_wallet_info::asset_lock_builder::{
+    AssetLockFundingAccount, AssetLockFundingType,
+};
 // Surface the upstream `DerivedAddress` event payload through this
 // crate so downstream FFI consumers (rs-platform-wallet-ffi) can
 // project `CoreChangeSet.addresses_derived` without taking an extra

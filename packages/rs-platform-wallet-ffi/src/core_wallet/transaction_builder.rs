@@ -396,11 +396,22 @@ impl CoreAccountTypeFFI {
     /// only CoinJoin funding path is a sweep — a single sender spending each
     /// UTXO exactly once, with no concurrent build or retry to race — so there
     /// is nothing to reconcile in practice.
+    ///
+    /// `AllSpendable` is likewise `None`, but for a different reason: a pooled
+    /// build reserves inputs across SEVERAL accounts, so no single
+    /// `StandardAccountType` can name its reservation. It is unreachable here
+    /// by construction — the only build API this broadcast pairs with
+    /// (`core_wallet_tx_builder_build_signed`) rejects the pooled selector with
+    /// a typed parameter error, so no transaction reaches this function having
+    /// been funded that way. A pooled build goes through
+    /// `core_wallet_tx_builder_finalize`, whose handle carries the concrete
+    /// `funding_accounts` that `broadcast_payment_releasing_reservation`
+    /// releases on every contributing account.
     pub(crate) fn as_standard_account_type(&self) -> Option<StandardAccountType> {
         match self {
             CoreAccountTypeFFI::BIP44 => Some(StandardAccountType::BIP44Account),
             CoreAccountTypeFFI::BIP32 => Some(StandardAccountType::BIP32Account),
-            CoreAccountTypeFFI::CoinJoin => None,
+            CoreAccountTypeFFI::CoinJoin | CoreAccountTypeFFI::AllSpendable => None,
         }
     }
 }
@@ -440,16 +451,19 @@ fn managed_account(
         .and_then(|at| accounts.funds_account(&at))
 }
 
+/// Mutable twin of [`managed_account`]. Delegates the family→account mapping
+/// to key-wallet exactly as the shared reader does, so a DashPay preference —
+/// which names a SET of accounts rather than one, and whose `account_type`
+/// therefore yields `None` — resolves to no single account here instead of
+/// needing an arm per new variant.
 fn managed_account_mut(
     accounts: &mut ManagedAccountCollection,
     source: AccountTypePreference,
     account_index: u32,
 ) -> Option<&mut ManagedCoreFundsAccount> {
-    match source {
-        AccountTypePreference::BIP44 => accounts.standard_bip44_accounts.get_mut(&account_index),
-        AccountTypePreference::BIP32 => accounts.standard_bip32_accounts.get_mut(&account_index),
-        AccountTypePreference::CoinJoin => accounts.coinjoin_accounts.get_mut(&account_index),
-    }
+    source
+        .account_type(account_index)
+        .and_then(|at| accounts.funds_account_mut(&at))
 }
 
 impl FFITransactionBuilder {
@@ -683,7 +697,12 @@ pub unsafe extern "C" fn core_wallet_tx_builder_set_funding(
     }
 
     let wallet_id = wallet.wallet_id();
-    let source: AccountTypePreference = account_type.into();
+    let Some(source) = account_type.single_preference() else {
+        return PlatformWalletFFIResult::err(
+            PlatformWalletFFIResultCode::ErrorInvalidParameter,
+            "AllSpendable pools multiple accounts; this API addresses exactly one".to_string(),
+        );
+    };
 
     let result = runtime().block_on(async {
         let mut wm = wallet.wallet_manager().write().await;
@@ -691,12 +710,15 @@ pub unsafe extern "C" fn core_wallet_tx_builder_set_funding(
             .get_wallet_and_info_mut(&wallet_id)
             .ok_or_else(|| "wallet not found".to_string())?;
 
-        let account = match source {
-            AccountTypePreference::BIP44 => w.get_bip44_account(account_index),
-            AccountTypePreference::BIP32 => w.get_bip32_account(account_index),
-            AccountTypePreference::CoinJoin => w.get_coinjoin_account(account_index),
-        }
-        .ok_or_else(|| format!("wallet account {source:?} #{account_index} not found"))?;
+        // Resolve the xpub-bearing account through key-wallet's own
+        // family→account mapping, the same way `managed_account_mut` resolves
+        // the managed twin. `source` came from `single_preference`, so it is
+        // always a single-account family here; delegating rather than matching
+        // keeps this site from needing an arm per new DashPay variant.
+        let account = source
+            .account_type(account_index)
+            .and_then(|at| w.accounts.account_of_type(at))
+            .ok_or_else(|| format!("wallet account {source:?} #{account_index} not found"))?;
 
         let height = info.core_wallet.last_processed_height();
 
@@ -864,7 +886,12 @@ pub unsafe extern "C" fn core_wallet_tx_builder_build_signed(
     }
 
     let wallet_id = wallet.wallet_id();
-    let source: AccountTypePreference = account_type.into();
+    let Some(source) = account_type.single_preference() else {
+        return PlatformWalletFFIResult::err(
+            PlatformWalletFFIResultCode::ErrorInvalidParameter,
+            "AllSpendable pools multiple accounts; this API addresses exactly one".to_string(),
+        );
+    };
     let signer = MnemonicResolverCoreSigner::new(core_signer_handle, wallet_id, wallet.network());
 
     let build = runtime().block_on(async {

@@ -1009,7 +1009,12 @@ mod tests {
             >,
         >,
         wallet_id: &WalletId,
-    ) -> (HashSet<OutPoint>, HashSet<OutPoint>, DerivationPath, AccountType) {
+    ) -> (
+        HashSet<OutPoint>,
+        HashSet<OutPoint>,
+        DerivationPath,
+        AccountType,
+    ) {
         use key_wallet::managed_account::managed_account_trait::ManagedAccountTrait;
 
         let guard = wm.read().await;
@@ -1031,12 +1036,11 @@ mod tests {
             .get(&0)
             .expect("coinjoin account 0 present");
         let coinjoin = coinjoin_acc.utxos.keys().copied().collect();
-        let path = coinjoin_acc
-            .managed_account_type()
-            .to_account_type()
+        let account_type = coinjoin_acc.managed_account_type().to_account_type();
+        let path = account_type
             .derivation_path(network)
             .expect("coinjoin account-level path");
-        (bip44, coinjoin, path)
+        (bip44, coinjoin, path, account_type)
     }
 
     /// A single-account BIP44 payment: the recipient output is present with the
@@ -1135,7 +1139,7 @@ mod tests {
     async fn default_funding_selects_strictly_within_bip44() {
         // 0.2 DASH on BIP44, 0.09 on CoinJoin; ask 0.15 → BIP44 alone covers it.
         let (wm, wallet_id, signer) = split_funded_wallet_manager(20_000_000, 9_000_000).await;
-        let (bip44_ops, coinjoin_ops, _) =
+        let (bip44_ops, coinjoin_ops, _, _) =
             split_account_outpoints_and_coinjoin_path(&wm, &wallet_id).await;
 
         let core = core_wallet(wm, wallet_id, Arc::new(WalletGeneration::new()));
@@ -1170,7 +1174,7 @@ mod tests {
     async fn explicit_coinjoin_path_selects_only_coinjoin() {
         // 0.09 DASH on BIP44 (short), 0.2 on CoinJoin; take 0.15 from CoinJoin.
         let (wm, wallet_id, signer) = split_funded_wallet_manager(9_000_000, 20_000_000).await;
-        let (bip44_ops, coinjoin_ops, coinjoin_path) =
+        let (bip44_ops, coinjoin_ops, coinjoin_path, _) =
             split_account_outpoints_and_coinjoin_path(&wm, &wallet_id).await;
 
         let core = core_wallet(wm, wallet_id, Arc::new(WalletGeneration::new()));
@@ -1313,7 +1317,7 @@ mod tests {
     #[tokio::test]
     async fn selected_account_shortfall_is_typed() {
         let (wm, wallet_id, signer) = split_funded_wallet_manager(9_000_000, 9_000_000).await;
-        let (_, _, coinjoin_path) =
+        let (_, _, coinjoin_path, _) =
             split_account_outpoints_and_coinjoin_path(&wm, &wallet_id).await;
         let core = core_wallet(wm, wallet_id, Arc::new(WalletGeneration::new()));
 
@@ -1511,7 +1515,12 @@ mod tests {
             >,
         >,
         wallet_id: &WalletId,
-    ) -> (HashSet<OutPoint>, HashSet<OutPoint>, DerivationPath, AccountType) {
+    ) -> (
+        HashSet<OutPoint>,
+        HashSet<OutPoint>,
+        DerivationPath,
+        AccountType,
+    ) {
         use key_wallet::managed_account::managed_account_trait::ManagedAccountTrait;
 
         let guard = wm.read().await;
@@ -1642,8 +1651,7 @@ mod tests {
         let (wm, wallet_id, signer) =
             split_funded_wallet_manager_dashpay(9_000_000, 20_000_000, DashpayLeg::ReceivingFunds)
                 .await;
-        let (_, _, receival_path, _) =
-            dashpay_outpoints_and_receival_path(&wm, &wallet_id).await;
+        let (_, _, receival_path, _) = dashpay_outpoints_and_receival_path(&wm, &wallet_id).await;
         // The wallet's OWN generation handle — releases are generation-bound and
         // are (correctly) skipped for a foreign one. See [`wallet_generation`].
         let generation = wallet_generation(&wm, &wallet_id).await;
@@ -1718,7 +1726,7 @@ mod tests {
             .register_funded_by(
                 core.clone(),
                 rebuilt.transaction.clone(),
-                rebuilt.funding.clone(),
+                rebuilt.funding_accounts.clone(),
                 rebuilt.reservation_height,
                 rebuilt.reservation_token,
             )
@@ -1761,8 +1769,7 @@ mod tests {
         let (wm, wallet_id, signer) =
             split_funded_wallet_manager_dashpay(9_000_000, 20_000_000, DashpayLeg::ReceivingFunds)
                 .await;
-        let (_, _, receival_path, _) =
-            dashpay_outpoints_and_receival_path(&wm, &wallet_id).await;
+        let (_, _, receival_path, _) = dashpay_outpoints_and_receival_path(&wm, &wallet_id).await;
         let generation = wallet_generation(&wm, &wallet_id).await;
         let core = core_wallet(wm, wallet_id, generation);
 
@@ -2391,7 +2398,7 @@ mod tests {
     #[tokio::test]
     async fn releasing_against_another_account_frees_nothing() {
         let (wm, wallet_id, signer) = split_funded_wallet_manager(9_000_000, 20_000_000).await;
-        let (_, _, coinjoin_path) =
+        let (_, _, coinjoin_path, _) =
             split_account_outpoints_and_coinjoin_path(&wm, &wallet_id).await;
         let core = core_wallet(
             Arc::clone(&wm),
