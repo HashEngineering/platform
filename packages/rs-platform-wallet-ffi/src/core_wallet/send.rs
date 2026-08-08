@@ -318,7 +318,7 @@ pub unsafe extern "C" fn core_wallet_build_signed_payment_with_token(
         crate::core_wallet::signed_payment::SIGNED_PAYMENT_REGISTRY.register_funded_by(
             core.clone(),
             payment.transaction.clone(),
-            payment.funding.clone(),
+            payment.funding_accounts.clone(),
             // The height sampled inside the funding critical section, mandatory
             // since #4185: the age guard must baseline off the build's own clock.
             payment.reservation_height,

@@ -72,7 +72,13 @@ pub unsafe extern "C" fn asset_lock_manager_build_transaction(
         };
         runtime().block_on(manager.build_asset_lock_transaction(
             amount_duffs,
-            account_index,
+            // The C ABI carries a bare BIP44 account index; pooled/CoinJoin
+            // funding is not reachable across this entry point yet.
+            key_wallet::wallet::managed_wallet_info::asset_lock_builder::AssetLockFundingAccount::Bip44 {
+                account_index,
+            },
+            // Exact-amount build: no whole-balance drain over this ABI.
+            false,
             funding,
             identity_index,
             &signer,

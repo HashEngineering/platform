@@ -15,7 +15,7 @@ use key_wallet::bip32::DerivationPath;
 use key_wallet::managed_account::managed_account_trait::ManagedAccountTrait;
 use key_wallet::signer::{ExtendedPubKeySigner, Signer};
 use key_wallet::wallet::managed_wallet_info::asset_lock_builder::{
-    AssetLockFundingType, CreditOutputFunding,
+    AssetLockFundingAccount, AssetLockFundingType, CreditOutputFunding,
 };
 use key_wallet::wallet::managed_wallet_info::coin_selection::{SelectionError, SelectionStrategy};
 use key_wallet::wallet::managed_wallet_info::fee::FeeRate;
@@ -120,6 +120,29 @@ impl<S: Signer> key_wallet::signer::Signer for PrefetchedCreditKeySigner<'_, S> 
 // Asset lock transaction building
 // ---------------------------------------------------------------------------
 
+/// The managed funds account that `build_asset_lock_with_signer` reserved the
+/// build's inputs on, resolved from the [`AssetLockFundingAccount`] the caller
+/// named.
+///
+/// The key-wallet builder reserves on whichever family funded the transaction,
+/// so an abandon path must release from that same family — releasing from the
+/// BIP44 map after a CoinJoin-funded build would silently strand the inputs
+/// until the reservation-TTL backstop.
+fn reserved_funding_account(
+    core_wallet: &ManagedWalletInfo,
+    funding_account: AssetLockFundingAccount,
+) -> Option<&key_wallet::managed_account::ManagedCoreFundsAccount> {
+    match funding_account {
+        AssetLockFundingAccount::Bip44 { account_index } => core_wallet
+            .accounts
+            .standard_bip44_accounts
+            .get(&account_index),
+        AssetLockFundingAccount::CoinJoin { account_index } => {
+            core_wallet.accounts.coinjoin_accounts.get(&account_index)
+        }
+    }
+}
+
 impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
     /// Build an asset lock transaction using the key-wallet builder.
     ///
@@ -131,8 +154,17 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
     ///
     /// # Arguments
     ///
-    /// * `amount_duffs` — Amount to lock in duffs.
-    /// * `account_index` — BIP44 account index to select UTXOs from.
+    /// * `amount_duffs` — Amount to lock in duffs. Ignored when `drain` is
+    ///   set: the key-wallet builder rewrites the credit output to
+    ///   `Σ inputs − fee`.
+    /// * `funding_account` — Which wallet account family supplies (and signs)
+    ///   the funding UTXOs. `Bip44 { account_index }` is the historical
+    ///   behaviour; `CoinJoin { account_index }` lets mixed coins fund a lock
+    ///   directly, and is drain-only (the key-wallet builder rejects a
+    ///   non-drain CoinJoin build).
+    /// * `drain` — Lock the funding account's whole spendable balance: every
+    ///   final UTXO is consumed, no change output is emitted, and the single
+    ///   credit output's value becomes `Σ inputs − fee`.
     /// * `funding_type` — Which account to derive the one-time key from
     ///   (e.g., `IdentityRegistration`, `IdentityTopUp`).
     /// * `identity_index` — Identity index (used by `IdentityTopUp`, ignored by others).
@@ -147,30 +179,38 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
     /// * `funding_path` — **Shielded funding only.** The account-level
     ///   derivation path of the SINGLE funds account whose UTXOs fund the lock.
     ///   `None` (the default) funds from the unmixed BIP44 account at
-    ///   `account_index`. `Some(path)` funds strictly from the one funds account
-    ///   whose account-level path equals `path` (e.g. the DIP-9 CoinJoin
-    ///   account), with change routed to the BIP44 account at `account_index`
-    ///   (non-Standard accounts such as CoinJoin cannot derive their own change
-    ///   — see [`Self::build_asset_lock_tx_from_selected_account`]). Both cases
-    ///   go through the single-account selector, so there is no union across
-    ///   accounts and no privacy-domain consent gate: the caller names exactly
-    ///   one funding source. Ignored for every non-shielded funding type, which
-    ///   always uses the single BIP44 account at `account_index` via the pinned
+    ///   `funding_account`'s index. `Some(path)` funds strictly from the one
+    ///   funds account whose account-level path equals `path` (e.g. the DIP-9
+    ///   CoinJoin account), with change routed to the BIP44 account at that
+    ///   index (non-Standard accounts such as CoinJoin cannot derive their own
+    ///   change — see [`Self::build_asset_lock_tx_from_selected_account`]).
+    ///   Both cases go through the single-account selector, so there is no
+    ///   union across accounts and no privacy-domain consent gate: the caller
+    ///   names exactly one funding source. Ignored for every non-shielded
+    ///   funding type, which routes `funding_account` + `drain` straight to the
     ///   key-wallet builder.
     pub async fn build_asset_lock_transaction<S: ExtendedPubKeySigner>(
         &self,
         amount_duffs: u64,
-        account_index: u32,
+        funding_account: AssetLockFundingAccount,
+        drain: bool,
         funding_type: AssetLockFundingType,
         identity_index: u32,
         signer: &S,
         funding_path: Option<DerivationPath>,
     ) -> Result<(Transaction, DerivationPath), PlatformWalletError> {
-        if amount_duffs == 0 {
+        // A drain build has no caller-supplied amount to validate — the
+        // key-wallet builder rewrites the credit output to `Σ inputs − fee`.
+        if amount_duffs == 0 && !drain {
             return Err(PlatformWalletError::AssetLockTransaction(
                 "Amount must be greater than zero".to_string(),
             ));
         }
+
+        // The BIP44/CoinJoin account index within its family. Used below for
+        // the shielded selector's change routing and for the defensive
+        // reservation rollbacks.
+        let account_index = funding_account.account_index();
 
         let mut wm = self.wallet_manager.write().await;
         let (wallet, info) = wm
@@ -220,11 +260,30 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
         // the pinned BIP44-only `build_asset_lock_with_signer` cannot reach —
         // dashpay/platform#4073), and `None` funds from the unmixed BIP44
         // account. No union across accounts, no consent gate. Every non-shielded
-        // funding type instead uses the single BIP44 account at `account_index`
-        // via the pinned builder and ignores `funding_path` (spending mixed
+        // funding type instead routes `funding_account` + `drain` straight to
+        // the key-wallet builder and ignores `funding_path` (spending mixed
         // CoinJoin coins into an identity registration would de-anonymize them,
-        // so non-shielded funding never leaves the BIP44 account).
+        // so non-shielded funding never leaves the account the caller named).
         if funding_type == AssetLockFundingType::AssetLockShieldedAddressTopUp {
+            // The shielded selector names its funding source with
+            // `funding_path` and derives change on the BIP44 account at
+            // `account_index`; it models neither a CoinJoin *funding account*
+            // nor whole-balance drain. Refuse both rather than silently
+            // dropping the caller's intent: a CoinJoin index here would route
+            // change to the wrong account, and an ignored `drain` would build
+            // a partial lock the caller believes emptied the account.
+            if drain {
+                return Err(PlatformWalletError::AssetLockTransaction(
+                    "shielded asset-lock funding does not support drain mode".to_string(),
+                ));
+            }
+            if matches!(funding_account, AssetLockFundingAccount::CoinJoin { .. }) {
+                return Err(PlatformWalletError::AssetLockTransaction(
+                    "shielded asset-lock funding names its source with `funding_path`; \
+                     pass a BIP44 funding account for change routing"
+                        .to_string(),
+                ));
+            }
             return self
                 .build_asset_lock_tx_from_selected_account(
                     wallet,
@@ -267,14 +326,18 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
             public_key: credit_public_key,
         };
 
-        // Delegate to the key-wallet signer-driven builder (single BIP44 account).
+        // Delegate to the key-wallet signer-driven builder with the caller's
+        // funding account + drain semantics (the key-wallet side enforces that
+        // CoinJoin funding is drain-only, and that a drain carries exactly one
+        // credit output).
         let result = info
             .core_wallet
             .build_asset_lock_with_signer(
                 wallet,
-                account_index,
+                funding_account,
                 vec![funding],
                 DEFAULT_FEE_PER_KB,
+                drain,
                 &prefetched_signer,
             )
             .await
@@ -304,11 +367,7 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
             AssetLockCreditKeys::Public(mut keys) => match keys.drain(..).next() {
                 Some((_pubkey, path)) => path,
                 None => {
-                    if let Some(acc) = info
-                        .core_wallet
-                        .accounts
-                        .standard_bip44_accounts
-                        .get(&account_index)
+                    if let Some(acc) = reserved_funding_account(&info.core_wallet, funding_account)
                     {
                         acc.release_reservation(&result.transaction);
                     }
@@ -318,12 +377,7 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
                 }
             },
             AssetLockCreditKeys::Private(_) => {
-                if let Some(acc) = info
-                    .core_wallet
-                    .accounts
-                    .standard_bip44_accounts
-                    .get(&account_index)
-                {
+                if let Some(acc) = reserved_funding_account(&info.core_wallet, funding_account) {
                     acc.release_reservation(&result.transaction);
                 }
                 return Err(PlatformWalletError::AssetLockTransaction(
@@ -578,7 +632,13 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
             // is the SELECTED account's own wallet-level `Account` (see above), so
             // its xpub — not the BIP44 change account's — governs any pool mutation
             // `set_funding` performs on `selected`.
-            .set_funding(selected, funding_wallet_acc)
+            // `add_funding` is `set_funding` renamed by rust-dashcore#925 when
+            // funding became additive. Called EXACTLY ONCE on a builder created
+            // fresh above with no seeded inputs, so it is equivalent to the
+            // assigning `set_funding` it replaces: the asset lock still funds
+            // from the ONE selected account. Asset locks are deliberately NOT
+            // pooled by dashpay/platform#4329.
+            .add_funding(selected, funding_wallet_acc)
             .set_change_address(change_addr)
             .require_final_inputs();
 
@@ -1292,7 +1352,10 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
         let (tx, path) = self
             .build_asset_lock_transaction(
                 amount_duffs,
-                account_index,
+                AssetLockFundingAccount::Bip44 { account_index },
+                // This pipeline funds an exact amount; whole-balance drain is
+                // not reachable from `broadcast_funded_asset_lock` today.
+                false,
                 funding_type,
                 identity_index,
                 signer,
@@ -1524,7 +1587,7 @@ mod tests {
     use crate::wallet::persister::WalletPersister;
     use crate::wallet::platform_wallet::PlatformWalletInfo;
     use crate::wallet::platform_wallet::WalletId;
-    use crate::{AssetLockFundingType, PlatformWalletError};
+    use crate::{AssetLockFundingAccount, AssetLockFundingType, PlatformWalletError};
     use dashcore::Address as DashAddress;
     use key_wallet::bip32::DerivationPath;
     use key_wallet::signer::{ExtendedPubKeySigner, Signer};
@@ -1698,7 +1761,12 @@ mod tests {
         let persisted_invitation_used = stored.iter().any(|cs| {
             cs.account_address_pools.iter().any(|entry| {
                 matches!(entry.account_type, AccountType::IdentityInvitation)
-                    && entry.addresses.iter().any(|a| a.used)
+                    && entry.addresses.iter().any(|a| {
+                        matches!(
+                            a.state,
+                            key_wallet::managed_account::address_pool::AddressState::Used
+                        )
+                    })
             })
         });
         assert!(
@@ -1757,7 +1825,8 @@ mod tests {
         let rebuild = manager
             .build_asset_lock_transaction(
                 1_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::IdentityRegistration,
                 0,
                 &signer,
@@ -1819,7 +1888,8 @@ mod tests {
         let rebuild = manager
             .build_asset_lock_transaction(
                 1_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::IdentityRegistration,
                 0,
                 &signer,
@@ -1927,7 +1997,8 @@ mod tests {
         let rebuild = manager
             .build_asset_lock_transaction(
                 1_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::IdentityRegistration,
                 0,
                 &signer,
@@ -2112,7 +2183,16 @@ mod tests {
                 .iter()
                 .filter(|e| matches!(e.account_type, AccountType::IdentityInvitation))
             {
-                let used = entry.addresses.iter().filter(|a| a.used).count();
+                let used = entry
+                    .addresses
+                    .iter()
+                    .filter(|a| {
+                        matches!(
+                            a.state,
+                            key_wallet::managed_account::address_pool::AddressState::Used
+                        )
+                    })
+                    .count();
                 assert!(
                     used >= last_used,
                     "invitation pool snapshot rolled back: {used} used after {last_used}"
@@ -2472,7 +2552,8 @@ mod tests {
         let (tx, _path) = manager
             .build_asset_lock_transaction(
                 15_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::AssetLockShieldedAddressTopUp,
                 0,
                 &signer,
@@ -2527,7 +2608,8 @@ mod tests {
         let identity = manager
             .build_asset_lock_transaction(
                 15_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::IdentityRegistration,
                 0,
                 &signer,
@@ -2545,7 +2627,8 @@ mod tests {
         let identity_pathed = manager
             .build_asset_lock_transaction(
                 15_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::IdentityRegistration,
                 0,
                 &signer,
@@ -2574,7 +2657,8 @@ mod tests {
         let default_funded = manager
             .build_asset_lock_transaction(
                 15_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::AssetLockShieldedAddressTopUp,
                 0,
                 &signer,
@@ -2594,7 +2678,8 @@ mod tests {
         let coinjoin_funded = manager
             .build_asset_lock_transaction(
                 15_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::AssetLockShieldedAddressTopUp,
                 0,
                 &signer,
@@ -2622,7 +2707,8 @@ mod tests {
         let (tx, _path) = manager
             .build_asset_lock_transaction(
                 15_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::AssetLockShieldedAddressTopUp,
                 0,
                 &signer,
@@ -2664,7 +2750,8 @@ mod tests {
         let result = manager
             .build_asset_lock_transaction(
                 100_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::AssetLockShieldedAddressTopUp,
                 0,
                 &signer,
@@ -2776,7 +2863,8 @@ mod tests {
         let rebuild = manager
             .build_asset_lock_transaction(
                 15_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::AssetLockShieldedAddressTopUp,
                 0,
                 &signer,
@@ -2824,7 +2912,8 @@ mod tests {
         let rebuild = manager
             .build_asset_lock_transaction(
                 15_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::AssetLockShieldedAddressTopUp,
                 0,
                 &signer,
@@ -2913,7 +3002,8 @@ mod tests {
         let abandoned = manager
             .build_asset_lock_transaction(
                 5_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::IdentityRegistration,
                 0,
                 &failing,
@@ -2928,7 +3018,8 @@ mod tests {
         let rebuild = manager
             .build_asset_lock_transaction(
                 5_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::IdentityRegistration,
                 0,
                 &signer,
@@ -3029,7 +3120,8 @@ mod tests {
         let (_tx, credit_path) = manager
             .build_asset_lock_transaction(
                 5_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::IdentityRegistration,
                 0,
                 &recording,
@@ -3144,7 +3236,8 @@ mod tests {
         manager
             .build_asset_lock_transaction(
                 15_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::AssetLockShieldedAddressTopUp,
                 0,
                 &signer,
@@ -3247,7 +3340,8 @@ mod tests {
             let outcome = rt
                 .block_on(manager.build_asset_lock_transaction(
                     20_000_000,
-                    0,
+                    AssetLockFundingAccount::Bip44 { account_index: 0 },
+                    false,
                     AssetLockFundingType::AssetLockShieldedAddressTopUp,
                     0,
                     &signer,
@@ -3350,7 +3444,8 @@ mod tests {
         let (tx, _path) = manager
             .build_asset_lock_transaction(
                 20_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::AssetLockShieldedAddressTopUp,
                 0,
                 &signer,
@@ -3665,7 +3760,8 @@ mod tests {
         let (tx, _path) = manager
             .build_asset_lock_transaction(
                 20_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::AssetLockShieldedAddressTopUp,
                 0,
                 &signer,
@@ -3862,7 +3958,8 @@ mod tests {
         let (tx, _path) = manager
             .build_asset_lock_transaction(
                 10_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::AssetLockShieldedAddressTopUp,
                 0,
                 &signer,
@@ -3898,7 +3995,8 @@ mod tests {
         let result = manager
             .build_asset_lock_transaction(
                 10_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::AssetLockShieldedAddressTopUp,
                 0,
                 &signer,
@@ -3917,11 +4015,23 @@ mod tests {
         // Naming the watch-only external account EXPLICITLY by path must also be
         // refused — the local mnemonic cannot sign its coins — with the typed
         // account-operation error, not insufficient-funds.
+        //
+        // Which layer refuses it moved with rust-dashcore#818: DashPay
+        // *external* accounts are no longer visited by `all_funding_accounts` /
+        // `all_funding_accounts_mut` at all, so the path lookup below finds no
+        // candidate and bails before reaching this crate's
+        // `is_signable_funding_account` signability guard. That is strictly
+        // stronger — the account cannot be selected in the first place — so the
+        // guard is now defence-in-depth, and either refusal satisfies the
+        // property this test exists for. What must never happen is a build that
+        // succeeds, or any other error shape, which would mean the watch-only
+        // coins became reachable.
         let external_path = dashpay_account_path(&manager, DashpayLeg::ExternalAccount).await;
         let pathed = manager
             .build_asset_lock_transaction(
                 10_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::AssetLockShieldedAddressTopUp,
                 0,
                 &signer,
@@ -3931,8 +4041,11 @@ mod tests {
         match pathed {
             Err(PlatformWalletError::AssetLockTransaction(msg)) => {
                 assert!(
-                    msg.contains("watch-only"),
-                    "explicit watch-only funding path must be refused as watch-only, got: {msg}"
+                    msg.contains("watch-only")
+                        || msg.contains("no spendable funds account matches"),
+                    "explicit watch-only funding path must be refused either as watch-only \
+                     (this crate's signability guard) or as no-such-funding-account (upstream \
+                     no longer enumerates DashPay external accounts), got: {msg}"
                 );
             }
             other => panic!(

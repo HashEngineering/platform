@@ -71,14 +71,38 @@ pub enum CoreAccountTypeFFI {
     BIP44,
     BIP32,
     CoinJoin,
+    /// Pool every spendable transparent source: BIP44 + BIP32 + all DashPay
+    /// contact-receiving accounts (`platform_wallet::SEND_FUNDING_SOURCES`).
+    /// Change returns to BIP44 (the first pooled source). CoinJoin stays out
+    /// (separate privacy domain), as do a contact's watch-only external
+    /// coins. The default selector for a plain send.
+    AllSpendable,
 }
 
-impl From<CoreAccountTypeFFI> for AccountTypePreference {
-    fn from(value: CoreAccountTypeFFI) -> Self {
-        match value {
-            CoreAccountTypeFFI::BIP44 => AccountTypePreference::BIP44,
-            CoreAccountTypeFFI::BIP32 => AccountTypePreference::BIP32,
-            CoreAccountTypeFFI::CoinJoin => AccountTypePreference::CoinJoin,
+impl CoreAccountTypeFFI {
+    /// The single account family this selector names, or `None` for the
+    /// pooled [`AllSpendable`](Self::AllSpendable) — used by APIs that address
+    /// exactly one account (gap limits, per-account UTXO listing), which must
+    /// reject the pooled selector with a typed parameter error.
+    pub(crate) fn single_preference(self) -> Option<AccountTypePreference> {
+        match self {
+            CoreAccountTypeFFI::BIP44 => Some(AccountTypePreference::BIP44),
+            CoreAccountTypeFFI::BIP32 => Some(AccountTypePreference::BIP32),
+            CoreAccountTypeFFI::CoinJoin => Some(AccountTypePreference::CoinJoin),
+            CoreAccountTypeFFI::AllSpendable => None,
+        }
+    }
+
+    /// The funding sources this selector pools, in funding order — handed to
+    /// [`CoreWallet::finalize_transaction`]'s multi-source API, whose first
+    /// source supplies the change address. A single-family selector yields a
+    /// one-element list, which keeps that API's strict one-account semantics.
+    pub(crate) fn funding_sources(self) -> &'static [AccountTypePreference] {
+        match self {
+            CoreAccountTypeFFI::BIP44 => &[AccountTypePreference::BIP44],
+            CoreAccountTypeFFI::BIP32 => &[AccountTypePreference::BIP32],
+            CoreAccountTypeFFI::CoinJoin => &[AccountTypePreference::CoinJoin],
+            CoreAccountTypeFFI::AllSpendable => &platform_wallet::SEND_FUNDING_SOURCES,
         }
     }
 }
@@ -130,7 +154,7 @@ pub unsafe extern "C" fn core_wallet_tx_builder_finalize(
         MnemonicResolverCoreSigner::new(core_signer_handle, wallet.wallet_id(), wallet.network());
     let finalized = runtime().block_on(wallet.core().finalize_transaction(
         inner,
-        account_type.into(),
+        account_type.funding_sources(),
         account_index,
         &signer,
     ));
@@ -253,7 +277,7 @@ pub unsafe extern "C" fn core_wallet_signed_payment_finalize(
     // Atomic select + reserve + sign in one wallet-manager critical section.
     let finalized = runtime().block_on(wallet.core().finalize_transaction(
         inner,
-        account_type.into(),
+        account_type.funding_sources(),
         account_index,
         &signer,
     ));
@@ -372,11 +396,22 @@ impl CoreAccountTypeFFI {
     /// only CoinJoin funding path is a sweep — a single sender spending each
     /// UTXO exactly once, with no concurrent build or retry to race — so there
     /// is nothing to reconcile in practice.
+    ///
+    /// `AllSpendable` is likewise `None`, but for a different reason: a pooled
+    /// build reserves inputs across SEVERAL accounts, so no single
+    /// `StandardAccountType` can name its reservation. It is unreachable here
+    /// by construction — the only build API this broadcast pairs with
+    /// (`core_wallet_tx_builder_build_signed`) rejects the pooled selector with
+    /// a typed parameter error, so no transaction reaches this function having
+    /// been funded that way. A pooled build goes through
+    /// `core_wallet_tx_builder_finalize`, whose handle carries the concrete
+    /// `funding_accounts` that `broadcast_payment_releasing_reservation`
+    /// releases on every contributing account.
     pub(crate) fn as_standard_account_type(&self) -> Option<StandardAccountType> {
         match self {
             CoreAccountTypeFFI::BIP44 => Some(StandardAccountType::BIP44Account),
             CoreAccountTypeFFI::BIP32 => Some(StandardAccountType::BIP32Account),
-            CoreAccountTypeFFI::CoinJoin => None,
+            CoreAccountTypeFFI::CoinJoin | CoreAccountTypeFFI::AllSpendable => None,
         }
     }
 }
@@ -411,23 +446,24 @@ fn managed_account(
     source: AccountTypePreference,
     account_index: u32,
 ) -> Option<&ManagedCoreFundsAccount> {
-    match source {
-        AccountTypePreference::BIP44 => accounts.standard_bip44_accounts.get(&account_index),
-        AccountTypePreference::BIP32 => accounts.standard_bip32_accounts.get(&account_index),
-        AccountTypePreference::CoinJoin => accounts.coinjoin_accounts.get(&account_index),
-    }
+    source
+        .account_type(account_index)
+        .and_then(|at| accounts.funds_account(&at))
 }
 
+/// Mutable twin of [`managed_account`]. Delegates the family→account mapping
+/// to key-wallet exactly as the shared reader does, so a DashPay preference —
+/// which names a SET of accounts rather than one, and whose `account_type`
+/// therefore yields `None` — resolves to no single account here instead of
+/// needing an arm per new variant.
 fn managed_account_mut(
     accounts: &mut ManagedAccountCollection,
     source: AccountTypePreference,
     account_index: u32,
 ) -> Option<&mut ManagedCoreFundsAccount> {
-    match source {
-        AccountTypePreference::BIP44 => accounts.standard_bip44_accounts.get_mut(&account_index),
-        AccountTypePreference::BIP32 => accounts.standard_bip32_accounts.get_mut(&account_index),
-        AccountTypePreference::CoinJoin => accounts.coinjoin_accounts.get_mut(&account_index),
-    }
+    source
+        .account_type(account_index)
+        .and_then(|at| accounts.funds_account_mut(&at))
 }
 
 impl FFITransactionBuilder {
@@ -661,7 +697,12 @@ pub unsafe extern "C" fn core_wallet_tx_builder_set_funding(
     }
 
     let wallet_id = wallet.wallet_id();
-    let source: AccountTypePreference = account_type.into();
+    let Some(source) = account_type.single_preference() else {
+        return PlatformWalletFFIResult::err(
+            PlatformWalletFFIResultCode::ErrorInvalidParameter,
+            "AllSpendable pools multiple accounts; this API addresses exactly one".to_string(),
+        );
+    };
 
     let result = runtime().block_on(async {
         let mut wm = wallet.wallet_manager().write().await;
@@ -669,12 +710,15 @@ pub unsafe extern "C" fn core_wallet_tx_builder_set_funding(
             .get_wallet_and_info_mut(&wallet_id)
             .ok_or_else(|| "wallet not found".to_string())?;
 
-        let account = match source {
-            AccountTypePreference::BIP44 => w.get_bip44_account(account_index),
-            AccountTypePreference::BIP32 => w.get_bip32_account(account_index),
-            AccountTypePreference::CoinJoin => w.get_coinjoin_account(account_index),
-        }
-        .ok_or_else(|| format!("wallet account {source:?} #{account_index} not found"))?;
+        // Resolve the xpub-bearing account through key-wallet's own
+        // family→account mapping, the same way `managed_account_mut` resolves
+        // the managed twin. `source` came from `single_preference`, so it is
+        // always a single-account family here; delegating rather than matching
+        // keeps this site from needing an arm per new DashPay variant.
+        let account = source
+            .account_type(account_index)
+            .and_then(|at| w.accounts.account_of_type(at))
+            .ok_or_else(|| format!("wallet account {source:?} #{account_index} not found"))?;
 
         let height = info.core_wallet.last_processed_height();
 
@@ -683,10 +727,24 @@ pub unsafe extern "C" fn core_wallet_tx_builder_set_funding(
 
         // Resolution succeeded — only now consume the builder so a lookup
         // failure above can never leave it emptied.
+        // `add_funding` is `set_funding` renamed by rust-dashcore#925 when
+        // funding became ADDITIVE. The exported C symbol keeps its name so the
+        // Kotlin/Swift bindings and the ABI are unchanged, but the semantics
+        // this entry point inherits differ in two ways worth knowing:
+        //
+        // * Inputs the host seeded with `add_inputs` are no longer discarded.
+        //   The old `set_funding` ASSIGNED `inputs`, silently dropping them;
+        //   `add_funding` keeps them and filters any outpoint the builder
+        //   already holds out of the candidate set, so it cannot be offered
+        //   twice (rust-dashcore#931 — a duplicate prevout makes a transaction
+        //   Core rejects).
+        // * Calling this twice now POOLS both accounts instead of replacing the
+        //   first. That is the intended primitive behind the pooled send; a host
+        //   wanting single-account funding must call it once.
         let taken = (*builder).take_builder();
         let funded = taken
             .set_current_height(height)
-            .set_funding(managed, account);
+            .add_funding(managed, account);
         (*builder).store_builder(funded);
         Ok::<_, String>(())
     });
@@ -733,7 +791,12 @@ pub unsafe extern "C" fn core_wallet_tx_builder_add_inputs_from_outpoints(
     }
 
     let wallet_id = wallet.wallet_id();
-    let source: AccountTypePreference = account_type.into();
+    let Some(source) = account_type.single_preference() else {
+        return PlatformWalletFFIResult::err(
+            PlatformWalletFFIResultCode::ErrorInvalidParameter,
+            "AllSpendable pools multiple accounts; this API addresses exactly one".to_string(),
+        );
+    };
 
     let requested: Vec<OutPoint> = if outpoints_len == 0 {
         Vec::new()
@@ -823,7 +886,12 @@ pub unsafe extern "C" fn core_wallet_tx_builder_build_signed(
     }
 
     let wallet_id = wallet.wallet_id();
-    let source: AccountTypePreference = account_type.into();
+    let Some(source) = account_type.single_preference() else {
+        return PlatformWalletFFIResult::err(
+            PlatformWalletFFIResultCode::ErrorInvalidParameter,
+            "AllSpendable pools multiple accounts; this API addresses exactly one".to_string(),
+        );
+    };
     let signer = MnemonicResolverCoreSigner::new(core_signer_handle, wallet_id, wallet.network());
 
     let build = runtime().block_on(async {

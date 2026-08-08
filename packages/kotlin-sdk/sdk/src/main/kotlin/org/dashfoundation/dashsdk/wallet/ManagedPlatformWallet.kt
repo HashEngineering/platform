@@ -105,10 +105,19 @@ class ManagedPlatformWallet internal constructor(
         )
     }
 
-    /** Standard account derivation shape for [sendToAddresses]. */
+    /** Funding-source selector for [sendToAddresses] / [buildSignedPayment]. */
     enum class AccountType(val ffiValue: Int) {
         BIP44(0),
         BIP32(1),
+
+        /**
+         * Pool every spendable transparent source — BIP44 + BIP32 + all
+         * DashPay contact-receiving accounts — with change returning to
+         * BIP44. CoinJoin is excluded (separate privacy domain), as are a
+         * contact's watch-only coins. The default for plain sends, so funds
+         * a contact paid us are spendable without picking an account.
+         */
+        ALL_SPENDABLE(3),
     }
 
     /**
@@ -142,7 +151,7 @@ class ManagedPlatformWallet internal constructor(
         recipients: List<Pair<String, Long>>,
         network: org.dashfoundation.dashsdk.Network,
         coreSignerHandle: Long,
-        accountType: AccountType = AccountType.BIP44,
+        accountType: AccountType = AccountType.ALL_SPENDABLE,
         accountIndex: Int = 0,
     ): String = gate.op {
         require(accountIndex >= 0) { "accountIndex must be non-negative, got $accountIndex" }
@@ -153,6 +162,7 @@ class ManagedPlatformWallet internal constructor(
         val builderAccountType = when (accountType) {
             AccountType.BIP44 -> CoreTransactionBuilder.AccountType.BIP44
             AccountType.BIP32 -> CoreTransactionBuilder.AccountType.BIP32
+            AccountType.ALL_SPENDABLE -> CoreTransactionBuilder.AccountType.ALL_SPENDABLE
         }
         mapNativeErrors {
             val builder = CoreTransactionBuilder(network)
@@ -353,7 +363,7 @@ class ManagedPlatformWallet internal constructor(
         recipients: List<Pair<String, Long>>,
         network: org.dashfoundation.dashsdk.Network,
         coreSignerHandle: Long,
-        accountType: AccountType = AccountType.BIP44,
+        accountType: AccountType = AccountType.ALL_SPENDABLE,
         accountIndex: Int = 0,
     ): SignedCoreTransaction = gate.opWithCleanupOnCancellation(
         // Native finalization mints the token and transfers reservation ownership
@@ -374,6 +384,7 @@ class ManagedPlatformWallet internal constructor(
         val builderAccountType = when (accountType) {
             AccountType.BIP44 -> CoreTransactionBuilder.AccountType.BIP44
             AccountType.BIP32 -> CoreTransactionBuilder.AccountType.BIP32
+            AccountType.ALL_SPENDABLE -> CoreTransactionBuilder.AccountType.ALL_SPENDABLE
         }
         mapNativeErrors {
             // One atomic native operation: select + reserve + sign + register.

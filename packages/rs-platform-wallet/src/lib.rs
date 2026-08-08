@@ -26,7 +26,9 @@ pub mod wallet;
 
 pub use error::PlatformWalletError;
 pub use events::{PlatformEventHandler, PlatformEventManager};
-pub use key_wallet::wallet::managed_wallet_info::asset_lock_builder::AssetLockFundingType;
+pub use key_wallet::wallet::managed_wallet_info::asset_lock_builder::{
+    AssetLockFundingAccount, AssetLockFundingType,
+};
 // Surface the upstream `DerivedAddress` event payload through this
 // crate so downstream FFI consumers (rs-platform-wallet-ffi) can
 // project `CoreChangeSet.addresses_derived` without taking an extra
@@ -57,7 +59,7 @@ pub use wallet::asset_lock::manager::AssetLockManager;
 pub use wallet::asset_lock::tracked::{AssetLockStatus, TrackedAssetLock};
 pub use wallet::asset_lock::AssetLockFunding;
 pub use wallet::core::WalletBalance;
-pub use wallet::core::{CoreWallet, FundingAccountRef, SignedCoreTransaction};
+pub use wallet::core::{CoreWallet, SignedCoreTransaction, SEND_FUNDING_SOURCES};
 pub use wallet::core::{FinalizedCorePayment, SignedCorePayment};
 pub use wallet::signed_payment_registry::{
     RegisterWrongGeneration, ReservationToken, SignedPaymentError, SignedPaymentRegistry,

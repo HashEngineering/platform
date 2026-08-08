@@ -2,7 +2,6 @@ use dashcore::Transaction;
 use key_wallet::account::account_type::StandardAccountType;
 use key_wallet::ReservationToken;
 
-use super::transaction::FundingAccountRef;
 use super::SignedCoreTransaction;
 use crate::broadcaster::{BroadcastError, TransactionBroadcaster};
 use crate::wallet::reservations::broadcast_releasing_on_rejection;
@@ -28,8 +27,7 @@ impl<B: TransactionBroadcaster + ?Sized> CoreWallet<B> {
             Err(error) => {
                 if matches!(error, crate::broadcaster::BroadcastError::Rejected { .. }) {
                     self.release_transaction_reservation(
-                        transaction.funding_account_type(),
-                        transaction.funding_account_index(),
+                        transaction.funding_accounts(),
                         transaction.transaction(),
                         transaction.reservation_token(),
                     )
@@ -108,12 +106,14 @@ impl<B: TransactionBroadcaster + ?Sized> CoreWallet<B> {
     /// immediate rebuild; an ambiguous `MaybeSent` keeps it. Unlike the
     /// `StandardAccountType`-typed
     /// [`broadcast_transaction_releasing_reservation`](Self::broadcast_transaction_releasing_reservation)
-    /// used by the immediate send path, this takes a [`FundingAccountRef`] so it
-    /// ALSO reconciles a CoinJoin-funded deferred payment — one whose
-    /// `build_signed`/`finalize` reserved the selected inputs but which has no
-    /// `StandardAccountType`, and which previously kept its reservation held
-    /// until the TTL backstop — and a DashPay-receival-funded one, which has no
-    /// `AccountTypePreference` at all and is reachable only by derivation path.
+    /// used by the immediate send path, this takes concrete
+    /// [`AccountType`](key_wallet::account::AccountType)s so it ALSO reconciles
+    /// a CoinJoin-funded deferred payment — one whose `build_signed`/`finalize`
+    /// reserved the selected inputs but which has no `StandardAccountType`, and
+    /// which previously kept its reservation held until the TTL backstop — and a
+    /// DashPay-receival-funded one, which key-wallet's `AccountTypePreference`
+    /// cannot name at all. It is also the shape a POOLED send needs: several
+    /// accounts, each holding part of the one build's reservation.
     ///
     /// The release delegates to
     /// [`release_transaction_reservation`](Self::release_transaction_reservation),
@@ -125,17 +125,16 @@ impl<B: TransactionBroadcaster + ?Sized> CoreWallet<B> {
     /// under a new token is a real risk; the owner guard closes the
     /// `dashpay/platform#4185` release/re-reserve race.
     ///
-    /// `funding` identifies the ONE funding account the build selected from —
-    /// either key-wallet's standard variant + index, or (for a payment built by
-    /// [`build_signed_payment`](Self::build_signed_payment) /
-    /// [`finalize_signed_payment_from_funding_path`](Self::finalize_signed_payment_from_funding_path))
-    /// the account-level derivation path, the only form that can name a DashPay
-    /// receiving-funds account. `token` is the [`ReservationToken`] that build
-    /// stamped (`SignedCoreTransaction::reservation_token`), `None` only when the
-    /// build reserved nothing.
+    /// `accounts` are the concrete accounts that contributed the transaction's
+    /// inputs (`SignedCoreTransaction::funding_accounts`) — a pooled send spans
+    /// several, and key-wallet reserves per account, so a rejection must
+    /// release on EVERY one of them. `token` is the [`ReservationToken`] that
+    /// build stamped across all of them
+    /// (`SignedCoreTransaction::reservation_token`), `None` only when the build
+    /// reserved nothing.
     pub(crate) async fn broadcast_payment_releasing_reservation(
         &self,
-        funding: &FundingAccountRef,
+        accounts: &[key_wallet::account::AccountType],
         transaction: &Transaction,
         token: Option<ReservationToken>,
     ) -> Result<dashcore::Txid, PlatformWalletError> {
@@ -143,7 +142,7 @@ impl<B: TransactionBroadcaster + ?Sized> CoreWallet<B> {
             Ok(txid) => Ok(txid),
             Err(error) => {
                 if matches!(error, BroadcastError::Rejected { .. }) {
-                    self.release_reservation_for(funding, transaction, token)
+                    self.release_transaction_reservation(accounts, transaction, token)
                         .await;
                 }
                 Err(error.into())
@@ -237,7 +236,7 @@ mod tests {
         let mut builder = TransactionBuilder::new()
             .set_current_height(current_height)
             .set_selection_strategy(SelectionStrategy::LargestFirst)
-            .set_funding(managed_account, account);
+            .add_funding(managed_account, account);
         for (addr, amount) in outputs {
             builder = builder.add_output(addr, *amount);
         }

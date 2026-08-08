@@ -10,5 +10,5 @@ pub use balance::WalletBalance;
 pub use balance_handler::BalanceUpdateHandler;
 pub use generation::WalletGeneration;
 pub use send::{FinalizedCorePayment, SignedCorePayment};
-pub use transaction::{FundingAccountRef, SignedCoreTransaction};
+pub use transaction::{SignedCoreTransaction, SEND_FUNDING_SOURCES};
 pub use wallet::CoreWallet;

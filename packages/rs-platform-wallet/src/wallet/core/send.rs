@@ -60,6 +60,7 @@
 use std::collections::HashMap;
 
 use dashcore::{Address as DashAddress, OutPoint, Transaction};
+use key_wallet::account::AccountType;
 use key_wallet::bip32::DerivationPath;
 use key_wallet::managed_account::managed_account_trait::ManagedAccountTrait;
 use key_wallet::managed_account::ManagedCoreFundsAccount;
@@ -74,7 +75,6 @@ use key_wallet::ReservationToken as KeyWalletReservationToken;
 
 use crate::broadcaster::TransactionBroadcaster;
 use crate::error::PlatformWalletError;
-use crate::wallet::core::transaction::FundingAccountRef;
 use crate::wallet::core::CoreWallet;
 use crate::wallet::funding_privacy::is_signable_funding_account;
 
@@ -191,10 +191,20 @@ pub struct FinalizedCorePayment {
     /// Duffs returned to the wallet's BIP44 change address (0 when the build
     /// produced no change output).
     pub change_amount: u64,
-    /// The ONE account the inputs were selected from and reserved in, as its
-    /// RESOLVED account-level derivation path — never the caller's `None`. A
-    /// later release must name this account, not the default BIP44 one.
-    pub funding: FundingAccountRef,
+    /// The account(s) the inputs were selected from and reserved in, as
+    /// RESOLVED concrete [`AccountType`]s — never the caller's `None`. A later
+    /// release must name these accounts, not the default BIP44 one.
+    ///
+    /// This path selects exactly ONE account (by account-level derivation
+    /// path), so this is a single-element list. It is nonetheless the same
+    /// shape [`SignedCoreTransaction::funding_accounts`] carries — the pooled
+    /// send fills it with several — so both build paths release through one
+    /// code path.
+    ///
+    /// [`AccountType`]: key_wallet::account::AccountType
+    /// [`SignedCoreTransaction::funding_accounts`]:
+    ///     crate::SignedCoreTransaction::funding_accounts
+    pub funding_accounts: Vec<AccountType>,
     /// The wallet's `last_processed_height` captured in the funding critical
     /// section, i.e. the exact clock `set_current_height` stamped the
     /// reservation with. The registry's age guard must baseline off this — see
@@ -555,17 +565,19 @@ impl<B: TransactionBroadcaster + ?Sized> CoreWallet<B> {
         // PRIVACY-DOMAIN-OK: this iterates funds accounts only to LOOK ONE UP by
         // derivation path. Exactly one account is selected and it alone funds
         // the transaction; nothing is accumulated across accounts.
-        let mut selected: Option<&mut ManagedCoreFundsAccount> = None;
+        // Carry the account's CONCRETE `AccountType` out alongside the borrow:
+        // it is the identity the release path needs (`funding_accounts`), and
+        // taking it here — from the very account the path comparison matched —
+        // means the release can never drift to a different account than the one
+        // holding the reserved inputs.
+        let mut selected: Option<(&mut ManagedCoreFundsAccount, AccountType)> = None;
         for acc in info.core_wallet.accounts.all_funding_accounts_mut() {
-            let acc_path = acc
-                .managed_account_type()
-                .to_account_type()
-                .derivation_path(network)
-                .map_err(|e| {
-                    PlatformWalletError::TransactionBuild(format!(
-                        "failed to derive account-level path for a funds account: {e}"
-                    ))
-                })?;
+            let account_type = acc.managed_account_type().to_account_type();
+            let acc_path = account_type.derivation_path(network).map_err(|e| {
+                PlatformWalletError::TransactionBuild(format!(
+                    "failed to derive account-level path for a funds account: {e}"
+                ))
+            })?;
             if acc_path != funding_path {
                 continue;
             }
@@ -575,10 +587,10 @@ impl<B: TransactionBroadcaster + ?Sized> CoreWallet<B> {
                      coins the local wallet cannot sign; choose a signable funds account"
                 )));
             }
-            selected = Some(acc);
+            selected = Some((acc, account_type));
             break;
         }
-        let selected = selected.ok_or_else(|| {
+        let (selected, selected_account_type) = selected.ok_or_else(|| {
             PlatformWalletError::TransactionBuild(format!(
                 "no spendable funds account matches funding derivation path {funding_path}"
             ))
@@ -615,7 +627,16 @@ impl<B: TransactionBroadcaster + ?Sized> CoreWallet<B> {
                 // BranchAndBound, to keep CoinJoin's many small denominations
                 // from blowing up the exact-match subset-sum search.
                 .set_selection_strategy(SelectionStrategy::LargestFirst)
-                .set_funding(selected, funding_wallet_acc);
+                // `add_funding` is `set_funding` renamed by rust-dashcore#925
+                // (funding became additive). Called EXACTLY ONCE on a builder
+                // that was seeded with no inputs, so it is equivalent to the
+                // assigning `set_funding` it replaces — this path still funds
+                // from the ONE account named by `funding_path`, preserving the
+                // single-account funding-domain invariant documented in
+                // `crate::wallet::funding_privacy`. Pooling is deliberately NOT
+                // introduced here; it belongs to `finalize_transaction`'s
+                // `SEND_FUNDING_SOURCES` path.
+                .add_funding(selected, funding_wallet_acc);
             if let Some(addr) = change_addr {
                 builder = builder.set_change_address(addr);
             }
@@ -665,12 +686,13 @@ impl<B: TransactionBroadcaster + ?Sized> CoreWallet<B> {
             transaction,
             fee,
             change_amount,
-            // The RESOLVED path, never the caller's `None`: a release must name
-            // the account the inputs are actually reserved in. For a default
-            // build that is the unmixed BIP44 account's own path, so the release
+            // The RESOLVED account, never the caller's `None`: a release must
+            // name the account the inputs are actually reserved in. For a
+            // default build that is the unmixed BIP44 account, so the release
             // still lands on BIP44 — but by the same identity the selector used,
-            // not by a separate assumption that could drift.
-            funding: FundingAccountRef::Path(funding_path),
+            // not by a separate assumption that could drift. One element,
+            // because this path funds from exactly one account.
+            funding_accounts: vec![selected_account_type],
             reservation_height: height,
             reservation_token,
         };
@@ -817,8 +839,8 @@ impl<B: TransactionBroadcaster + ?Sized> CoreWallet<B> {
     /// [`register_funded_by`](crate::SignedPaymentRegistry::register_funded_by);
     /// once registered, the registry owns the release instead.
     pub async fn abandon_payment(&self, payment: FinalizedCorePayment) {
-        self.release_reservation_for(
-            &payment.funding,
+        self.release_transaction_reservation(
+            &payment.funding_accounts,
             &payment.transaction,
             payment.reservation_token,
         )
@@ -934,7 +956,7 @@ mod tests {
     use crate::wallet::platform_wallet::WalletId;
     use crate::PlatformWalletError;
 
-    use super::{FundingAccountRef, SignedCorePayment};
+    use super::SignedCorePayment;
 
     /// A `CoreWallet` over a manager fixture. The send path never broadcasts,
     /// so the broadcaster is irrelevant (and the generation handle is unused by
@@ -987,7 +1009,12 @@ mod tests {
             >,
         >,
         wallet_id: &WalletId,
-    ) -> (HashSet<OutPoint>, HashSet<OutPoint>, DerivationPath) {
+    ) -> (
+        HashSet<OutPoint>,
+        HashSet<OutPoint>,
+        DerivationPath,
+        AccountType,
+    ) {
         use key_wallet::managed_account::managed_account_trait::ManagedAccountTrait;
 
         let guard = wm.read().await;
@@ -1009,12 +1036,11 @@ mod tests {
             .get(&0)
             .expect("coinjoin account 0 present");
         let coinjoin = coinjoin_acc.utxos.keys().copied().collect();
-        let path = coinjoin_acc
-            .managed_account_type()
-            .to_account_type()
+        let account_type = coinjoin_acc.managed_account_type().to_account_type();
+        let path = account_type
             .derivation_path(network)
             .expect("coinjoin account-level path");
-        (bip44, coinjoin, path)
+        (bip44, coinjoin, path, account_type)
     }
 
     /// A single-account BIP44 payment: the recipient output is present with the
@@ -1113,7 +1139,7 @@ mod tests {
     async fn default_funding_selects_strictly_within_bip44() {
         // 0.2 DASH on BIP44, 0.09 on CoinJoin; ask 0.15 → BIP44 alone covers it.
         let (wm, wallet_id, signer) = split_funded_wallet_manager(20_000_000, 9_000_000).await;
-        let (bip44_ops, coinjoin_ops, _) =
+        let (bip44_ops, coinjoin_ops, _, _) =
             split_account_outpoints_and_coinjoin_path(&wm, &wallet_id).await;
 
         let core = core_wallet(wm, wallet_id, Arc::new(WalletGeneration::new()));
@@ -1148,7 +1174,7 @@ mod tests {
     async fn explicit_coinjoin_path_selects_only_coinjoin() {
         // 0.09 DASH on BIP44 (short), 0.2 on CoinJoin; take 0.15 from CoinJoin.
         let (wm, wallet_id, signer) = split_funded_wallet_manager(9_000_000, 20_000_000).await;
-        let (bip44_ops, coinjoin_ops, coinjoin_path) =
+        let (bip44_ops, coinjoin_ops, coinjoin_path, _) =
             split_account_outpoints_and_coinjoin_path(&wm, &wallet_id).await;
 
         let core = core_wallet(wm, wallet_id, Arc::new(WalletGeneration::new()));
@@ -1291,7 +1317,7 @@ mod tests {
     #[tokio::test]
     async fn selected_account_shortfall_is_typed() {
         let (wm, wallet_id, signer) = split_funded_wallet_manager(9_000_000, 9_000_000).await;
-        let (_, _, coinjoin_path) =
+        let (_, _, coinjoin_path, _) =
             split_account_outpoints_and_coinjoin_path(&wm, &wallet_id).await;
         let core = core_wallet(wm, wallet_id, Arc::new(WalletGeneration::new()));
 
@@ -1489,7 +1515,12 @@ mod tests {
             >,
         >,
         wallet_id: &WalletId,
-    ) -> (HashSet<OutPoint>, HashSet<OutPoint>, DerivationPath) {
+    ) -> (
+        HashSet<OutPoint>,
+        HashSet<OutPoint>,
+        DerivationPath,
+        AccountType,
+    ) {
         use key_wallet::managed_account::managed_account_trait::ManagedAccountTrait;
 
         let guard = wm.read().await;
@@ -1512,12 +1543,11 @@ mod tests {
             .next()
             .expect("DashPay receiving-funds account present");
         let receival = receival_acc.utxos.keys().copied().collect();
-        let path = receival_acc
-            .managed_account_type()
-            .to_account_type()
+        let account_type = receival_acc.managed_account_type().to_account_type();
+        let path = account_type
             .derivation_path(network)
             .expect("DashPay receiving-funds account-level path");
-        (bip44, receival, path)
+        (bip44, receival, path, account_type)
     }
 
     /// **The DashPay receival-spend bridge.** A payment finalized from a DashPay
@@ -1536,7 +1566,7 @@ mod tests {
         let (wm, wallet_id, signer) =
             split_funded_wallet_manager_dashpay(9_000_000, 20_000_000, DashpayLeg::ReceivingFunds)
                 .await;
-        let (bip44_ops, receival_ops, receival_path) =
+        let (bip44_ops, receival_ops, receival_path, receival_account) =
             dashpay_outpoints_and_receival_path(&wm, &wallet_id).await;
 
         let core = core_wallet(wm, wallet_id, Arc::new(WalletGeneration::new()));
@@ -1592,14 +1622,12 @@ mod tests {
 
         // (d) The deferred bookkeeping: the RESOLVED receival path (never the
         // caller's `None`, never a BIP44 default) and key-wallet's owner token.
-        match &payment.funding {
-            FundingAccountRef::Path(path) => assert_eq!(
-                *path, receival_path,
-                "the funding account must be recorded as the receival path it \
-                 actually selected from"
-            ),
-            other => panic!("expected a path-named funding account, got {other:?}"),
-        }
+        assert_eq!(
+            payment.funding_accounts,
+            vec![receival_account],
+            "the funding account must be recorded as the RECEIVAL account it \
+             actually selected from — a single-account path records exactly one"
+        );
         assert!(
             payment.reservation_token.is_some(),
             "a funded build must stamp a key-wallet reservation token so a later \
@@ -1623,7 +1651,7 @@ mod tests {
         let (wm, wallet_id, signer) =
             split_funded_wallet_manager_dashpay(9_000_000, 20_000_000, DashpayLeg::ReceivingFunds)
                 .await;
-        let (_, _, receival_path) = dashpay_outpoints_and_receival_path(&wm, &wallet_id).await;
+        let (_, _, receival_path, _) = dashpay_outpoints_and_receival_path(&wm, &wallet_id).await;
         // The wallet's OWN generation handle — releases are generation-bound and
         // are (correctly) skipped for a foreign one. See [`wallet_generation`].
         let generation = wallet_generation(&wm, &wallet_id).await;
@@ -1645,7 +1673,7 @@ mod tests {
             .register_funded_by(
                 core.clone(),
                 payment.transaction.clone(),
-                payment.funding.clone(),
+                payment.funding_accounts.clone(),
                 payment.reservation_height,
                 payment.reservation_token,
             )
@@ -1698,7 +1726,7 @@ mod tests {
             .register_funded_by(
                 core.clone(),
                 rebuilt.transaction.clone(),
-                rebuilt.funding.clone(),
+                rebuilt.funding_accounts.clone(),
                 rebuilt.reservation_height,
                 rebuilt.reservation_token,
             )
@@ -1741,7 +1769,7 @@ mod tests {
         let (wm, wallet_id, signer) =
             split_funded_wallet_manager_dashpay(9_000_000, 20_000_000, DashpayLeg::ReceivingFunds)
                 .await;
-        let (_, _, receival_path) = dashpay_outpoints_and_receival_path(&wm, &wallet_id).await;
+        let (_, _, receival_path, _) = dashpay_outpoints_and_receival_path(&wm, &wallet_id).await;
         let generation = wallet_generation(&wm, &wallet_id).await;
         let core = core_wallet(wm, wallet_id, generation);
 
@@ -1819,10 +1847,14 @@ mod tests {
             )
             .await
             .expect("0.01 DASH is fundable from the 0.1 DASH BIP44 account");
-        assert!(
-            matches!(payment.funding, FundingAccountRef::Path(_)),
-            "the default build must record the RESOLVED BIP44 path, got {:?}",
-            payment.funding
+        assert_eq!(
+            payment.funding_accounts,
+            vec![AccountType::Standard {
+                index: 0,
+                standard_account_type: StandardAccountType::BIP44Account,
+            }],
+            "the default build must record the RESOLVED BIP44 account, got {:?}",
+            payment.funding_accounts
         );
 
         let registry: SignedPaymentRegistry<AlwaysRejectedBroadcaster> =
@@ -1831,7 +1863,7 @@ mod tests {
             .register_funded_by(
                 core.clone(),
                 payment.transaction.clone(),
-                payment.funding.clone(),
+                payment.funding_accounts.clone(),
                 payment.reservation_height,
                 payment.reservation_token,
             )
@@ -2366,7 +2398,7 @@ mod tests {
     #[tokio::test]
     async fn releasing_against_another_account_frees_nothing() {
         let (wm, wallet_id, signer) = split_funded_wallet_manager(9_000_000, 20_000_000).await;
-        let (_, _, coinjoin_path) =
+        let (_, _, coinjoin_path, _) =
             split_account_outpoints_and_coinjoin_path(&wm, &wallet_id).await;
         let core = core_wallet(
             Arc::clone(&wm),

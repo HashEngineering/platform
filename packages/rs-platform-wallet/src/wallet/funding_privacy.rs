@@ -129,7 +129,7 @@ mod guardrail {
     use crate::wallet::core::CoreWallet;
     use crate::wallet::core::WalletGeneration;
     use crate::wallet::persister::WalletPersister;
-    use crate::{AssetLockFundingType, PlatformWalletError};
+    use crate::{AssetLockFundingAccount, AssetLockFundingType, PlatformWalletError};
 
     // -- static guard --------------------------------------------------------
 
@@ -310,7 +310,15 @@ mod guardrail {
             AssetLockFundingType::IdentityRegistration,
         ] {
             let lock = manager
-                .build_asset_lock_transaction(CROSS_DOMAIN_ONLY, 0, funding_type, 0, &signer, None)
+                .build_asset_lock_transaction(
+                    CROSS_DOMAIN_ONLY,
+                    AssetLockFundingAccount::Bip44 { account_index: 0 },
+                    false,
+                    funding_type,
+                    0,
+                    &signer,
+                    None,
+                )
                 .await;
             assert!(
                 lock.is_err(),

@@ -576,17 +576,24 @@ impl PlatformWalletFFIResultCode {
             PlatformWalletError::AddressNonceMismatch { .. } => {
                 PlatformWalletFFIResultCode::ErrorAddressNonceMismatch
             }
-            // Both Core-send selector shortfalls share code 22: the atomic
-            // builder's (`CoreInsufficientFunds`) and the one-shot signed-payment
-            // primitive's (`PaymentInsufficientFunds`). Without this second arm
-            // the payment shortfall flattened to `ErrorUnknown`, so the typed
-            // `available`/`required` amounts `build_signed_payment` computes
-            // never reached the host as an actionable code — and after the
-            // dashpay/platform#4184 re-scope those amounts are SINGLE-ACCOUNT
-            // figures the host must be able to act on (the signal is "pick a
-            // different funding account", not "retry the same one").
+            // All three Core-send shortfalls share code 22: the atomic
+            // builder's single-account one (`CoreInsufficientFunds`), the
+            // one-shot signed-payment primitive's (`PaymentInsufficientFunds`),
+            // and the pooled send's (`CorePooledInsufficientFunds`). Every one
+            // means "the wallet cannot cover this payment" and hosts classify
+            // and retry them identically, so they ride one code rather than
+            // forcing each host to learn three insufficient-funds values.
+            //
+            // Note the actionable signal differs by shape even though the code
+            // does not: the two single-account variants carry SINGLE-ACCOUNT
+            // figures (dashpay/platform#4184), where the useful host response is
+            // "pick a different funding account"; the pooled variant's
+            // available/required already describe the UNION of every offered
+            // source, so there is no other account left to pick. The message
+            // string carries the distinction.
             PlatformWalletError::CoreInsufficientFunds { .. }
-            | PlatformWalletError::PaymentInsufficientFunds { .. } => {
+            | PlatformWalletError::PaymentInsufficientFunds { .. }
+            | PlatformWalletError::CorePooledInsufficientFunds { .. } => {
                 PlatformWalletFFIResultCode::ErrorCoreInsufficientFunds
             }
             // A valid request whose signatures could not be produced. Must NOT
@@ -660,6 +667,20 @@ impl PlatformWalletFFIResultCode {
             // callback context alive and skip any paired persistence wipe.
             PlatformWalletError::ShutdownIncomplete(..) => {
                 PlatformWalletFFIResultCode::ErrorShutdownIncomplete
+            }
+            // A caller-argument rejection raised below the FFI boundary — the
+            // same class the boundary itself rejects with this code, so both
+            // sides agree instead of one reporting a not-found or an internal
+            // failure for a bad argument. `finalize_transaction` raises it when
+            // a DashPay SET selector is handed to a per-account operation.
+            //
+            // (#4329's neighbouring `MessageSigningMessageInvalid` /
+            // `MessageSigningKeyUnavailable` arms are deliberately NOT carried
+            // over: those variants come from v4.2-dev's message-signing feature,
+            // which this branch does not have — `PlatformWalletError` here has
+            // no such variants, so the arms would not compile.)
+            PlatformWalletError::InvalidParameter(..) => {
+                PlatformWalletFFIResultCode::ErrorInvalidParameter
             }
             _ => PlatformWalletFFIResultCode::ErrorUnknown,
         }
@@ -1121,6 +1142,42 @@ mod tests {
         assert_ne!(
             PlatformWalletFFIResultCode::ErrorTransactionSigning as i32,
             PlatformWalletFFIResultCode::ErrorTransactionBuild as i32,
+        );
+    }
+
+    /// A pooled shortfall is the same thing to a host as a single-account one —
+    /// "this wallet cannot cover the payment" — so it deliberately rides the
+    /// SAME code rather than making every host learn a second value. Pin that,
+    /// since splitting it later would silently reclassify the most common send
+    /// failure on the pooled (default) path.
+    #[test]
+    fn pooled_insufficient_funds_shares_the_single_account_code() {
+        let result: PlatformWalletFFIResult = PlatformWalletError::CorePooledInsufficientFunds {
+            sources: vec![
+                AccountTypePreference::BIP44,
+                AccountTypePreference::BIP32,
+                AccountTypePreference::AllDashpayReceivingFunds,
+            ],
+            available: Some(1_000),
+            required: Some(2_000),
+        }
+        .into();
+        assert_eq!(
+            result.code,
+            PlatformWalletFFIResultCode::ErrorCoreInsufficientFunds
+        );
+    }
+
+    /// A caller-argument rejection raised BELOW the FFI boundary must reach the
+    /// host as the same parameter error the boundary itself returns — not as a
+    /// not-found, and not through the `ErrorUnknown` catch-all.
+    #[test]
+    fn invalid_parameter_maps_to_the_parameter_code() {
+        let result: PlatformWalletFFIResult =
+            PlatformWalletError::InvalidParameter("names a set of accounts".to_string()).into();
+        assert_eq!(
+            result.code,
+            PlatformWalletFFIResultCode::ErrorInvalidParameter
         );
     }
 
