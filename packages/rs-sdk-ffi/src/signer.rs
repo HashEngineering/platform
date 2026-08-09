@@ -746,7 +746,9 @@ pub unsafe extern "C" fn dash_sdk_sign_async_completion(
             // to begin with the marker would otherwise impersonate a typed
             // completion, so disambiguate it by pushing the marker off
             // position 0 (dashpay/platform#4183 review).
-            Err(ProtocolError::Generic(format!("generic_signer_error: {msg}")))
+            Err(ProtocolError::Generic(format!(
+                "generic_signer_error: {msg}"
+            )))
         } else {
             Err(ProtocolError::Generic(msg))
         }

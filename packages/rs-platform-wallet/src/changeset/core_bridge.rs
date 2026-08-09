@@ -2627,9 +2627,7 @@ mod tests {
     fn asset_locks_only_batch_reaches_store() {
         use dashcore::hashes::Hash as _;
         use dashcore::OutPoint;
-        use key_wallet::wallet::managed_wallet_info::asset_lock_builder::{
-            AssetLockFundingAccount, AssetLockFundingType,
-        };
+        use key_wallet::wallet::managed_wallet_info::asset_lock_builder::AssetLockFundingType;
 
         use crate::changeset::changeset::AssetLockEntry;
         use crate::wallet::asset_lock::tracked::AssetLockStatus;

@@ -1995,7 +1995,7 @@ mod tests {
             "ProRegTx carries a 48-byte operator BLS key"
         );
         assert!(
-            mn.payout_script.as_ref().map_or(false, |s| !s.is_empty()),
+            mn.payout_script.as_ref().is_some_and(|s| !s.is_empty()),
             "ProRegTx carries a payout script"
         );
         assert!(

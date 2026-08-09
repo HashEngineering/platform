@@ -2102,10 +2102,13 @@ mod tests {
             );
         }
         // And it stays permissive enough to be irrelevant in practice.
-        assert!(
-            super::MAX_FEE_PER_KB > 1_000_000,
-            "the bound must sit far above any legitimate duffs/kB rate"
-        );
+        // Both operands are constants, so this is a compile-time check.
+        const {
+            assert!(
+                super::MAX_FEE_PER_KB > 1_000_000,
+                "the bound must sit far above any legitimate duffs/kB rate"
+            )
+        };
     }
 
     /// An oversized recipient list is refused before any wallet work. ~25.8k
