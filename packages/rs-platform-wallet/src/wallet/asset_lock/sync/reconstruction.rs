@@ -478,7 +478,9 @@ mod tests {
     };
     use key_wallet::transaction_checking::transaction_router::TransactionType;
     use key_wallet::transaction_checking::{BlockInfo, TransactionContext};
-    use key_wallet::wallet::managed_wallet_info::asset_lock_builder::AssetLockFundingType;
+    use key_wallet::wallet::managed_wallet_info::asset_lock_builder::{
+        AssetLockFundingAccount, AssetLockFundingType,
+    };
     use key_wallet_manager::WalletManager;
     use tokio::sync::{Notify, RwLock};
 
@@ -522,7 +524,15 @@ mod tests {
             ),
         );
         let (tx, _path) = manager
-            .build_asset_lock_transaction(1_000_000, 0, funding_type, identity_index, &signer)
+            .build_asset_lock_transaction(
+                1_000_000,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
+                funding_type,
+                identity_index,
+                &signer,
+                None,
+            )
             .await
             .expect("build asset lock");
         (wallet_manager, wallet_id, tx)

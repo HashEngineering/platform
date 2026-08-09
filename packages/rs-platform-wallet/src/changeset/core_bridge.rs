@@ -1795,7 +1795,9 @@ mod tests {
         };
         use key_wallet::transaction_checking::transaction_router::TransactionType;
         use key_wallet::transaction_checking::{BlockInfo, TransactionContext};
-        use key_wallet::wallet::managed_wallet_info::asset_lock_builder::AssetLockFundingType;
+        use key_wallet::wallet::managed_wallet_info::asset_lock_builder::{
+            AssetLockFundingAccount, AssetLockFundingType,
+        };
         use tokio::sync::Notify;
 
         use super::spawn_wallet_event_adapter;
@@ -1831,10 +1833,12 @@ mod tests {
         let (tx, _path) = asset_lock_manager
             .build_asset_lock_transaction(
                 1_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::IdentityRegistration,
                 0,
                 &signer,
+                None,
             )
             .await
             .expect("build asset lock");
@@ -1930,7 +1934,9 @@ mod tests {
         };
         use key_wallet::transaction_checking::transaction_router::TransactionType;
         use key_wallet::transaction_checking::{BlockInfo, TransactionContext};
-        use key_wallet::wallet::managed_wallet_info::asset_lock_builder::AssetLockFundingType;
+        use key_wallet::wallet::managed_wallet_info::asset_lock_builder::{
+            AssetLockFundingAccount, AssetLockFundingType,
+        };
         use tokio::sync::Notify;
 
         use super::spawn_wallet_event_adapter;
@@ -1963,10 +1969,12 @@ mod tests {
         let (tx, _path) = asset_lock_manager
             .build_asset_lock_transaction(
                 1_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::IdentityRegistration,
                 0,
                 &signer,
+                None,
             )
             .await
             .expect("build asset lock");
@@ -2075,7 +2083,9 @@ mod tests {
     fn asset_locks_only_batch_reaches_store() {
         use dashcore::hashes::Hash as _;
         use dashcore::OutPoint;
-        use key_wallet::wallet::managed_wallet_info::asset_lock_builder::AssetLockFundingType;
+        use key_wallet::wallet::managed_wallet_info::asset_lock_builder::{
+            AssetLockFundingAccount, AssetLockFundingType,
+        };
 
         use crate::changeset::changeset::AssetLockEntry;
         use crate::wallet::asset_lock::tracked::AssetLockStatus;
