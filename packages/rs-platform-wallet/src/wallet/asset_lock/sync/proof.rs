@@ -44,6 +44,42 @@ pub(super) fn record_or_persister(
     persister.get_core_tx_record(txid)
 }
 
+/// Family-aware in-memory funding-tx record lookup, shared by EVERY proof,
+/// ChainLock-wait, and recovery path.
+///
+/// `TrackedAssetLock.account_index` is family-less — it records the source
+/// index, not which accounts ended up funding the lock — while key-wallet files
+/// a transaction under *every* account its inputs touch. So the record can sit
+/// in any of the families a lock may be funded from, and looking in only some
+/// of them leaves it invisible (fatal on hosts running `NoPlatformPersistence`,
+/// whose persister fallback always returns `None`, and a burnt proof-wait
+/// timeout everywhere else).
+///
+/// Two shapes make that a live concern: a whole-balance CoinJoin drain files
+/// only under `coinjoin_accounts`, and a POOLED asset lock
+/// (`ASSET_LOCK_FUNDING_SOURCES`) may take nothing from BIP44 and be funded
+/// entirely out of the BIP32 account or a DashPay contact-receiving one. All
+/// four families are therefore checked: the standard pair and CoinJoin at
+/// `account_index`, then the DashPay receiving accounts, which span their own
+/// indices and so are searched by txid alone. BIP44 stays first — it holds
+/// every historical lock.
+pub(in crate::wallet::asset_lock) fn funding_tx_record(
+    accounts: &key_wallet::account::ManagedAccountCollection,
+    account_index: u32,
+    txid: &Txid,
+) -> Option<TransactionRecord> {
+    let at_index = [
+        accounts.standard_bip44_accounts.get(&account_index),
+        accounts.standard_bip32_accounts.get(&account_index),
+        accounts.coinjoin_accounts.get(&account_index),
+    ];
+    at_index
+        .into_iter()
+        .flatten()
+        .chain(accounts.dashpay_receival_accounts.values())
+        .find_map(|account| account.transactions().get(txid).cloned())
+}
+
 /// Variant of [`record_or_persister`] that swallows persister errors
 /// as `None` after a `warn`-level log. Use this from poll loops where
 /// the next iteration retries — a hard error from a single tick would
@@ -98,11 +134,7 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
             let info = wm
                 .get_wallet_info(&self.wallet_id)
                 .ok_or_else(|| PlatformWalletError::WalletNotFound(hex::encode(self.wallet_id)))?;
-            info.core_wallet
-                .accounts
-                .standard_bip44_accounts
-                .get(&account_index)
-                .and_then(|a| a.transactions().get(&out_point.txid).cloned())
+            funding_tx_record(&info.core_wallet.accounts, account_index, &out_point.txid)
             // wm dropped at end of block — release before persister + DAPI calls.
         };
 
@@ -192,11 +224,7 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
             let info = wm
                 .get_wallet_info(&self.wallet_id)
                 .ok_or_else(|| PlatformWalletError::WalletNotFound(hex::encode(self.wallet_id)))?;
-            info.core_wallet
-                .accounts
-                .standard_bip44_accounts
-                .get(&account_index)
-                .and_then(|a| a.transactions().get(&txid).cloned())
+            funding_tx_record(&info.core_wallet.accounts, account_index, &txid)
         };
 
         let record = record_or_persister(in_memory, &self.persister, &txid).map_err(|e| {
@@ -298,11 +326,7 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
             let in_memory = {
                 let wm = self.wallet_manager.read().await;
                 wm.get_wallet_info(&self.wallet_id).and_then(|info| {
-                    info.core_wallet
-                        .accounts
-                        .standard_bip44_accounts
-                        .get(&account_index)
-                        .and_then(|a| a.transactions().get(&out_point.txid).cloned())
+                    funding_tx_record(&info.core_wallet.accounts, account_index, &out_point.txid)
                 })
             };
             if let Some(record) =
@@ -409,14 +433,10 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
                     .and_then(|i| i.core_wallet.metadata.last_applied_chain_lock.as_ref())
                     .map(|cl| cl.block_height);
                 let rec = info.as_ref().and_then(|i| {
-                    i.core_wallet
-                        .accounts
-                        .standard_bip44_accounts
-                        .get(&account_index)
-                        .and_then(|a| a.transactions().get(&out_point.txid))
+                    funding_tx_record(&i.core_wallet.accounts, account_index, &out_point.txid)
                 });
-                let ctx = rec.map(|r| format!("{:?}", r.context));
-                let h = rec.and_then(|r| r.height());
+                let ctx = rec.as_ref().map(|r| format!("{:?}", r.context));
+                let h = rec.as_ref().and_then(|r| r.height());
                 (cl_h, ctx, h)
             };
             tracing::debug!(
@@ -433,11 +453,7 @@ impl<B: TransactionBroadcaster + ?Sized> AssetLockManager<B> {
             let in_memory = {
                 let wm = self.wallet_manager.read().await;
                 wm.get_wallet_info(&self.wallet_id).and_then(|info| {
-                    info.core_wallet
-                        .accounts
-                        .standard_bip44_accounts
-                        .get(&account_index)
-                        .and_then(|a| a.transactions().get(&out_point.txid).cloned())
+                    funding_tx_record(&info.core_wallet.accounts, account_index, &out_point.txid)
                 })
             };
             if let Some(record) =

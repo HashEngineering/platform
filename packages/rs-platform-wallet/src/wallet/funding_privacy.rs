@@ -261,8 +261,13 @@ mod guardrail {
     /// 1. [`CoreWallet::build_signed_payment`] — the general "send" primitive.
     /// 2. `AssetLockManager::build_asset_lock_transaction` with shielded
     ///    funding — the #4073 path, which alone accepts a `funding_path`.
-    /// 3. The same with a non-shielded funding type, which is pinned to BIP44
-    ///    and ignores `funding_path` entirely.
+    /// 3. The same with a non-shielded funding type, which ignores
+    ///    `funding_path` entirely and pools `ASSET_LOCK_FUNDING_SOURCES`
+    ///    (dashpay/platform#4350). Pooling the standard families and the
+    ///    DashPay receiving accounts is not a cross-domain union: CoinJoin
+    ///    and a contact's watch-only coins are both absent from that set, so
+    ///    the CoinJoin half of this fixture stays unreachable and the
+    ///    cross-domain amount below must still fail.
     #[tokio::test]
     async fn no_spend_entry_point_unions_by_default() {
         // 1. The general send primitive.
