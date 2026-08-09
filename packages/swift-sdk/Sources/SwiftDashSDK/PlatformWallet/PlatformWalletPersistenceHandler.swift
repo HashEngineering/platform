@@ -194,6 +194,19 @@ public final class PlatformWalletPersistenceHandler: @unchecked Sendable {
                     predicate: #Predicate { $0.outPointHex == outPointHex }
                 )
                 if let existing = try? backgroundContext.fetch(descriptor).first {
+                    // Consumed (4) is the terminal lifecycle state — never
+                    // let a non-Consumed snapshot regress it. Writers race:
+                    // the wallet-event adapter's batched drain can deliver a
+                    // stale reconstruction/enrichment snapshot AFTER the
+                    // live flow's synchronous consumption write, and this
+                    // upsert is otherwise last-write-wins. Mirrors the same
+                    // guard in `AssetLockChangeSet::merge` and the
+                    // rs-platform-wallet-storage sqlite upsert; all other
+                    // transitions stay last-write-wins because non-terminal
+                    // statuses legitimately move both ways.
+                    if existing.statusRaw == 4 && entry.statusRaw != 4 {
+                        continue
+                    }
                     existing.walletId = walletId
                     existing.transactionBytes = entry.transactionBytes
                     existing.fundingTypeRaw = entry.fundingTypeRaw
@@ -225,6 +238,15 @@ public final class PlatformWalletPersistenceHandler: @unchecked Sendable {
                     predicate: #Predicate { $0.outPointHex == hex }
                 )
                 if let existing = try? backgroundContext.fetch(descriptor).first {
+                    // Same terminal rule as the upsert guard above: a
+                    // Consumed (4) row is deliberately retained for
+                    // historical lookup and the only removal emitter
+                    // (`untrack_asset_lock`) targets rejected Built
+                    // rows — a removal reaching a consumed row is by
+                    // construction a stale write.
+                    if existing.statusRaw == 4 {
+                        continue
+                    }
                     backgroundContext.delete(existing)
                 }
             }
@@ -3107,6 +3129,11 @@ public final class PlatformWalletPersistenceHandler: @unchecked Sendable {
         let blockHeight: UInt64
         let hasBlockHeight: Bool
         let createdAtMs: UInt64
+        /// Chain-order key (commitment-tree position) when
+        /// `hasMinNotePosition` — orders scan-derived restored entries
+        /// whose date/height are unknown. See `PersistentShieldedActivity`.
+        let minNotePosition: UInt64
+        let hasMinNotePosition: Bool
         let identityId: Data
         let counterparty: Data
         let memo: Data
@@ -3140,6 +3167,8 @@ public final class PlatformWalletPersistenceHandler: @unchecked Sendable {
                     existing.blockHeight = snap.blockHeight
                     existing.hasBlockHeight = snap.hasBlockHeight
                     existing.createdAtMs = snap.createdAtMs
+                    existing.minNotePosition = snap.minNotePosition
+                    existing.hasMinNotePosition = snap.hasMinNotePosition
                     existing.identityId = snap.identityId
                     existing.counterparty = snap.counterparty
                     existing.memo = snap.memo
@@ -3160,6 +3189,8 @@ public final class PlatformWalletPersistenceHandler: @unchecked Sendable {
                         blockHeight: snap.blockHeight,
                         hasBlockHeight: snap.hasBlockHeight,
                         createdAtMs: snap.createdAtMs,
+                        minNotePosition: snap.minNotePosition,
+                        hasMinNotePosition: snap.hasMinNotePosition,
                         identityId: snap.identityId,
                         counterparty: snap.counterparty,
                         memo: snap.memo,
@@ -3593,6 +3624,8 @@ public final class PlatformWalletPersistenceHandler: @unchecked Sendable {
                     block_height: row.blockHeight,
                     has_block_height: row.hasBlockHeight ? 1 : 0,
                     created_at_ms: row.createdAtMs,
+                    min_note_position: row.minNotePosition,
+                    has_min_note_position: row.hasMinNotePosition ? 1 : 0,
                     identity_id: identityTuple,
                     has_identity_id: row.identityId.count == 32 ? 1 : 0,
                     counterparty_ptr: cpLen > 0 ? UnsafePointer(cpPtr) : nil,
@@ -7154,6 +7187,8 @@ private func persistShieldedActivityCallback(
                 blockHeight: e.block_height,
                 hasBlockHeight: e.has_block_height != 0,
                 createdAtMs: e.created_at_ms,
+                minNotePosition: e.min_note_position,
+                hasMinNotePosition: e.has_min_note_position != 0,
                 identityId: identityId,
                 counterparty: counterparty,
                 memo: memo,
