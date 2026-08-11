@@ -309,8 +309,8 @@ mod tests {
     use crate::test_support::{
         mnemonic_wallet_manager, AlwaysRejectedBroadcaster, MESSAGE_SIGNING_TEST_MNEMONIC,
     };
-    use crate::wallet::core::balance::WalletBalance;
     use crate::wallet::core::CoreWallet;
+    use crate::wallet::core::WalletGeneration;
     use crate::wallet::platform_wallet::WalletId;
     use crate::PlatformWalletError;
 
@@ -330,6 +330,7 @@ mod tests {
             >,
         >,
         wallet_id: WalletId,
+        generation: Arc<WalletGeneration>,
     ) -> CoreWallet<AlwaysRejectedBroadcaster> {
         let sdk = Arc::new(dash_sdk::SdkBuilder::new_mock().build().expect("mock sdk"));
         CoreWallet::new(
@@ -337,7 +338,9 @@ mod tests {
             wallet_manager,
             wallet_id,
             Arc::new(AlwaysRejectedBroadcaster),
-            Arc::new(WalletBalance::new()),
+            // This line builds a CoreWallet on a generation, not a cached
+            // balance; share the one the helper put in the wallet info.
+            generation,
         )
     }
 
@@ -388,9 +391,9 @@ mod tests {
     /// pointer_error` in the FFI crate pins the boundary half.
     #[tokio::test]
     async fn empty_message_is_signable() {
-        let (wm, wallet_id, signer, address) =
+        let (wm, wallet_id, signer, address, generation) =
             mnemonic_wallet_manager(MESSAGE_SIGNING_TEST_MNEMONIC).await;
-        let core = core_wallet(wm, wallet_id);
+        let core = core_wallet(wm, wallet_id, generation);
 
         let signature = core
             .sign_message(&address.to_string(), "", &signer)
@@ -411,9 +414,9 @@ mod tests {
     /// public verification path rather than by re-deriving the key.
     #[tokio::test]
     async fn signature_verifies_for_the_signing_address() {
-        let (wm, wallet_id, signer, address) =
+        let (wm, wallet_id, signer, address, generation) =
             mnemonic_wallet_manager(MESSAGE_SIGNING_TEST_MNEMONIC).await;
-        let core = core_wallet(wm, wallet_id);
+        let core = core_wallet(wm, wallet_id, generation);
 
         let signature = core
             .sign_message(&address.to_string(), MESSAGE, &signer)
@@ -439,9 +442,9 @@ mod tests {
     /// base64 for this address, byte-for-byte.
     #[tokio::test]
     async fn roundtrip_signature_is_a_stable_golden() {
-        let (wm, wallet_id, signer, address) =
+        let (wm, wallet_id, signer, address, generation) =
             mnemonic_wallet_manager(MESSAGE_SIGNING_TEST_MNEMONIC).await;
-        let core = core_wallet(wm, wallet_id);
+        let core = core_wallet(wm, wallet_id, generation);
 
         // The first BIP44 external address of the fixed mnemonic on testnet,
         // pinned alongside the signature so a derivation change fails loudly
@@ -470,12 +473,12 @@ mod tests {
     /// the host routes that code to key repair / address correction.
     #[tokio::test]
     async fn unknown_address_is_key_unavailable() {
-        let (wm, wallet_id, signer, _) =
+        let (wm, wallet_id, signer, _, generation) =
             mnemonic_wallet_manager(MESSAGE_SIGNING_TEST_MNEMONIC).await;
-        let core = core_wallet(wm, wallet_id);
+        let core = core_wallet(wm, wallet_id, generation);
 
         // A well-formed testnet P2PKH address from a different seed.
-        let (_, _, _, foreign) = mnemonic_wallet_manager(
+        let (_, _, _, foreign, _) = mnemonic_wallet_manager(
             "legal winner thank year wave sausage worth useful legal winner thank yellow",
         )
         .await;
@@ -498,9 +501,9 @@ mod tests {
     /// signed for.
     #[tokio::test]
     async fn wrong_network_address_is_rejected() {
-        let (wm, wallet_id, signer, _) =
+        let (wm, wallet_id, signer, _, generation) =
             mnemonic_wallet_manager(MESSAGE_SIGNING_TEST_MNEMONIC).await;
-        let core = core_wallet(wm, wallet_id);
+        let core = core_wallet(wm, wallet_id, generation);
 
         let result = core
             .sign_message("Xt5QmmzX2LaMgt81dcXGHhdf8pAhaVJKUW", MESSAGE, &signer)
@@ -591,9 +594,9 @@ mod tests {
     /// variant and parses nothing.
     #[tokio::test]
     async fn signer_key_unavailable_is_typed_during_message_signing() {
-        let (wm, wallet_id, _, address) =
+        let (wm, wallet_id, _, address, generation) =
             mnemonic_wallet_manager(MESSAGE_SIGNING_TEST_MNEMONIC).await;
-        let core = core_wallet(wm, wallet_id);
+        let core = core_wallet(wm, wallet_id, generation);
 
         let result = core
             .sign_message(&address.to_string(), MESSAGE, &KeyUnavailableSigner)
@@ -642,9 +645,9 @@ mod tests {
     /// would misroute a generic failure into the host's key repair.
     #[tokio::test]
     async fn mid_string_marker_is_not_promoted_during_message_signing() {
-        let (wm, wallet_id, _, address) =
+        let (wm, wallet_id, _, address, generation) =
             mnemonic_wallet_manager(MESSAGE_SIGNING_TEST_MNEMONIC).await;
-        let core = core_wallet(wm, wallet_id);
+        let core = core_wallet(wm, wallet_id, generation);
 
         let result = core
             .sign_message(&address.to_string(), MESSAGE, &MidStringMarkerSigner)
@@ -673,9 +676,9 @@ mod tests {
     /// specifically.
     #[tokio::test]
     async fn transaction_only_signer_is_refused_before_signing() {
-        let (wm, wallet_id, _, address) =
+        let (wm, wallet_id, _, address, generation) =
             mnemonic_wallet_manager(MESSAGE_SIGNING_TEST_MNEMONIC).await;
-        let core = core_wallet(wm, wallet_id);
+        let core = core_wallet(wm, wallet_id, generation);
 
         let result = core
             .sign_message(&address.to_string(), MESSAGE, &TransactionOnlySigner)

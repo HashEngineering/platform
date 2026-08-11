@@ -1128,31 +1128,6 @@ pub extern "system" fn Java_org_dashfoundation_dashsdk_ffi_WalletManagerNative_c
     core_signer_handle: jlong,
     funding_path: JString,
 ) -> jbyteArray {
-/// `core_wallet_sign_message` — sign `message` with the private key behind
-/// `address` and return the base64 signature: a classic Dash signed message,
-/// verifiable by Dash Core's `verifymessage` RPC, dashj's
-/// `ECKey.verifyMessage`, and CrowdNode's server-side check.
-///
-/// `core_handle` is the transient core-wallet `Handle` from
-/// [platformWalletGetCore]. `address` must be a P2PKH address of THIS wallet on
-/// its network, belonging to a signable funds account — a foreign or watch-only
-/// address throws `ErrorSigningKeyUnavailable` (31), while an unparseable,
-/// wrong-network, or non-P2PKH address throws `ErrorInvalidParameter` (2).
-/// `message` is signed verbatim (it is length-prefixed into the digest, so
-/// trailing whitespace is significant). `core_signer_handle` is the manager's
-/// `MnemonicResolverHandle`.
-///
-/// Moves no value: nothing is selected, reserved, broadcast, or persisted.
-/// Returns the base64 signature as a `String`, or null after throwing.
-#[no_mangle]
-pub extern "system" fn Java_org_dashfoundation_dashsdk_ffi_WalletManagerNative_coreWalletSignMessage(
-    mut env: JNIEnv,
-    _class: JClass,
-    core_handle: jlong,
-    address: JString,
-    message: JString,
-    core_signer_handle: jlong,
-) -> jstring {
     guard(&mut env, ptr::null_mut(), |env| {
         if core_handle == 0 {
             throw_sdk_exception(env, 1, "core handle is 0");
@@ -1207,6 +1182,68 @@ pub extern "system" fn Java_org_dashfoundation_dashsdk_ffi_WalletManagerNative_c
                 &mut out_tx_len,
                 &mut out_fee,
                 &mut out_change,
+            )
+        };
+        if take_pwffi_error(env, result) {
+            return ptr::null_mut();
+        }
+
+        // Copy the FFI-owned tx bytes out, then free them, then pack the
+        // metadata-prefixed result for Kotlin. `fee` and `change` are written
+        // big-endian ahead of the raw tx bytes.
+        let tx_bytes: &[u8] = if out_tx_bytes.is_null() || out_tx_len == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(out_tx_bytes, out_tx_len) }
+        };
+        let mut packed = Vec::with_capacity(16 + tx_bytes.len());
+        packed.extend_from_slice(&out_fee.to_be_bytes());
+        packed.extend_from_slice(&out_change.to_be_bytes());
+        packed.extend_from_slice(tx_bytes);
+        unsafe {
+            platform_wallet_ffi::core_wallet_free_payment_bytes(out_tx_bytes, out_tx_len);
+        }
+
+        env.byte_array_from_slice(&packed)
+            .map(|a| a.into_raw())
+            .unwrap_or(ptr::null_mut())
+    })
+}
+
+/// `core_wallet_sign_message` — sign `message` with the private key behind
+/// `address` and return the base64 signature: a classic Dash signed message,
+/// verifiable by Dash Core's `verifymessage` RPC, dashj's
+/// `ECKey.verifyMessage`, and CrowdNode's server-side check.
+///
+/// `core_handle` is the transient core-wallet `Handle` from
+/// [platformWalletGetCore]. `address` must be a P2PKH address of THIS wallet on
+/// its network, belonging to a signable funds account — a foreign or watch-only
+/// address throws `ErrorSigningKeyUnavailable` (31), while an unparseable,
+/// wrong-network, or non-P2PKH address throws `ErrorInvalidParameter` (2).
+/// `message` is signed verbatim (it is length-prefixed into the digest, so
+/// trailing whitespace is significant). `core_signer_handle` is the manager's
+/// `MnemonicResolverHandle`.
+///
+/// Moves no value: nothing is selected, reserved, broadcast, or persisted.
+/// Returns the base64 signature as a `String`, or null after throwing.
+#[no_mangle]
+pub extern "system" fn Java_org_dashfoundation_dashsdk_ffi_WalletManagerNative_coreWalletSignMessage(
+    mut env: JNIEnv,
+    _class: JClass,
+    core_handle: jlong,
+    address: JString,
+    message: JString,
+    core_signer_handle: jlong,
+) -> jstring {
+    guard(&mut env, ptr::null_mut(), |env| {
+        if core_handle == 0 {
+            throw_sdk_exception(env, 1, "core handle is 0");
+            return ptr::null_mut();
+        }
+        if core_signer_handle == 0 {
+            throw_sdk_exception(env, 1, "coreSignerHandle is 0");
+            return ptr::null_mut();
+        }
         let Some(address) = read_cstring_required(env, &address, "address") else {
             return ptr::null_mut();
         };
@@ -1249,25 +1286,6 @@ pub extern "system" fn Java_org_dashfoundation_dashsdk_ffi_WalletManagerNative_c
         if take_pwffi_error(env, result) {
             return ptr::null_mut();
         }
-
-        // Copy the FFI-owned tx bytes out, then free them, then pack the
-        // metadata-prefixed result for Kotlin. `fee` and `change` are written
-        // big-endian ahead of the raw tx bytes.
-        let tx_bytes: &[u8] = if out_tx_bytes.is_null() || out_tx_len == 0 {
-            &[]
-        } else {
-            unsafe { std::slice::from_raw_parts(out_tx_bytes, out_tx_len) }
-        };
-        let mut packed = Vec::with_capacity(16 + tx_bytes.len());
-        packed.extend_from_slice(&out_fee.to_be_bytes());
-        packed.extend_from_slice(&out_change.to_be_bytes());
-        packed.extend_from_slice(tx_bytes);
-        unsafe {
-            platform_wallet_ffi::core_wallet_free_payment_bytes(out_tx_bytes, out_tx_len);
-        }
-
-        env.byte_array_from_slice(&packed)
-            .map(|a| a.into_raw())
         if out_signature.is_null() {
             throw_sdk_exception(env, 1, "sign_message returned a NULL signature");
             return ptr::null_mut();
@@ -1276,18 +1294,9 @@ pub extern "system" fn Java_org_dashfoundation_dashsdk_ffi_WalletManagerNative_c
             .to_string_lossy()
             .into_owned();
         unsafe { platform_wallet_ffi::core_wallet_free_address(out_signature) };
-        // A `new_string` failure must throw like every other failure path:
-        // Kotlin declares a non-null return, so a bare null here would surface
-        // as an unexplained NullPointerException at the platform-type boundary
-        // instead of a DashSdkException.
-        match env.new_string(signature) {
-            Ok(s) => s.into_raw(),
-            Err(_) => {
-                let _ = env.exception_clear();
-                throw_sdk_exception(env, 1, "failed to allocate the signature string");
-                ptr::null_mut()
-            }
-        }
+        env.new_string(signature)
+            .map(|s| s.into_raw())
+            .unwrap_or(ptr::null_mut())
     })
 }
 

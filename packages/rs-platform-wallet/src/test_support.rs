@@ -850,29 +850,6 @@ pub async fn funded_spv_core_wallet(
 pub(crate) async fn split_funded_wallet_manager_many_coinjoin(
     bip44_duffs: u64,
     coinjoin_values: &[u64],
-/// Canonical all-`abandon` BIP-39 test vector. Fixed (not
-/// `TestWalletContext::new_random`) so every key it derives is a stable golden —
-/// which is what lets the signed-message tests pin an RFC6979-deterministic
-/// signature and cross-check it against dashj.
-#[cfg(test)]
-pub(crate) const MESSAGE_SIGNING_TEST_MNEMONIC: &str =
-    "abandon abandon abandon abandon abandon abandon \
-     abandon abandon abandon abandon abandon about";
-
-/// Builds a testnet wallet manager from a KNOWN mnemonic with one derived BIP44
-/// external address, and NO funding.
-///
-/// The unfunded counterpart of [`funded_wallet_manager`], for operations that
-/// prove key ownership rather than move value — signing a message needs a
-/// derivation path and a signer, never a UTXO. Returns the manager, the wallet
-/// id, a soft signer over the wallet's seed, and that first receive address.
-///
-/// `#[cfg(test)]` rather than `test-utils`-gated: only this crate's own unit
-/// tests consume it, so under the FFI crate's `test-utils` build it would
-/// compile with no user and trip `dead_code`.
-#[cfg(test)]
-pub(crate) async fn mnemonic_wallet_manager(
-    phrase: &str,
 ) -> (
     Arc<RwLock<WalletManager<PlatformWalletInfo>>>,
     WalletId,
@@ -951,43 +928,6 @@ pub(crate) async fn mnemonic_wallet_manager(
     let info = PlatformWalletInfo {
         core_wallet: ctx.managed_wallet,
         generation,
-    dashcore::Address,
-) {
-    use key_wallet::wallet::initialization::WalletAccountCreationOptions;
-    use key_wallet::wallet::ManagedWalletInfo;
-    use key_wallet::{Language, Mnemonic};
-
-    let mnemonic = Mnemonic::from_phrase(phrase, Language::English).expect("valid test mnemonic");
-    let wallet = Wallet::from_mnemonic(
-        mnemonic,
-        Network::Testnet,
-        WalletAccountCreationOptions::Default,
-    )
-    .expect("wallet construction from a known mnemonic");
-    let mut managed_wallet =
-        ManagedWalletInfo::from_wallet_with_name(&wallet, "SignMessage".to_string(), 0);
-
-    let xpub = wallet
-        .accounts
-        .standard_bip44_accounts
-        .get(&0)
-        .expect("default options create BIP44 account 0")
-        .account_xpub;
-    // `true` registers the address in the external pool, which is what makes it
-    // findable by `address_derivation_path` — an unregistered gap-limit address
-    // is deliberately not signable.
-    let receive_address = managed_wallet
-        .first_bip44_managed_account_mut()
-        .expect("managed BIP44 account 0")
-        .next_receive_address(Some(&xpub), true)
-        .expect("first BIP44 receive address");
-
-    let signer = WalletSigner {
-        wallet: wallet.clone(),
-    };
-    let info = PlatformWalletInfo {
-        core_wallet: managed_wallet,
-        balance: Arc::new(WalletBalance::new()),
         identity_manager: IdentityManager::new(),
         tracked_asset_locks: BTreeMap::new(),
     };
@@ -1072,6 +1012,85 @@ pub async fn test_platform_wallet_manager() -> (
         .expect("create test wallet");
     let wallet_id = wallet.wallet_id();
     (manager, wallet_id)
+}
+
+/// Canonical all-`abandon` BIP-39 test vector. Fixed (not
+/// `TestWalletContext::new_random`) so every key it derives is a stable golden —
+/// which is what lets the signed-message tests pin an RFC6979-deterministic
+/// signature and cross-check it against dashj.
+#[cfg(test)]
+pub(crate) const MESSAGE_SIGNING_TEST_MNEMONIC: &str =
+    "abandon abandon abandon abandon abandon abandon \
+     abandon abandon abandon abandon abandon about";
+
+/// Builds a testnet wallet manager from a KNOWN mnemonic with one derived BIP44
+/// external address, and NO funding.
+///
+/// The unfunded counterpart of [`funded_wallet_manager`], for operations that
+/// prove key ownership rather than move value — signing a message needs a
+/// derivation path and a signer, never a UTXO. Returns the manager, the wallet
+/// id, a soft signer over the wallet's seed, and that first receive address.
+///
+/// `#[cfg(test)]` rather than `test-utils`-gated: only this crate's own unit
+/// tests consume it, so under the FFI crate's `test-utils` build it would
+/// compile with no user and trip `dead_code`.
+#[cfg(test)]
+pub(crate) async fn mnemonic_wallet_manager(
+    phrase: &str,
+) -> (
+    Arc<RwLock<WalletManager<PlatformWalletInfo>>>,
+    WalletId,
+    WalletSigner,
+    dashcore::Address,
+    // This line's `PlatformWalletInfo` holds a generation rather than a cached
+    // balance, and a `CoreWallet` must be built on the SAME one, so hand it
+    // back like the other helpers here do.
+    Arc<WalletGeneration>,
+) {
+    use key_wallet::wallet::initialization::WalletAccountCreationOptions;
+    use key_wallet::wallet::ManagedWalletInfo;
+    use key_wallet::{Language, Mnemonic};
+
+    let mnemonic = Mnemonic::from_phrase(phrase, Language::English).expect("valid test mnemonic");
+    let wallet = Wallet::from_mnemonic(
+        mnemonic,
+        Network::Testnet,
+        WalletAccountCreationOptions::Default,
+    )
+    .expect("wallet construction from a known mnemonic");
+    let mut managed_wallet =
+        ManagedWalletInfo::from_wallet_with_name(&wallet, "SignMessage".to_string(), 0);
+
+    let xpub = wallet
+        .accounts
+        .standard_bip44_accounts
+        .get(&0)
+        .expect("default options create BIP44 account 0")
+        .account_xpub;
+    // `true` registers the address in the external pool, which is what makes it
+    // findable by `address_derivation_path` — an unregistered gap-limit address
+    // is deliberately not signable.
+    let receive_address = managed_wallet
+        .first_bip44_managed_account_mut()
+        .expect("managed BIP44 account 0")
+        .next_receive_address(Some(&xpub), true)
+        .expect("first BIP44 receive address");
+
+    let signer = WalletSigner {
+        wallet: wallet.clone(),
+    };
+    // v4.2-dev's PlatformWalletInfo carried a cached `balance`; this line
+    // carries a `generation` instead (balances are computed fresh from the
+    // UTXO set), so the ported helper names that field.
+    let generation = Arc::new(WalletGeneration::new());
+    let info = PlatformWalletInfo {
+        core_wallet: managed_wallet,
+        generation: Arc::clone(&generation),
+        identity_manager: IdentityManager::new(),
+        tracked_asset_locks: BTreeMap::new(),
+    };
+
+    let mut wm = WalletManager::<PlatformWalletInfo>::new(Network::Testnet);
     let wallet_id = wm.insert_wallet(wallet, info).expect("insert wallet");
 
     (
@@ -1079,5 +1098,6 @@ pub async fn test_platform_wallet_manager() -> (
         wallet_id,
         signer,
         receive_address,
+        generation,
     )
 }

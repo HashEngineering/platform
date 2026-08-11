@@ -132,3 +132,14 @@ version = "4.1.0"
 rust-version = "1.92"
 
 # LOCAL TEST BUILD ONLY (v41int10) — do NOT push upstream.
+
+# LOCAL BUILD ONLY — DO NOT COMMIT (CI guard in tests-rs-workspace.yml).
+[patch."https://github.com/bfoss765/rust-dashcore"]
+dashcore = { path = "/Users/hashengineering/Documents/dash/rust-dashcore-mayapin/dash" }
+dash-network-seeds = { path = "/Users/hashengineering/Documents/dash/rust-dashcore-mayapin/dash-network-seeds" }
+dash-spv = { path = "/Users/hashengineering/Documents/dash/rust-dashcore-mayapin/dash-spv" }
+key-wallet = { path = "/Users/hashengineering/Documents/dash/rust-dashcore-mayapin/key-wallet" }
+key-wallet-ffi = { path = "/Users/hashengineering/Documents/dash/rust-dashcore-mayapin/key-wallet-ffi" }
+key-wallet-manager = { path = "/Users/hashengineering/Documents/dash/rust-dashcore-mayapin/key-wallet-manager" }
+dash-network = { path = "/Users/hashengineering/Documents/dash/rust-dashcore-mayapin/dash-network" }
+dashcore-rpc = { path = "/Users/hashengineering/Documents/dash/rust-dashcore-mayapin/rpc-client" }
