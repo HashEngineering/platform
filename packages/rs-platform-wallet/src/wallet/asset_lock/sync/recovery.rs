@@ -744,12 +744,17 @@ mod tests {
             WalletPersister::new(wallet_id, Arc::new(RecordingPersistence::default())),
         );
         let (transaction, _path) = manager
+            // qa5's builder names the funding account explicitly (and takes
+            // `drain` + `funding_path`) where v4.2-dev passed a bare account
+            // index; `0` there meant BIP44 account 0, which is this.
             .build_asset_lock_transaction(
                 1_000_000,
-                0,
+                AssetLockFundingAccount::Bip44 { account_index: 0 },
+                false,
                 AssetLockFundingType::IdentityTopUp,
                 4,
                 &signer,
+                None,
             )
             .await
             .expect("build asset lock");
