@@ -557,6 +557,135 @@ class PlatformWalletPersistenceHandlerTest {
         assertTrue(walletId.contentEquals(txo.walletId))
     }
 
+    // ── Generalised spend-flip heal (Maya-drain regression) ───────────
+
+    /**
+     * A confirmed spender must flip every TXO still linked to it with
+     * `isSpent = 0`, even when the confirmed upsert does not re-deliver the
+     * input outpoint. Regression for the Maya drain (mainnet tx
+     * a5c99aec…c873, block 2517981): the mempool pass set `spendingTxid`
+     * without flipping `isSpent`, the in-block flip never ran, and the
+     * wallet permanently over-reported its balance. The heal generalises
+     * the asset-lock-only pass in `onPersistAssetLockUpsert` to any
+     * confirmed spending transaction.
+     */
+    @Test
+    fun confirmedSpenderFlipsLinkedUnspentTxosWithoutRedeliveredInputs() = runTest {
+        handler.onPersistWalletMetadata(walletId, testnet, groupId, 0)
+        val fundingTxid = ByteArray(32) { 0x11 }
+        val drainTxid = ByteArray(32) { 0x22 }
+        val outpoint = makeOutpoint(fundingTxid, 0)
+
+        // Funding tx row + its TXO, linked to the drain at MEMPOOL context —
+        // the state the inline reconcile leaves when the spend is first seen:
+        // spendingTxid set, isSpent still false.
+        db.transactionDao().upsert(TransactionEntity(txid = fundingTxid, transactionData = ByteArray(1)))
+        db.transactionDao().upsert(
+            TransactionEntity(txid = drainTxid, transactionData = ByteArray(1), context = 1),
+        )
+        db.txoDao().upsert(
+            TxoEntity(
+                outpoint = outpoint,
+                vout = 0,
+                amount = 7_443_157,
+                address = "yDrainAddr",
+                walletId = walletId,
+                txid = fundingTxid,
+                spendingTxid = drainTxid,
+                spendingInputIndex = 0,
+                isSpent = false,
+            ),
+        )
+
+        // The drain confirms, but this upsert carries no input outpoints
+        // (the inline per-input link can't run). The general heal must
+        // still flip the linked TXO.
+        handler.onChangesetBegin(walletId)
+        handler.onWalletChangesetTransaction(
+            walletId = walletId,
+            txid = drainTxid,
+            txData = ByteArray(10) { 4 },
+            context = 2, // InBlock
+            blockHeight = 2_517_981,
+            blockHash = ByteArray(32) { 7 },
+            blockTimestamp = 1_754_000_000,
+            direction = 1,
+            transactionType = "Standard",
+            transactionTypeKind = 0,
+            netAmount = -7_443_157,
+            fee = 1_000,
+            hasFee = true,
+            label = "",
+            firstSeen = 1_753_999_000,
+            inputOutpoints = ByteArray(0),
+            inputOutpointCount = 0,
+        )
+        handler.onChangesetEnd(walletId, success = true)
+
+        val txo = db.txoDao().getByOutpoint(outpoint)
+        assertNotNull(txo)
+        assertTrue("confirmed spender must flip the linked TXO to spent", txo!!.isSpent)
+    }
+
+    /**
+     * The wallet-list load must heal (not just skip) a TXO row stuck at
+     * `isSpent = 0` whose linked spending transaction is already in-block,
+     * so `isSpent`-based readers stop counting it — and must not hand the
+     * consumed output back to Rust as spendable.
+     */
+    @Test
+    fun walletListLoadHealsStuckSpentFlagWhenSpenderIsConfirmed() = runTest {
+        handler.onPersistWalletMetadata(walletId, testnet, groupId, 0)
+        // Restorable wallet = at least one account with an xpub.
+        handler.onPersistAccountRegistration(
+            walletId = walletId,
+            typeTag = 0,
+            standardTag = 0,
+            index = 0,
+            registrationIndex = 0,
+            keyClass = 0,
+            userIdentityId = ByteArray(0),
+            friendIdentityId = ByteArray(0),
+            accountXpubBytes = ByteArray(78) { 3 },
+        )
+
+        val fundingTxid = ByteArray(32) { 0x33 }
+        val drainTxid = ByteArray(32) { 0x44 }
+        val outpoint = makeOutpoint(fundingTxid, 0)
+
+        // The stuck state: spending tx row already in-block, TXO linked to
+        // it but never flipped.
+        db.transactionDao().upsert(TransactionEntity(txid = fundingTxid, transactionData = ByteArray(1)))
+        db.transactionDao().upsert(
+            TransactionEntity(txid = drainTxid, transactionData = ByteArray(1), context = 2),
+        )
+        db.txoDao().upsert(
+            TxoEntity(
+                outpoint = outpoint,
+                vout = 0,
+                amount = 7_443_157,
+                address = "yDrainAddr",
+                walletId = walletId,
+                txid = fundingTxid,
+                spendingTxid = drainTxid,
+                spendingInputIndex = 0,
+                isSpent = false,
+            ),
+        )
+
+        val wallets = handler.onLoadWalletList()
+        val restored = wallets.single { it.walletId.contentEquals(walletId) }
+        assertEquals(
+            "a consumed output must not rehydrate as spendable",
+            0,
+            restored.utxos.size,
+        )
+
+        val txo = db.txoDao().getByOutpoint(outpoint)
+        assertNotNull(txo)
+        assertTrue("the load pass must heal the stale isSpent flag", txo!!.isSpent)
+    }
+
     // ── Address balances (update-only) ────────────────────────────────
 
     @Test

@@ -871,6 +871,22 @@ class PlatformWalletPersistenceHandler(
                     )
                 }
             }
+            // General spend-flip heal (defence in depth): once THIS
+            // transaction is confirmed, any TXO still linked to it with
+            // isSpent = 0 was consumed but missed its in-block flip — e.g.
+            // the linking pass ran at mempool context and the confirmed
+            // re-emit was lost or delivered without that input (the Maya
+            // drain failure: a tx with no wallet-owned output whose block
+            // the SPV filter matching missed, leaving the row stuck and the
+            // balance permanently over-reported). This generalises the
+            // asset-lock-only heal in onPersistAssetLockUpsert to every
+            // confirmed spender. Monotonic — only flips toward spent — and
+            // keyed strictly to TXOs already linked to this txid.
+            if (context >= CONTEXT_IN_BLOCK) {
+                for (txo in db.txoDao().getUnspentBySpendingTxid(txid)) {
+                    db.txoDao().upsert(txo.copy(isSpent = true, lastUpdated = now()))
+                }
+            }
         }
         0
     }
@@ -1524,7 +1540,12 @@ class PlatformWalletPersistenceHandler(
             // does arrive (the proof wait drives it): once it reaches
             // InstantSendLocked (2) the network has locked the inputs, so
             // flip the linked TXOs here. Monotonic, and keyed strictly to
-            // TXOs already linked to THIS lock's funding txid.
+            // TXOs already linked to THIS lock's funding txid. (The same
+            // flip now also runs generally for ANY confirmed spender — see
+            // onWalletChangesetTransaction and buildUtxoRestoreData — so a
+            // non-asset-lock drain with no wallet-owned output heals too;
+            // this branch stays because the lock status can arrive before
+            // the spender's confirmed tx row does.)
             if ((status.toInt() and 0xFF) >= ASSET_LOCK_STATUS_INSTANT_SEND_LOCKED) {
                 val fundingTxid = outPoint.copyOfRange(0, 32)
                 for (txo in db.txoDao().getUnspentBySpendingTxid(fundingTxid)) {
@@ -2264,7 +2285,15 @@ class PlatformWalletPersistenceHandler(
             val spendingTxid = txo.spendingTxid
             if (spendingTxid != null) {
                 val spending = database.transactionDao().getByTxid(spendingTxid)
-                if (spending != null && spending.context >= CONTEXT_IN_BLOCK) continue
+                if (spending != null && spending.context >= CONTEXT_IN_BLOCK) {
+                    // Heal the flag while skipping (generalised spend-flip,
+                    // same as the asset-lock branch below): the row was
+                    // consumed but missed its in-block flip, and leaving
+                    // isSpent = 0 keeps every isSpent-based reader counting
+                    // it forever (the Maya drain over-reported balance).
+                    database.txoDao().upsert(txo.copy(isSpent = true, lastUpdated = now()))
+                    continue
+                }
                 // Asset-lock spender: the lock tx burns its value into the
                 // special-tx payload and often has no wallet-owned standard
                 // output, so SPV block matching can miss it and its row sits
