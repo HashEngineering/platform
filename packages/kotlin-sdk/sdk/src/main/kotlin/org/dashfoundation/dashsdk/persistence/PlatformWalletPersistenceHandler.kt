@@ -13,6 +13,12 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import org.dashfoundation.dashsdk.errors.DashSdkError
 import org.dashfoundation.dashsdk.ffi.AccountSpecData
 import org.dashfoundation.dashsdk.ffi.ContactProfileRestoreData
@@ -900,63 +906,224 @@ class PlatformWalletPersistenceHandler(
         isLocked: Boolean,
     ): Int = guarded {
         stage(walletId) { db ->
-            val outpoint = makeOutpoint(txid, vout)
-            // Ensure a parent transaction row exists (stub if missing, so
-            // the TXO FK holds; the real tx upsert overwrites it later).
-            if (db.transactionDao().getByTxid(txid) == null) {
-                db.transactionDao().upsert(
-                    TransactionEntity(txid = txid, transactionData = ByteArray(0)),
-                )
-            }
-            val existing = db.txoDao().getByOutpoint(outpoint)
-            val coreAddressId = if (address.isNotEmpty()) address else null
-            val row = TxoEntity(
-                outpoint = outpoint,
-                vout = vout,
-                amount = amount,
-                address = address,
-                scriptPubKey = scriptPubKey,
-                height = height,
-                isCoinbase = isCoinbase,
-                isConfirmed = isConfirmed,
-                isInstantLocked = isInstantLocked,
-                isLocked = isLocked,
-                isSpent = existing?.isSpent ?: false,
-                walletId = walletId,
-                txid = txid,
-                spendingTxid = existing?.spendingTxid,
-                spendingInputIndex = existing?.spendingInputIndex,
-                accountId = existing?.accountId,
-                coreAddressId = existing?.coreAddressId ?: coreAddressIdIfPresent(db, coreAddressId),
-                createdAt = existing?.createdAt ?: java.util.Date(),
-                lastUpdated = now(),
+            upsertUtxoRow(
+                db, walletId, txid, vout, amount, address, scriptPubKey,
+                height, isCoinbase, isConfirmed, isInstantLocked, isLocked,
             )
-            db.txoDao().upsert(row)
-            // Drain any pending-input rows staged before this funding TXO
-            // existed — a 1:1 port of the Swift upsertUtxo drain
-            // (PlatformWalletPersistenceHandler.swift:895-953). A spend that
-            // arrived first was deferred (see onWalletChangesetTransaction);
-            // now that the funding output is here, link the newest pending
-            // spend (reorg/double-spend: newest wins) and clear the rows so
-            // the UTXO-restore path won't hand this consumed output back to
-            // Rust as spendable.
-            val pending = db.documentDao().getPendingInputsByOutpoint(outpoint)
-            if (pending.isNotEmpty()) {
-                val chosen = pending.maxByOrNull { it.createdAt }!!
-                val spending = db.transactionDao().getByTxid(chosen.spendingTxid)
-                val spentInBlock = spending != null && spending.context >= CONTEXT_IN_BLOCK
-                db.txoDao().upsert(
-                    row.copy(
-                        isSpent = row.isSpent || spentInBlock,
-                        spendingTxid = chosen.spendingTxid,
-                        spendingInputIndex = chosen.inputIndex,
-                        lastUpdated = now(),
-                    ),
-                )
-                for (p in pending) db.documentDao().deletePendingInput(p)
-            }
         }
         0
+    }
+
+    /**
+     * The single TXO-insert discipline, shared by the changeset callback
+     * ([onWalletChangesetUtxoAdded]) and the reconcile sweep
+     * ([reconcileTxos]): stub the parent transaction row so the FK holds,
+     * upsert the TXO preserving any existing spend linkage, then drain
+     * pending-input rows staged before this funding TXO existed — a 1:1
+     * port of the Swift upsertUtxo drain
+     * (PlatformWalletPersistenceHandler.swift:895-953). A spend that
+     * arrived first was deferred (see onWalletChangesetTransaction); now
+     * that the funding output is here, link the newest pending spend
+     * (reorg/double-spend: newest wins) and clear the rows so the
+     * UTXO-restore path won't hand this consumed output back to Rust as
+     * spendable.
+     */
+    private suspend fun upsertUtxoRow(
+        db: DashDatabase,
+        walletId: ByteArray,
+        txid: ByteArray,
+        vout: Int,
+        amount: Long,
+        address: String,
+        scriptPubKey: ByteArray,
+        height: Int,
+        isCoinbase: Boolean,
+        isConfirmed: Boolean,
+        isInstantLocked: Boolean,
+        isLocked: Boolean,
+    ) {
+        val outpoint = makeOutpoint(txid, vout)
+        // Ensure a parent transaction row exists (stub if missing, so
+        // the TXO FK holds; the real tx upsert overwrites it later).
+        if (db.transactionDao().getByTxid(txid) == null) {
+            db.transactionDao().upsert(
+                TransactionEntity(txid = txid, transactionData = ByteArray(0)),
+            )
+        }
+        val existing = db.txoDao().getByOutpoint(outpoint)
+        val coreAddressId = if (address.isNotEmpty()) address else null
+        val row = TxoEntity(
+            outpoint = outpoint,
+            vout = vout,
+            amount = amount,
+            address = address,
+            scriptPubKey = scriptPubKey,
+            height = height,
+            isCoinbase = isCoinbase,
+            isConfirmed = isConfirmed,
+            isInstantLocked = isInstantLocked,
+            isLocked = isLocked,
+            isSpent = existing?.isSpent ?: false,
+            walletId = walletId,
+            txid = txid,
+            spendingTxid = existing?.spendingTxid,
+            spendingInputIndex = existing?.spendingInputIndex,
+            accountId = existing?.accountId,
+            coreAddressId = existing?.coreAddressId ?: coreAddressIdIfPresent(db, coreAddressId),
+            createdAt = existing?.createdAt ?: java.util.Date(),
+            lastUpdated = now(),
+        )
+        db.txoDao().upsert(row)
+        val pending = db.documentDao().getPendingInputsByOutpoint(outpoint)
+        if (pending.isNotEmpty()) {
+            val chosen = pending.maxByOrNull { it.createdAt }!!
+            val spending = db.transactionDao().getByTxid(chosen.spendingTxid)
+            val spentInBlock = spending != null && spending.context >= CONTEXT_IN_BLOCK
+            db.txoDao().upsert(
+                row.copy(
+                    isSpent = row.isSpent || spentInBlock,
+                    spendingTxid = chosen.spendingTxid,
+                    spendingInputIndex = chosen.inputIndex,
+                    lastUpdated = now(),
+                ),
+            )
+            for (p in pending) db.documentDao().deletePendingInput(p)
+        }
+    }
+
+    /**
+     * Outcome of one [reconcileTxos] sweep. [inserted]/[insertedDuffs]
+     * are the healed holes; a non-zero value after a completed sync means
+     * a changeset failed to deliver an owned output (the
+     * CoinJoin-funded-send change-drop class) and would have become a
+     * fund-loss on the next engine reload from this store.
+     */
+    data class TxoReconcileReport(
+        val engineUtxos: Int,
+        val inserted: Int,
+        val insertedDuffs: Long,
+        val netAmountRepairs: Int,
+        val skippedImmature: Int,
+        val skippedNoAddress: Int,
+        val accountErrors: Int,
+    )
+
+    /**
+     * Reconcile the Room `txos` mirror against the engine's live UTXO
+     * inventory ([engineUtxosJson] — the
+     * `WalletManagerNative.walletManagerAllUtxosJson` payload). The
+     * mirror is write-behind with no other feedback loop: a changeset
+     * that fails to deliver an owned output leaves a permanent hole, and
+     * because the engine is REBUILT from this mirror on restart
+     * (buildUtxoRestoreData), the hole graduates to a fund-loss on the
+     * next launch. Observed in the field as the job-flower 106.43→86.33
+     * restart drop: rescan nondeterministically drops the change outputs
+     * of sends funded from CoinJoin-account outputs.
+     *
+     * Insert-only by design: rows the engine holds and the mirror lacks
+     * are added; rows the mirror holds and the engine lacks are LEFT
+     * ALONE (the mirror may legitimately be ahead — a live spend marks
+     * rows spent here before the engine's map settles — and it also
+     * carries watch-only contact outputs the engine's own accounts never
+     * report). Spent-state repair is deliberately out of scope.
+     *
+     * [minConfirmations] (default 100): the engine snapshot cannot carry
+     * `isCoinbase`/`isInstantLocked`, so inserted rows get
+     * `isConfirmed=true` and both flags false — inert for any output at
+     * or beyond coinbase maturity, which the gate guarantees. Fresher
+     * holes age into a later sweep.
+     *
+     * Repairs `netAmount` alongside: a record born blind to one of its
+     * own outputs persisted `netAmount` short by exactly that output's
+     * value (verified against the job-flower dataset: -10.00010000
+     * stored vs -0.11000227 true for tx 6cef55ab…). The bump applies
+     * only when the transaction row pre-exists with real bytes — a stub
+     * row created by this very insert has nothing to repair.
+     *
+     * Must NOT be called from the handler's own [dispatcher] (it takes
+     * [callbackExclusion] and runs a Room transaction).
+     */
+    suspend fun reconcileTxos(
+        walletId: ByteArray,
+        engineUtxosJson: String,
+        tipHeight: Int,
+        minConfirmations: Int = 100,
+    ): TxoReconcileReport {
+        val root = kotlinx.serialization.json.Json
+            .parseToJsonElement(engineUtxosJson).jsonObject
+        val utxos = root["utxos"]?.jsonArray ?: kotlinx.serialization.json.JsonArray(emptyList())
+        val accountErrors = root["errors"]?.jsonArray?.size ?: 0
+        var inserted = 0
+        var insertedDuffs = 0L
+        var netAmountRepairs = 0
+        var skippedImmature = 0
+        var skippedNoAddress = 0
+        callbackExclusion.withLock {
+            database.withTransaction {
+                for (element in utxos) {
+                    val row = element.jsonObject
+                    val height = row["height"]?.jsonPrimitive?.int ?: 0
+                    if (height <= 0 || tipHeight - height + 1 < minConfirmations) {
+                        skippedImmature++
+                        continue
+                    }
+                    val address = row["address"]?.jsonPrimitive?.content.orEmpty()
+                    if (address.isEmpty()) {
+                        skippedNoAddress++
+                        continue
+                    }
+                    val txid = row["txid"]?.jsonPrimitive?.content.orEmpty().hexToByteArray()
+                    val vout = row["vout"]?.jsonPrimitive?.int ?: continue
+                    if (txid.size != 32) continue
+                    if (database.txoDao().getByOutpoint(makeOutpoint(txid, vout)) != null) {
+                        continue
+                    }
+                    val amount = row["amount"]?.jsonPrimitive?.long ?: 0L
+                    val scriptPubKey =
+                        row["scriptHex"]?.jsonPrimitive?.content.orEmpty().hexToByteArray()
+                    val isLocked = row["isLocked"]?.jsonPrimitive?.boolean ?: false
+                    // netAmount repair decision BEFORE the insert stubs a row.
+                    val priorTx = database.transactionDao().getByTxid(txid)
+                    upsertUtxoRow(
+                        database, walletId, txid, vout, amount, address, scriptPubKey,
+                        height,
+                        isCoinbase = false,
+                        isConfirmed = true,
+                        isInstantLocked = false,
+                        isLocked = isLocked,
+                    )
+                    inserted++
+                    insertedDuffs += amount
+                    if (priorTx != null && priorTx.transactionData.isNotEmpty()) {
+                        if (database.transactionDao().addToNetAmount(txid, amount) > 0) {
+                            netAmountRepairs++
+                        }
+                    }
+                }
+            }
+        }
+        val report = TxoReconcileReport(
+            engineUtxos = utxos.size,
+            inserted = inserted,
+            insertedDuffs = insertedDuffs,
+            netAmountRepairs = netAmountRepairs,
+            skippedImmature = skippedImmature,
+            skippedNoAddress = skippedNoAddress,
+            accountErrors = accountErrors,
+        )
+        if (inserted > 0 || accountErrors > 0) {
+            Log.w(
+                TAG,
+                "txos reconcile: healed $inserted missing TXO(s) ($insertedDuffs duffs), " +
+                    "$netAmountRepairs netAmount repair(s), engine=${report.engineUtxos} " +
+                    "skipped immature=$skippedImmature noAddress=$skippedNoAddress " +
+                    "accountErrors=$accountErrors — a non-zero heal after a completed " +
+                    "sync means a changeset dropped an owned output",
+            )
+        } else {
+            Log.i(TAG, "txos reconcile: mirror consistent (${utxos.size} engine UTXOs)")
+        }
+        return report
     }
 
     override fun onWalletChangesetUtxoSpent(
