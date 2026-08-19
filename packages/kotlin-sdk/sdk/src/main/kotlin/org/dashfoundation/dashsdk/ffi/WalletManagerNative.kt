@@ -129,6 +129,25 @@ internal object WalletManagerNative {
     external fun walletGetBalance(walletHandle: Long): LongArray
 
     /**
+     * The engine's full UTXO inventory for one wallet, every account, as
+     * JSON `{"utxos":[...],"errors":[...]}` — the source of truth the
+     * TXO-store reconciler ([PlatformWalletManager.reconcileTxoStore])
+     * diffs against the Room `txos` mirror. Each `utxos` row carries the
+     * owning account tags, the txid hex in the same byte order the
+     * changeset path hands [PlatformWalletPersistenceHandler] (so
+     * hex→bytes reproduces the `txos.txid` blob), vout, amount (duffs),
+     * derived address (empty when the script has no address form),
+     * scriptHex, height and isLocked. Per-account read failures land in
+     * `errors` instead of failing the sweep. `network` is
+     * [org.dashfoundation.dashsdk.Network.ffiValue].
+     */
+    external fun walletManagerAllUtxosJson(
+        managerHandle: Long,
+        walletId: ByteArray,
+        network: Int,
+    ): String?
+
+    /**
      * Widen an account's address-pool gap limit, generating the addresses
      * the wider limit now requires (capped Rust-side at MAX_GAP_LIMIT =
      * 1000). The compact-filter scan watches `last used index + gap`, so
