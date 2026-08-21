@@ -3278,7 +3278,7 @@ class PlatformWalletPersistenceHandlerTest {
 
         assertEquals(1, report.inserted)
         assertEquals(989_009_773L, report.insertedDuffs)
-        assertEquals(1, report.netAmountRepairs)
+        assertEquals(1, report.netAmountSuspects)
 
         val row = db.txoDao().getByOutpoint(makeOutpoint(changeTxid, 1))
         assertNotNull(row)
@@ -3286,10 +3286,12 @@ class PlatformWalletPersistenceHandlerTest {
         assertEquals(989_009_773L, row.amount)
         assertTrue(row.isConfirmed)
 
-        // -10.00010000 + 9.89009773 = -0.11000227 — history now matches
-        // what the engine (and dashj) report for this send.
+        // The stored netAmount is NOT mutated: the record may already carry
+        // the corrected net (a corrective callback racing this sweep), and
+        // blind addition double-credits. The suspicion is logged; the event
+        // pipeline owns net correctness.
         assertEquals(
-            -11_000_227L,
+            -1_000_010_000L,
             db.transactionDao().getByTxid(changeTxid)!!.netAmount,
         )
     }
@@ -3309,9 +3311,9 @@ class PlatformWalletPersistenceHandlerTest {
         val second = handler.reconcileTxos(walletId, json, tipHeight = reconcileTip)
 
         assertEquals(0, second.inserted)
-        assertEquals(0, second.netAmountRepairs)
+        assertEquals(0, second.netAmountSuspects)
         assertEquals(
-            -11_000_227L,
+            -1_000_010_000L,
             db.transactionDao().getByTxid(changeTxid)!!.netAmount,
         )
     }
@@ -3366,10 +3368,11 @@ class PlatformWalletPersistenceHandlerTest {
     }
 
     @Test
-    fun reconcileFlipsLostSpendRowToSpent() = runTest {
-        // A store row still marked unspent for a coin the engine knows was
-        // spent — the spend update never reached the store
-        // (dashpay/platform#4425).
+    fun reconcileLogsButNeverFlipsLostSpendRows() = runTest {
+        // A store row still marked unspent for a coin the engine records as
+        // spent (dashpay/platform#4425). The engine's spent set includes
+        // MEMPOOL spends and carries no context, so persisting the flip
+        // would settle an unconfirmed spend — counted and logged only.
         handler.onWalletChangesetUtxoAdded(
             walletId, changeTxid, 3, 500_000L, "yTestAddr", byteArrayOf(0x51), 1_400_000,
             false, true, false, false,
@@ -3379,22 +3382,19 @@ class PlatformWalletPersistenceHandlerTest {
             engineInventoryJson(unspent = emptyList(), spent = listOf(changeTxid.toHexLower() to 3)),
             tipHeight = reconcileTip,
         )
-        assertEquals(1, report.flippedSpent)
-        assertEquals(500_000L, report.flippedSpentDuffs)
+        assertEquals(1, report.wouldFlipSpent)
+        assertEquals(500_000L, report.wouldFlipSpentDuffs)
         assertEquals(0, report.wouldRemove)
         val row = db.txoDao().getByOutpoint(makeOutpoint(changeTxid, 3))!!
-        assertTrue(row.isSpent)
+        assertFalse("the row must stay unspent — the flip is log-only", row.isSpent)
         assertNull(row.spendingTxid)
-
-        // Idempotent: the row is spent now, the reverse pass only reads
-        // unspent rows.
-        val second = handler.reconcileTxos(
-            walletId,
-            engineInventoryJson(unspent = emptyList(), spent = listOf(changeTxid.toHexLower() to 3)),
-            tipHeight = reconcileTip,
-        )
-        assertEquals(0, second.flippedSpent)
     }
+
+    // NOTE (test lineage): the upstream #4439 review round also carries
+    // `reconcileDoesNotCountSweptRefusalsAsHeals`, which exercises the
+    // globally-swept tombstone refusal in upsertUtxoRow. That guard depends
+    // on #4406's tombstone infrastructure (TransactionEntity.isGloballySwept),
+    // absent on this gu2-based test lineage — test dropped alongside the guard.
 
     @Test
     fun reconcileLogsButNeverRemovesEngineUnknownRows() = runTest {
@@ -3412,7 +3412,7 @@ class PlatformWalletPersistenceHandlerTest {
         )
         assertEquals(1, report.wouldRemove)
         assertEquals(250_000L, report.wouldRemoveDuffs)
-        assertEquals(0, report.flippedSpent)
+        assertEquals(0, report.wouldFlipSpent)
         val row = db.txoDao().getByOutpoint(makeOutpoint(changeTxid, 4))!!
         assertFalse(row.isSpent)
         assertEquals(250_000L, row.amount)
@@ -3433,7 +3433,7 @@ class PlatformWalletPersistenceHandlerTest {
                 """"address":"yTestAddr","scriptHex":"51",""" +
                 """"height":${reconcileTip - 3},"isLocked":false}],"spent":[],"errors":[]}"""
         val report = handler.reconcileTxos(walletId, json, tipHeight = reconcileTip)
-        assertEquals(0, report.flippedSpent)
+        assertEquals(0, report.wouldFlipSpent)
         assertEquals(0, report.wouldRemove)
         assertEquals(1, report.skippedImmature)
         assertFalse(db.txoDao().getByOutpoint(makeOutpoint(changeTxid, 5))!!.isSpent)
@@ -3468,6 +3468,48 @@ class PlatformWalletPersistenceHandlerTest {
         assertEquals(1, report.skippedForeign)
         assertEquals(0, report.wouldRemove)
         assertFalse(db.txoDao().getByOutpoint(makeOutpoint(changeTxid, 6))!!.isSpent)
+    }
+
+    @Test
+    fun reconcileResolvesContactOwnershipThroughCoreAddressId() = runTest {
+        // Production changeset writes leave txos.accountId null and route
+        // ownership through coreAddressId -> core_addresses.accountId. The
+        // exclusion must resolve that path, or every contact row gets
+        // classified as divergence.
+        db.walletDao().upsert(WalletEntity(walletId, networkRaw = Network.TESTNET.ffiValue))
+        val foreignAccountId = db.accountDao().insert(
+            org.dashfoundation.dashsdk.persistence.entities.AccountEntity(
+                walletId = walletId,
+                accountType = PlatformWalletPersistenceHandler.ACCOUNT_TYPE_TAG_DASHPAY_EXTERNAL,
+                accountIndex = 1,
+                accountTypeName = "DashpayExternalAccount",
+            ),
+        )
+        db.coreAddressDao().upsert(
+            org.dashfoundation.dashsdk.persistence.entities.CoreAddressEntity(
+                address = "yContactRouted",
+                publicKey = ByteArray(33),
+                poolTypeTag = 0,
+                addressIndex = 0,
+                derivationPath = "m/9'/1'/15'/0'/x/y/0",
+                isUsed = true,
+                accountId = foreignAccountId,
+            ),
+        )
+        handler.onWalletChangesetUtxoAdded(
+            walletId, changeTxid, 8, 990_000L, "yContactRouted", byteArrayOf(0x51), 1_400_000,
+            false, true, false, false,
+        )
+        val seeded = db.txoDao().getByOutpoint(makeOutpoint(changeTxid, 8))!!
+        assertNull("production shape: accountId is null", seeded.accountId)
+
+        val report = handler.reconcileTxos(
+            walletId,
+            engineInventoryJson(unspent = emptyList(), spent = emptyList()),
+            tipHeight = reconcileTip,
+        )
+        assertEquals(1, report.skippedForeign)
+        assertEquals(0, report.wouldRemove)
     }
 
     @Test

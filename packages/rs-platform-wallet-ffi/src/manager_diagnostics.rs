@@ -652,11 +652,19 @@ pub unsafe extern "C" fn platform_wallet_account_spent_outpoints(
     if rows.is_empty() {
         return PlatformWalletFFIResult::ok();
     }
+    // NOTE (test lineage): the upstream #4439 branch converts via a
+    // `From<&OutPoint> for OutPointFFI` impl this gu2-based lineage does
+    // not carry — construct inline with the crate's canonical byte order
+    // (raw internal txid bytes, as in `UtxoEntryFFI` above).
     let entries: Vec<OutPointFFI> = rows
-        .into_iter()
-        .map(|op| OutPointFFI {
-            txid: txid_to_array(&op.txid),
-            vout: op.vout,
+        .iter()
+        .map(|op| {
+            let mut txid = [0u8; 32];
+            txid.copy_from_slice(op.txid.as_ref());
+            OutPointFFI {
+                txid,
+                vout: op.vout,
+            }
         })
         .collect();
     let count = entries.len();
