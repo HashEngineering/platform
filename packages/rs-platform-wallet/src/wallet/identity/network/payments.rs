@@ -18,6 +18,81 @@ use crate::wallet::platform_wallet::{PlatformWalletInfo, WalletId};
 // Incoming payment recording + reconcile
 // ---------------------------------------------------------------------------
 
+/// The DIP-15 §12.6 backfill trigger for ONE established receival contact:
+/// if the contact's funding height lies below the wallet's SPV filter-scan
+/// checkpoint, lower `synced_height` to it so the filter manager re-matches
+/// the already-scanned range against the now-larger script set. Shared by
+/// the recurring sweep ([`DashPayView::reconcile_dashpay_rescan`]) and by
+/// registration time ([`DashPayView::register_contact_account`]), so a
+/// receival account entering the watch set can never depend on a later
+/// sweep pass for its historical payments (dashpay/platform#4475).
+///
+/// The funding height is `min(outgoing, incoming)` of the pair's
+/// `$createdAtCoreBlockHeight`: the channel is payable only once both
+/// requests exist, so the earlier of the two is the conservative-correct
+/// lower bound.
+///
+/// Marks the contact in
+/// [`DashPayState::rescan_triggered`](crate::wallet::identity::state::managed_identity::dashpay::DashPayState::rescan_triggered)
+/// whether or not the height moved — a contact funded at or after the tip is
+/// forward-covered from establishment, and the mark keeps a later pass from
+/// redundantly rewinding to an already-scanned range once the forward
+/// pointer climbs past its funding height. Returns the height the
+/// checkpoint was lowered to, or `None`.
+///
+/// No-op (nothing marked) when: the wallet is still on a full historical
+/// scan (`synced_height == 0`), the contact was already handled this
+/// lifetime, or no established contact exists yet for the pair (the sweep
+/// retries once establishment lands).
+pub(super) fn trigger_contact_backfill_rescan(
+    info: &mut PlatformWalletInfo,
+    owner: &Identifier,
+    contact: &Identifier,
+) -> Option<u32> {
+    use key_wallet::wallet::managed_wallet_info::wallet_info_interface::WalletInfoInterface;
+
+    let synced_height = info.core_wallet.synced_height();
+    // 0 means "scan from genesis / not yet started" — already a full
+    // historical scan, nothing to backfill toward.
+    if synced_height == 0 {
+        return None;
+    }
+
+    let funding = {
+        let managed = info.identity_manager.managed_identity(owner)?;
+        if managed.dashpay().rescan_triggered.contains(contact) {
+            return None;
+        }
+        let established = managed.dashpay().established_contacts().get(contact)?;
+        established
+            .outgoing_request
+            .core_height_created_at
+            .min(established.incoming_request.core_height_created_at)
+    };
+
+    // Lower the filter-scan checkpoint only when the contact is funded below
+    // the tip (otherwise it is forward-covered and we record the guard
+    // without rewinding). `synced_height` may regress here: it is the
+    // filter-scan checkpoint, decoupled from the monotonic
+    // `last_processed_height`, and every persisted sync cursor is
+    // monotonic-max guarded. The engine clamps the floor to its own
+    // header/birth floor, so no double-clamp here.
+    let lowered = (funding < synced_height).then_some(funding);
+    if let Some(floor) = lowered {
+        info.core_wallet.update_synced_height(floor);
+        tracing::info!(
+            owner = %owner,
+            contact = %contact,
+            floor,
+            "DashPay rescan: lowered SPV synced_height to backfill historical contact payments"
+        );
+    }
+    if let Some(managed) = info.identity_manager.managed_identity_mut(owner) {
+        managed.dashpay_rescan_triggered_mut().insert(*contact);
+    }
+    lowered
+}
+
 impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
     /// Derive missing `Received` [`PaymentEntry`]s from the wallet's
     /// `DashpayReceivingFunds` accounts' UTXO sets.
@@ -101,8 +176,6 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
     /// is outbound and never receives. Returns the floor the height was lowered
     /// to, or `None`.
     pub async fn reconcile_dashpay_rescan(&self) -> Result<Option<u32>, PlatformWalletError> {
-        use key_wallet::wallet::managed_wallet_info::wallet_info_interface::WalletInfoInterface;
-
         let mut wm = self.wallet_manager.write().await;
         let Some(info) = wm.get_wallet_info_mut(&self.wallet_id) else {
             return Ok(None);
@@ -180,66 +253,18 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
             .collect();
 
         // Candidates: established receival contacts not yet rescanned this
-        // lifetime whose funding height is below our scan tip. The floor is the
-        // minimum funding height — one rewind covers them all (deeper-funded
-        // contacts are in the watch set, so the backfill matches them too). The
-        // funding height is `min(outgoing, incoming)` of the pair: the channel
-        // is payable only once both requests exist, so the earlier of the two is
-        // the conservative-correct lower bound.
+        // lifetime whose funding height is below our scan tip. Applying the
+        // per-contact trigger sequentially converges on the minimum funding
+        // height across candidates — each rewind lowers the bar the next
+        // comparison runs against — so one pass covers them all
+        // (deeper-funded contacts are in the watch set, so the backfill
+        // matches them too). See [`trigger_contact_backfill_rescan`] for the
+        // per-contact contract (funding floor, forward-covered marking).
         let mut floor: Option<u32> = None;
-        let mut to_mark: Vec<(Identifier, Identifier)> = Vec::new();
         for (owner, contact) in receival_pairs {
-            let Some(managed) = info.identity_manager.managed_identity(&owner) else {
-                continue;
-            };
-            if managed.dashpay().rescan_triggered.contains(&contact) {
-                continue;
+            if let Some(lowered) = trigger_contact_backfill_rescan(info, &owner, &contact) {
+                floor = Some(floor.map_or(lowered, |cur| cur.min(lowered)));
             }
-            let Some(established) = managed.dashpay().established_contacts().get(&contact) else {
-                continue;
-            };
-            let funding = established
-                .outgoing_request
-                .core_height_created_at
-                .min(established.incoming_request.core_height_created_at);
-            // Contacts funded below the tip need a backfill — their addresses
-            // weren't watched when those blocks were first scanned. Contacts
-            // funded at or after the tip are already covered by the ongoing
-            // forward scan (their addresses are watched from establishment).
-            // EITHER way the contact is now handled, so mark it: once the
-            // forward pointer later climbs past a still-forward-covered
-            // contact's funding height, the recurring sweep must NOT then
-            // rewind to it and redundantly re-scan an already-scanned range.
-            if funding < synced_height {
-                floor = Some(floor.map_or(funding, |cur| cur.min(funding)));
-            }
-            to_mark.push((owner, contact));
-        }
-
-        if to_mark.is_empty() {
-            return Ok(None);
-        }
-
-        // Lower the filter-scan checkpoint only when a contact is funded below
-        // the tip (otherwise every handled contact is forward-covered and we
-        // record the guard without rewinding). The engine clamps `floor` to its
-        // own header/birth floor, so no double-clamp here.
-        if let Some(floor) = floor {
-            info.core_wallet.update_synced_height(floor);
-        }
-        let triggered = to_mark.len();
-        for (owner, contact) in to_mark {
-            if let Some(managed) = info.identity_manager.managed_identity_mut(&owner) {
-                managed.dashpay_rescan_triggered_mut().insert(contact);
-            }
-        }
-        if let Some(floor) = floor {
-            tracing::info!(
-                wallet_id = %hex::encode(self.wallet_id),
-                floor,
-                contacts = triggered,
-                "DashPay rescan: lowered SPV synced_height to backfill historical contact payments"
-            );
         }
         Ok(floor)
     }
@@ -2867,6 +2892,86 @@ mod tests {
                     .synced_height(),
                 100,
                 "height stays at the floor after the no-op pass"
+            );
+        }
+    }
+
+    /// dashpay/platform#4475: when the established contact is already on
+    /// record at registration time — the restore-from-seed / signer-drain
+    /// shape, where contacts land from Platform sync before the receival
+    /// accounts are rebuilt — `register_contact_account` itself must lower
+    /// `synced_height` to the contact's funding floor. Waiting for the
+    /// recurring sweep's `reconcile_dashpay_rescan` made the backfill depend
+    /// on host sweep ordering: a host that runs the sweep before its
+    /// contact-crypto drain (or suppresses later sweeps) permanently missed
+    /// it. The sweep then sees the contact's guard already set and no-ops
+    /// instead of re-lowering (no backfill thrash).
+    #[tokio::test]
+    async fn registration_lowers_synced_height_when_contact_predates_scan_tip() {
+        use crate::wallet::identity::{ContactRequest, EstablishedContact};
+        use key_wallet::wallet::managed_wallet_info::wallet_info_interface::WalletInfoInterface;
+
+        let (manager, persister, wallet_id) = make_wallet().await;
+        let owner = Identifier::from([0xAA; 32]);
+        let contact = Identifier::from([0xBB; 32]);
+        let wallet = manager.get_wallet(&wallet_id).await.expect("wallet");
+        let iw = wallet.identity();
+        let p = WalletPersister::new(wallet_id, Arc::clone(&persister) as _);
+
+        // Establish the contact BEFORE any receival account exists, with the
+        // wallet already synced far past the pair's funding heights.
+        {
+            let mut wm = iw.wallet_manager.write().await;
+            let info = wm.get_wallet_info_mut(&wallet_id).expect("info");
+            info.identity_manager
+                .add_identity(bare_identity([0xAA; 32]), 0, wallet_id, &p)
+                .expect("add owner");
+            // outgoing funded at 200, incoming at 100 -> floor 100.
+            let outgoing = ContactRequest::new(owner, contact, 0, 0, 0, vec![0u8; 96], 200, 0);
+            let incoming = ContactRequest::new(contact, owner, 0, 0, 0, vec![0u8; 96], 100, 0);
+            info.identity_manager
+                .managed_identity_mut(&owner)
+                .expect("managed")
+                .apply_established_contact(EstablishedContact::new(contact, outgoing, incoming));
+            info.core_wallet.update_synced_height(1000);
+        }
+
+        // Registration alone — no reconcile pass — must trigger the backfill.
+        iw.dashpay()
+            .register_contact_account(&owner, &contact, 0, test_receiving_xpub(&owner, &contact))
+            .await
+            .expect("register receival account");
+        {
+            let wm = iw.wallet_manager.read().await;
+            assert_eq!(
+                wm.get_wallet_info(&wallet_id)
+                    .unwrap()
+                    .core_wallet
+                    .synced_height(),
+                100,
+                "registration must lower synced_height to min(outgoing, incoming) funding"
+            );
+        }
+
+        // The recurring sweep sees the guard registration set and must not
+        // re-lower (that would reset an in-flight backfill).
+        assert_eq!(
+            iw.dashpay()
+                .reconcile_dashpay_rescan()
+                .await
+                .expect("rescan"),
+            None,
+            "sweep after a registration-time trigger must be a no-op"
+        );
+        {
+            let wm = iw.wallet_manager.read().await;
+            assert_eq!(
+                wm.get_wallet_info(&wallet_id)
+                    .unwrap()
+                    .core_wallet
+                    .synced_height(),
+                100,
+                "height stays at the floor after the no-op sweep"
             );
         }
     }
