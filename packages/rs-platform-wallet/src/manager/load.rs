@@ -132,6 +132,35 @@ impl<P: PlatformWalletPersistence + 'static> PlatformWalletManager<P> {
                 &platform_info,
             );
 
+            // A restored store whose managed collection tracks BIP44 funds
+            // but no CoinJoin chain predates the creation-time CoinJoin
+            // ownership guarantee (dashpay/platform#4474): its deep scan
+            // attributed CoinJoin-chain change as foreign, so CoinJoin-funded
+            // sends carry gross nets and unspent CoinJoin change is missing
+            // from the balance. The persisted wallet is external-signable
+            // here, so the SDK cannot derive the missing account itself —
+            // surface the gap for the host, whose account registration (with
+            // its checkpoint rewind) triggers the rescan that heals the
+            // born-wrong records through the normal correction callbacks.
+            if !platform_info
+                .core_wallet
+                .accounts
+                .standard_bip44_accounts
+                .is_empty()
+                && platform_info
+                    .core_wallet
+                    .accounts
+                    .coinjoin_accounts
+                    .is_empty()
+            {
+                tracing::warn!(
+                    wallet_id = %hex::encode(expected_wallet_id),
+                    "restored wallet tracks BIP44 funds but no CoinJoin derivation chain; \
+                     CoinJoin-funded history will misattribute change until the host \
+                     registers the CoinJoin account (dashpay/platform#4474)"
+                );
+            }
+
             if wallet_id != expected_wallet_id {
                 load_error = Some(PlatformWalletError::WalletCreation(format!(
                     "Persisted wallet id {} does not match recomputed id {}",
