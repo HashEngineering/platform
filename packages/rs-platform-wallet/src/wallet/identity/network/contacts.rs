@@ -149,6 +149,14 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
     /// so the SPV adapter monitors incoming payments from this contact.
     /// Call this when a contact is established (mutual requests exist).
     ///
+    /// When the pair's established contact is on record, registration also
+    /// triggers the DIP-15 §12.6 backfill: the SPV filter-scan checkpoint is
+    /// lowered to the contact's funding height so payments received before
+    /// this account existed (restore-from-seed, second device, the
+    /// offline-accept→pay window) are recovered without waiting for the
+    /// recurring sweep (dashpay/platform#4475). See
+    /// [`trigger_contact_backfill_rescan`](super::payments::trigger_contact_backfill_rescan).
+    ///
     /// No-op if the account already exists for this contact relationship.
     pub async fn register_contact_account(
         &self,
@@ -247,6 +255,23 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
                     "Failed to register contact account: {e}"
                 ))
             })?;
+
+        // DIP-15 §12.6: the insert above bypasses key-wallet's
+        // `rewind_sync_checkpoint_for_new_account`, so the new account's
+        // addresses would otherwise enter the compact-filter match set
+        // forward-only — a payment in an already-scanned block is silently
+        // missed until the recurring sweep's `reconcile_dashpay_rescan`
+        // happens to run AFTER this registration. Trigger the backfill here
+        // instead, at the moment the account enters the watch set, so
+        // recovery never depends on host sweep ordering
+        // (dashpay/platform#4475). Same floor logic and same
+        // `rescan_triggered` guard as the sweep, so the two paths compose:
+        // whichever runs first handles the contact, the other no-ops.
+        super::payments::trigger_contact_backfill_rescan(
+            info,
+            our_identity_id,
+            contact_identity_id,
+        );
 
         tracing::info!(
             our_identity = %our_identity_id,
