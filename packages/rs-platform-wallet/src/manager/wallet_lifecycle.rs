@@ -206,6 +206,39 @@ impl<P: PlatformWalletPersistence + 'static> PlatformWalletManager<P> {
             }
         };
 
+        // A wallet with standard funds accounts must also OWN its CoinJoin
+        // derivation chains from birth (dashpay/platform#4474): a
+        // restore-from-seed whose account-creation options omit CoinJoin
+        // attributes CoinJoin-chain change as foreign during the deep scan,
+        // so a CoinJoin-funded send is born with net = −(sum of inputs)
+        // instead of −(payment + fee), and unspent CoinJoin change is
+        // dropped from the balance. Mirror every BIP44 index into a CoinJoin
+        // account here — while the wallet is still seed-bearing (the
+        // downgrade below strips the derivation key) and BEFORE
+        // `ManagedWalletInfo::from_wallet` builds the managed collection, so
+        // the new accounts ride the initial birth-floor scan checkpoint,
+        // the address-pool snapshot, and the persisted account
+        // registrations with no separate rewind. Deliberate no-op for
+        // account-less creations (`WalletAccountCreationOptions::None`):
+        // no funds accounts, nothing to misattribute.
+        let missing_coinjoin: Vec<u32> = wallet
+            .accounts
+            .standard_bip44_accounts
+            .keys()
+            .filter(|index| !wallet.accounts.coinjoin_accounts.contains_key(index))
+            .copied()
+            .collect();
+        for index in missing_coinjoin {
+            wallet
+                .add_account(key_wallet::account::AccountType::CoinJoin { index }, None)
+                .map_err(|e| {
+                    PlatformWalletError::WalletCreation(format!(
+                        "Failed to create CoinJoin account {index} mirroring BIP44 account \
+                         {index}: {e}"
+                    ))
+                })?;
+        }
+
         // `mut` so the platform-node (Ed25519) pool can be populated in
         // place below, BEFORE the address-pool snapshot is taken.
         let mut wallet_info = ManagedWalletInfo::from_wallet(&wallet, birth_height);
@@ -1317,6 +1350,292 @@ mod remove_versus_recreate_tests {
                 .await,
             "the removal's id-keyed unregister deleted the identity-sync row the recreated \
              generation registered mid-removal"
+        );
+    }
+}
+
+/// dashpay/platform#4474: the restore path must OWN the CoinJoin derivation
+/// chains without host help. A restore-from-seed whose account-creation
+/// options omit CoinJoin used to attribute CoinJoin-chain change as foreign
+/// during the deep scan: a CoinJoin-funded send was born with
+/// net = −(sum of inputs) instead of −(payment + fee), and unspent CoinJoin
+/// change was missing from the balance. `register_wallet` now mirrors every
+/// BIP44 index into a CoinJoin account while the wallet is still
+/// seed-bearing, so the chains ride the initial birth-floor scan checkpoint
+/// and the persisted account registrations.
+#[cfg(test)]
+mod coinjoin_ownership_tests {
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    use dashcore::hashes::Hash;
+    use dashcore::{BlockHash, OutPoint, ScriptBuf, TxIn, TxOut, Witness};
+    use key_wallet::mnemonic::{Language, Mnemonic};
+    use key_wallet::transaction_checking::{
+        BlockInfo, TransactionContext, WalletTransactionChecker,
+    };
+    use key_wallet::wallet::initialization::WalletAccountCreationOptions;
+    use key_wallet::wallet::managed_wallet_info::wallet_info_interface::WalletInfoInterface;
+    use key_wallet::Network;
+
+    use crate::events::{EventHandler, PlatformEventHandler};
+    use crate::test_support::NoopTestPersister;
+    use crate::PlatformWalletManager;
+
+    // Canonical all-`abandon` BIP-39 test vector.
+    const TEST_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon \
+         abandon abandon abandon abandon abandon about";
+
+    struct NoopEventHandler;
+    impl EventHandler for NoopEventHandler {}
+    impl PlatformEventHandler for NoopEventHandler {}
+
+    fn make_manager() -> Arc<PlatformWalletManager<NoopTestPersister>> {
+        let sdk = Arc::new(dash_sdk::SdkBuilder::new_mock().build().expect("mock sdk"));
+        let event_handler: Arc<dyn PlatformEventHandler> = Arc::new(NoopEventHandler);
+        Arc::new(PlatformWalletManager::new(
+            sdk,
+            Arc::new(NoopTestPersister),
+            event_handler,
+        ))
+    }
+
+    fn test_seed() -> [u8; 64] {
+        Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+            .expect("valid test mnemonic")
+            .to_seed("")
+    }
+
+    /// Host options that omit CoinJoin (the Android/iOS restore shape that
+    /// previously needed host-side account registration) must still yield a
+    /// CoinJoin account per BIP44 index — in the wallet's account
+    /// collection AND the managed watch set — covered by the birth-floor
+    /// scan checkpoint from block one of the wallet's life.
+    #[tokio::test]
+    async fn restore_without_coinjoin_options_still_owns_coinjoin_chains() {
+        let manager = make_manager();
+        let wallet = manager
+            .create_wallet_from_seed_bytes(
+                Network::Testnet,
+                &test_seed(),
+                WalletAccountCreationOptions::BIP44AccountsOnly(BTreeSet::from([0u32, 1u32])),
+                Some(5_000),
+            )
+            .await
+            .expect("create restored wallet");
+        let wallet_id = wallet.wallet_id();
+
+        let wm = manager.wallet_manager.read().await;
+        let w = wm.get_wallet(&wallet_id).expect("wallet");
+        let info = wm.get_wallet_info(&wallet_id).expect("wallet info");
+        for index in [0u32, 1] {
+            assert!(
+                w.accounts.coinjoin_accounts.contains_key(&index),
+                "BIP44 account {index} must be mirrored by CoinJoin account {index} \
+                 in the wallet's account collection"
+            );
+            assert!(
+                info.core_wallet
+                    .accounts
+                    .coinjoin_accounts
+                    .contains_key(&index),
+                "CoinJoin account {index} must be in the managed watch set"
+            );
+        }
+        // The checkpoint sits at the birth floor, so no filter range above
+        // it is certified as scanned without the CoinJoin scripts — the
+        // "enter the watch set with a checkpoint rewind" guarantee, held
+        // maximally because the accounts predate the first scan.
+        assert_eq!(
+            info.core_wallet.synced_height(),
+            4_999,
+            "the CoinJoin chains must be covered from the wallet's birth floor"
+        );
+    }
+
+    /// `WalletAccountCreationOptions::None` is a deliberate "no accounts"
+    /// request (tests, staged host setups) — the mirror must not conjure
+    /// CoinJoin accounts for a wallet with no funds accounts to mirror.
+    #[tokio::test]
+    async fn accountless_creation_stays_accountless() {
+        let manager = make_manager();
+        let wallet = manager
+            .create_wallet_from_seed_bytes(
+                Network::Testnet,
+                &test_seed(),
+                WalletAccountCreationOptions::None,
+                Some(0),
+            )
+            .await
+            .expect("create accountless wallet");
+        let wallet_id = wallet.wallet_id();
+
+        let wm = manager.wallet_manager.read().await;
+        let w = wm.get_wallet(&wallet_id).expect("wallet");
+        assert!(
+            w.accounts.coinjoin_accounts.is_empty(),
+            "no BIP44 accounts -> nothing to mirror"
+        );
+    }
+
+    /// #4474 acceptance 1 + 2, composed: on a restored wallet (options
+    /// without CoinJoin), a send funded by a CoinJoin-chain coin whose
+    /// change returns to the CoinJoin chain must net to −(payment + fee) —
+    /// NOT the gross −(sum of inputs) the ownership gap produced — and the
+    /// unspent change must be tracked (in balance). Born-wrong records in
+    /// pre-fix stores heal through this same attribution when the rescan
+    /// re-delivers the transaction via the normal correction callbacks
+    /// (rust-dashcore#979); no store-side net arithmetic is involved.
+    #[tokio::test]
+    async fn restored_coinjoin_funded_send_nets_to_payment_plus_fee() {
+        use key_wallet::managed_account::managed_account_trait::ManagedAccountTrait;
+
+        let manager = make_manager();
+        let wallet = manager
+            .create_wallet_from_seed_bytes(
+                Network::Testnet,
+                &test_seed(),
+                WalletAccountCreationOptions::BIP44AccountsOnly(BTreeSet::from([0u32])),
+                Some(0),
+            )
+            .await
+            .expect("create restored wallet");
+        let wallet_id = wallet.wallet_id();
+
+        let mut wm = manager.wallet_manager.write().await;
+        let (w, info) = wm
+            .get_wallet_mut_and_info_mut(&wallet_id)
+            .expect("wallet + info");
+
+        let cj_xpub = w
+            .accounts
+            .coinjoin_accounts
+            .get(&0)
+            .expect("mirrored CoinJoin account 0")
+            .account_xpub;
+        // CoinJoin is a non-standard account type: addresses come from the
+        // single pool via `next_address_with_info`, not a receive/change
+        // split.
+        let (fund_addr, change_addr) = {
+            let acct = info
+                .core_wallet
+                .accounts
+                .coinjoin_accounts
+                .get_mut(&0)
+                .expect("managed CoinJoin account 0");
+            let fund = acct
+                .next_address_with_info(Some(&cj_xpub), true)
+                .expect("funding address")
+                .address;
+            let change = acct
+                .next_address_with_info(Some(&cj_xpub), true)
+                .expect("change address")
+                .address;
+            (fund, change)
+        };
+
+        // Historical funding: a denominated coin lands on the CoinJoin chain.
+        let funding = dashcore::Transaction::dummy(&fund_addr, 0..1, &[10_000_000]);
+        let result = info
+            .core_wallet
+            .check_core_transaction(
+                &funding,
+                TransactionContext::InChainLockedBlock(BlockInfo::new(
+                    1,
+                    BlockHash::all_zeros(),
+                    1_700_000_000,
+                )),
+                w,
+                true,
+                true,
+            )
+            .await;
+        assert!(
+            result.is_relevant,
+            "the CoinJoin funding must be attributed (the chain is owned)"
+        );
+
+        // The send: pays a foreign address, change back to the CoinJoin
+        // chain, 100k duffs fee.
+        let payment_addr = dashcore::Address::dummy(Network::Testnet, 99);
+        let spend = dashcore::Transaction {
+            version: 1,
+            lock_time: 0,
+            input: vec![TxIn {
+                previous_output: OutPoint::new(funding.txid(), 0),
+                script_sig: ScriptBuf::new(),
+                sequence: 0xffffffff,
+                witness: Witness::new(),
+            }],
+            output: vec![
+                TxOut {
+                    value: 3_400_000,
+                    script_pubkey: payment_addr.script_pubkey(),
+                },
+                TxOut {
+                    value: 6_500_000,
+                    script_pubkey: change_addr.script_pubkey(),
+                },
+            ],
+            special_transaction_payload: None,
+        };
+        let result = info
+            .core_wallet
+            .check_core_transaction(
+                &spend,
+                TransactionContext::InChainLockedBlock(BlockInfo::new(
+                    2,
+                    BlockHash::all_zeros(),
+                    1_700_000_100,
+                )),
+                w,
+                true,
+                true,
+            )
+            .await;
+        assert!(result.is_relevant, "the CoinJoin-funded send must match");
+
+        // The born record — what the host receives through the normal
+        // callbacks and persists. (Chain-locked records are not retained on
+        // the account without `keep-finalized-transactions`, so assert on
+        // the emitted record itself: this is exactly the record #4474's
+        // gross-net bug was born into.)
+        let record = result
+            .new_records
+            .iter()
+            .find(|r| {
+                r.txid == spend.txid()
+                    && matches!(
+                        r.account_type,
+                        key_wallet::account::AccountType::CoinJoin { index: 0 }
+                    )
+            })
+            .expect("send record born on the CoinJoin account");
+        assert_eq!(
+            record.net_amount,
+            -(3_400_000i64 + 100_000),
+            "the send must net to -(payment + fee); -(sum of inputs) means \
+             the CoinJoin change was attributed foreign (#4474)"
+        );
+
+        let acct = info
+            .core_wallet
+            .accounts
+            .coinjoin_accounts
+            .get(&0)
+            .expect("managed CoinJoin account 0");
+        assert!(
+            acct.utxos
+                .values()
+                .any(|u| u.outpoint.txid == spend.txid() && u.txout.value == 6_500_000),
+            "the unspent CoinJoin change must be tracked (in balance)"
+        );
+        assert!(
+            !acct
+                .utxos
+                .values()
+                .any(|u| u.outpoint.txid == funding.txid()),
+            "the spent funding coin must have left the UTXO set"
         );
     }
 }
