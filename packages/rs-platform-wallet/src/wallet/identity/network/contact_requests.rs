@@ -1547,9 +1547,10 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
                 }
 
                 // (3) Collect account-building candidates: every established
-                //     contact missing a sending (external) account, skipping
-                //     contacts whose payment channel is already marked
-                //     permanently broken (no unbounded retry).
+                //     contact missing its sending (external) account OR its
+                //     receiving (receival) account, skipping contacts whose
+                //     payment channel is already marked permanently broken
+                //     (no unbounded retry).
                 Self::collect_account_build_candidates(info, &identity_id)
             };
 
@@ -1752,10 +1753,24 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
     }
 
     /// Collect every established contact (for `identity_id`) that is
-    /// missing its `DashpayExternalAccount` and is NOT already marked
-    /// permanently broken — the account-building candidates for this
-    /// sweep. Runs under the caller's write guard; performs no
-    /// awaits and no lock re-acquisition.
+    /// missing its `DashpayExternalAccount` OR its `DashpayReceivingFunds`
+    /// account and is NOT already marked permanently broken — the
+    /// account-building candidates for this sweep. Runs under the caller's
+    /// write guard; performs no awaits and no lock re-acquisition.
+    ///
+    /// BOTH collections must be checked. The pending contact-crypto queue
+    /// is deliberately not restored on cold load, so this gate is the only
+    /// path that re-enqueues a contact's deferred account builds across
+    /// launches. Gating on the external account alone permanently skipped
+    /// any contact whose `RegisterExternal` succeeded but whose
+    /// `RegisterReceiving` failed once (drain budget exhausted, locked
+    /// signer, process death mid-drain): the external row round-trips
+    /// persistence, so every later sweep saw it and never rebuilt the
+    /// receival account — that contact's receiving chain was never watched
+    /// again, and no rescan depth could recover its payments
+    /// (dashpay/platform#4475). Re-enqueuing both ops for a
+    /// partially-built contact is safe: each register call no-ops on an
+    /// account that already exists.
     fn collect_account_build_candidates(
         info: &crate::wallet::platform_wallet::PlatformWalletInfo,
         identity_id: &Identifier,
@@ -1783,7 +1798,12 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
                 .accounts
                 .dashpay_external_accounts
                 .contains_key(&key);
-            if has_external {
+            let has_receival = info
+                .core_wallet
+                .accounts
+                .dashpay_receival_accounts
+                .contains_key(&key);
+            if has_external && has_receival {
                 continue;
             }
             // The incoming request carries the counterparty's encrypted
@@ -4100,6 +4120,94 @@ mod sweep_tests {
         // incoming request: sender=contact key_index 1, recipient(us) key_index 2
         assert_eq!(c.contact_encryption_key_index, 1);
         assert_eq!(c.our_decryption_key_index, 2);
+    }
+
+    /// Insert a DashPay account row for the given type directly into the
+    /// managed collection, bypassing the register APIs — the persisted-row
+    /// shape a cold load rebuilds. The xpub is an arbitrary valid one
+    /// derived from the (seed-bearing) test wallet; only the row's presence
+    /// matters to the gate under test.
+    fn insert_dashpay_account(
+        wallet: &Wallet,
+        info: &mut PlatformWalletInfo,
+        account_type: key_wallet::account::AccountType,
+    ) {
+        use key_wallet::account::account_type::StandardAccountType;
+        use key_wallet::managed_account::ManagedCoreFundsAccount;
+
+        let path = key_wallet::account::AccountType::Standard {
+            index: 0,
+            standard_account_type: StandardAccountType::BIP44Account,
+        }
+        .derivation_path(Network::Testnet)
+        .expect("bip44 path");
+        let xpub = wallet
+            .derive_extended_public_key(&path)
+            .expect("derive xpub");
+        let account =
+            key_wallet::Account::new(None, account_type, xpub, Network::Testnet).expect("account");
+        info.core_wallet
+            .accounts
+            .insert_funds_bearing_account(ManagedCoreFundsAccount::from_account(&account))
+            .expect("insert account");
+    }
+
+    /// **dashpay/platform#4475 (permanent-skip bug):** the re-enqueue gate
+    /// must list a contact whose receival account is missing even when its
+    /// EXTERNAL account row exists. The external row round-trips
+    /// persistence while the pending contact-crypto queue deliberately does
+    /// not, so gating on the external account alone permanently skipped any
+    /// contact whose `RegisterExternal` succeeded but whose
+    /// `RegisterReceiving` failed once (drain budget exhausted, locked
+    /// signer, process death mid-drain) — that contact's receiving chain
+    /// was never watched again on any later launch.
+    #[test]
+    fn contact_with_external_but_no_receival_account_is_still_a_candidate() {
+        let our = 1u8;
+        let contact = 2u8;
+        let our_id = Identifier::from([our; 32]);
+        let contact_id = Identifier::from([contact; 32]);
+        let (wallet, mut info) = info_with_established_contact(our, contact);
+
+        // External account built + persisted; the receival build died before
+        // completing and the queue did not survive the relaunch.
+        insert_dashpay_account(
+            &wallet,
+            &mut info,
+            key_wallet::account::AccountType::DashpayExternalAccount {
+                index: 0,
+                user_identity_id: our_id.to_buffer(),
+                friend_identity_id: contact_id.to_buffer(),
+            },
+        );
+
+        let candidates =
+            DashPayView::<SpvBroadcaster>::collect_account_build_candidates(&info, &our_id);
+        assert_eq!(
+            candidates.len(),
+            1,
+            "a contact missing its receival account must be re-enqueued even \
+             though the external account exists"
+        );
+        assert_eq!(candidates[0].contact_id, contact_id);
+
+        // Once the receival account exists too, the contact is fully built
+        // and drops out of the candidate set (no idle churn).
+        insert_dashpay_account(
+            &wallet,
+            &mut info,
+            key_wallet::account::AccountType::DashpayReceivingFunds {
+                index: 0,
+                user_identity_id: our_id.to_buffer(),
+                friend_identity_id: contact_id.to_buffer(),
+            },
+        );
+        let candidates =
+            DashPayView::<SpvBroadcaster>::collect_account_build_candidates(&info, &our_id);
+        assert!(
+            candidates.is_empty(),
+            "a fully-built contact must not be re-listed"
+        );
     }
 
     /// **Test 4 (permanent failure → no retry):** once a contact's payment
