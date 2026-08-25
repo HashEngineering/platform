@@ -941,6 +941,16 @@ class PlatformWalletPersistenceHandler(
         isConfirmed: Boolean,
         isInstantLocked: Boolean,
         isLocked: Boolean,
+        // The Room account this output belongs to, when the CALLER could
+        // resolve it (the reconcile resolves it from the engine inventory's
+        // account tags). Stamped on the row so ownership survives even when
+        // the address projection is absent — a heal into a store that lost
+        // BOTH the TXO and its address row must not produce a row the
+        // restore loader cannot attribute (it would be skipped at the next
+        // mirror-reload, recreating the fund loss the heal repaired). An
+        // existing row's accountId always wins; changeset callbacks pass
+        // null and keep their address-projection behavior.
+        resolvedAccountId: Long? = null,
     ): Boolean {
         val outpoint = makeOutpoint(txid, vout)
         // NOTE (test lineage): the upstream #4439 review round also adds a
@@ -974,7 +984,7 @@ class PlatformWalletPersistenceHandler(
             txid = txid,
             spendingTxid = existing?.spendingTxid,
             spendingInputIndex = existing?.spendingInputIndex,
-            accountId = existing?.accountId,
+            accountId = existing?.accountId ?: resolvedAccountId,
             coreAddressId = existing?.coreAddressId ?: coreAddressIdIfPresent(db, coreAddressId),
             createdAt = existing?.createdAt ?: java.util.Date(),
             lastUpdated = now(),
@@ -1015,6 +1025,11 @@ class PlatformWalletPersistenceHandler(
          *  blind addition double-credits. The event pipeline owns net
          *  correctness. */
         val netAmountSuspects: Int,
+        /** Healed rows whose owning Room account could not be resolved from
+         *  the inventory's account tuple — ownership rides on the address
+         *  projection alone, and if that row is also missing the healed TXO
+         *  will not survive the next mirror-reload. */
+        val healedUnowned: Int = 0,
         val skippedImmature: Int,
         val skippedNoAddress: Int,
         val accountErrors: Int,
@@ -1106,6 +1121,7 @@ class PlatformWalletPersistenceHandler(
         var wouldRemove = 0
         var wouldRemoveDuffs = 0L
         var skippedForeign = 0
+        var healedUnowned = 0
         var stuckSpent = 0
         var stuckSpentDuffs = 0L
         // Outpoint keys of BOTH engine inventories, for the reverse pass.
@@ -1166,7 +1182,14 @@ class PlatformWalletPersistenceHandler(
                         skippedNoAddress++
                         continue
                     }
-                    if (addressIsForeign(address)) {
+                    // The inventory tags every UTXO with its owning account
+                    // tuple. The tag is the authoritative foreign check — a
+                    // watch-only external account's coin is the CONTACT's
+                    // money whether or not its address row survived
+                    // persistence. The address-based check stays as a
+                    // fallback for inventories predating the tagged export.
+                    val typeTag = row["typeTag"]?.jsonPrimitive?.int ?: -1
+                    if (typeTag == ACCOUNT_TYPE_TAG_DASHPAY_EXTERNAL || addressIsForeign(address)) {
                         skippedForeign++
                         continue
                     }
@@ -1180,6 +1203,42 @@ class PlatformWalletPersistenceHandler(
                     val scriptPubKey =
                         row["scriptHex"]?.jsonPrimitive?.content.orEmpty().hexToByteArray()
                     val isLocked = row["isLocked"]?.jsonPrimitive?.boolean ?: false
+                    // Resolve the Room account from the tuple and stamp it on
+                    // the healed row. Ownership must not depend on the address
+                    // projection: the two things persistence loses together
+                    // are the TXO and its address row, and a healed row with
+                    // neither link is skipped by the restore loader at the
+                    // next mirror-reload — recreating the fund loss the heal
+                    // repaired.
+                    val ownerAccountId = if (typeTag >= 0) {
+                        fetchAccount(
+                            database, walletId, typeTag,
+                            row["index"]?.jsonPrimitive?.int ?: 0,
+                            row["standardTag"]?.jsonPrimitive?.int ?: 0,
+                            row["registrationIndex"]?.jsonPrimitive?.int ?: 0,
+                            row["keyClass"]?.jsonPrimitive?.int ?: 0,
+                            row["userIdentityId"]?.jsonPrimitive?.content?.hexToByteArray()
+                                ?: ByteArray(32),
+                            row["friendIdentityId"]?.jsonPrimitive?.content?.hexToByteArray()
+                                ?: ByteArray(32),
+                        )?.id
+                    } else {
+                        null
+                    }
+                    if (ownerAccountId == null) {
+                        // Heal anyway — the address projection may still
+                        // attribute it — but surface the unresolved owner:
+                        // if the address row is also gone, this row will not
+                        // survive the next mirror-reload.
+                        healedUnowned++
+                        Log.w(
+                            TAG,
+                            "txos reconcile: healing TXO with UNRESOLVED account " +
+                                "(typeTag=$typeTag index=${row["index"]?.jsonPrimitive?.int} " +
+                                "address=$address) — ownership rides on the address " +
+                                "projection alone",
+                        )
+                    }
                     val wrote = upsertUtxoRow(
                         database, walletId, txid, vout, amount, address, scriptPubKey,
                         height,
@@ -1187,6 +1246,7 @@ class PlatformWalletPersistenceHandler(
                         isConfirmed = true,
                         isInstantLocked = false,
                         isLocked = isLocked,
+                        resolvedAccountId = ownerAccountId,
                     )
                     if (!wrote) {
                         // The shared insert discipline refused (globally-swept
@@ -1306,6 +1366,7 @@ class PlatformWalletPersistenceHandler(
             inserted = inserted,
             insertedDuffs = insertedDuffs,
             netAmountSuspects = netAmountSuspects,
+            healedUnowned = healedUnowned,
             skippedImmature = skippedImmature,
             skippedNoAddress = skippedNoAddress,
             accountErrors = accountErrors,
@@ -1325,6 +1386,7 @@ class PlatformWalletPersistenceHandler(
                 TAG,
                 "txos reconcile: healed $inserted missing TXO(s) ($insertedDuffs duffs), " +
                     "$netAmountSuspects netAmount suspect(s) (log-only), " +
+                    "healedUnowned=$healedUnowned, " +
                     "wouldFlipSpent=$wouldFlipSpent ($wouldFlipSpentDuffs duffs, log-only), " +
                     "skippedSwept=$skippedSwept, " +
                     "wouldRemove=$wouldRemove ($wouldRemoveDuffs duffs, log-only), " +
