@@ -526,7 +526,7 @@ impl std::fmt::Debug for DashPaySyncManager {
 mod tests {
     use super::*;
 
-    use key_wallet::mnemonic::{Language, Mnemonic};
+    use key_wallet::mnemonic::Mnemonic;
     use key_wallet::wallet::initialization::WalletAccountCreationOptions;
     use key_wallet::Network;
 
@@ -587,7 +587,7 @@ mod tests {
     /// sync would skip.
     async fn register_test_wallet(manager: &Arc<PlatformWalletManager<NoopPersister>>) -> WalletId {
         let mnemonic =
-            Mnemonic::from_phrase(TEST_MNEMONIC, Language::English).expect("valid test mnemonic");
+            Mnemonic::from_phrase(TEST_MNEMONIC).expect("valid test mnemonic");
         let seed_bytes = mnemonic.to_seed("");
         let wallet = manager
             .create_wallet_from_seed_bytes(
