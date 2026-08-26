@@ -1352,8 +1352,10 @@ mod tests {
     }
 
     fn seed_for(phrase: &str) -> [u8; 64] {
-        use key_wallet::mnemonic::{Language, Mnemonic};
-        Mnemonic::from_phrase(phrase, Language::English)
+        use key_wallet::mnemonic::Mnemonic;
+        // Since rust-dashcore #981 `from_phrase` auto-detects the wordlist,
+        // so it no longer takes a `Language`.
+        Mnemonic::from_phrase(phrase)
             .expect("valid test mnemonic")
             .to_seed("")
     }
