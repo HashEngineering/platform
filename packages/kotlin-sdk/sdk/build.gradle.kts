@@ -24,7 +24,7 @@ plugins {
 // file) handles Maven Central releases and Sonatype SNAPSHOTs, mirroring
 // dashj/core/build.gradle.
 group = "org.dashj"
-version = project.findProperty("sdkVersion")?.toString() ?: "0.1.0-v42int5"
+version = project.findProperty("sdkVersion")?.toString() ?: "0.1.0-v42int6"
 
 // Single source of truth for the published coordinate — consumed by the
 // `release` publication and by verifyStagedAarForRemotePublish (both below).
@@ -132,7 +132,7 @@ dependencies {
 // Remote: `:sdk:publishReleasePublicationToStagingRepository` stages the signed
 //         artifacts into build/staging-deploy, then `:sdk:jreleaserDeploy` uploads
 //         them to Maven Central (release) / Sonatype snapshots (see jreleaser block).
-// Override the version with -PsdkVersion=x.y.z (defaults to 0.1.0-v42int5).
+// Override the version with -PsdkVersion=x.y.z (defaults to 0.1.0-v42int6).
 afterEvaluate {
     publishing {
         repositories {
