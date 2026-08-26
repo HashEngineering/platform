@@ -15,6 +15,35 @@ pub struct OutPointFFI {
     pub vout: u32,
 }
 
+impl From<&dashcore::OutPoint> for OutPointFFI {
+    /// The one authority for `OutPoint` → FFI conversion. This value is
+    /// the join key sweep releases use to find additive-path rows on the
+    /// host side, so a byte-order drift between hand-rolled copies would
+    /// silently unlink them — every conversion site routes through here.
+    fn from(outpoint: &dashcore::OutPoint) -> Self {
+        let mut txid = [0u8; 32];
+        txid.copy_from_slice(outpoint.txid.as_ref());
+        Self {
+            txid,
+            vout: outpoint.vout,
+        }
+    }
+}
+
+impl From<&OutPointFFI> for dashcore::OutPoint {
+    /// The inverse of the conversion above, and the one authority for it.
+    /// Hosts hand outpoints BACK across the boundary when they ask the
+    /// engine about rows they already hold (the store-reconcile
+    /// classification batch), so the round trip has to land on exactly the
+    /// bytes that went out.
+    fn from(ffi: &OutPointFFI) -> Self {
+        dashcore::OutPoint {
+            txid: <dashcore::Txid as dashcore::hashes::Hash>::from_byte_array(ffi.txid),
+            vout: ffi.vout,
+        }
+    }
+}
+
 /// Outpoint of a TXO that was spent, paired with the spending
 /// transaction's txid. Replaces the bare `OutPointFFI` on
 /// `AccountChangeSetFFI.utxos_spent` so the Swift persister can
