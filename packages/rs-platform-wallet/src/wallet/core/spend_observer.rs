@@ -124,9 +124,15 @@ fn observing_wallet(event: &WalletEvent) -> Option<&WalletId> {
     match event {
         WalletEvent::TransactionDetected { wallet_id, .. }
         | WalletEvent::BlockProcessed { wallet_id, .. } => Some(wallet_id),
+        // A sweep names a wallet, but it reports transactions that can never
+        // confirm — the opposite of observing a spend. Returning `None` keeps
+        // it out of the release path entirely, which is byte-for-byte the
+        // behaviour of the pin that predated the variant. See the note on
+        // `observed_spends` for the residual gap this leaves.
         WalletEvent::TransactionInstantLocked { .. }
         | WalletEvent::ChainLockProcessed { .. }
-        | WalletEvent::SyncHeightAdvanced { .. } => None,
+        | WalletEvent::SyncHeightAdvanced { .. }
+        | WalletEvent::TransactionsSwept { .. } => None,
     }
 }
 
@@ -158,9 +164,18 @@ pub(crate) fn observed_spends(event: &WalletEvent) -> Vec<dashcore::OutPoint> {
         // watermark advance. No new spend in any of them — and note that the
         // watermark is precisely the "chain moved" signal that must NOT touch
         // a fence (`dashpay/platform#4309`).
+        // A sweep is a removal: its `txids` were beaten to their inputs and
+        // will never confirm, so none of them observes anything. The fence a
+        // swept dispatch still holds is therefore released by its TTL rather
+        // than by this event — the conservative direction (inputs stay
+        // reserved a while longer), and unchanged from the pin that predated
+        // the variant. Retiring such a fence on the sweep itself is real new
+        // behaviour and belongs with the removal channel `dashpay/platform`
+        // #4406 adds, not with a dependency bump.
         WalletEvent::TransactionInstantLocked { .. }
         | WalletEvent::ChainLockProcessed { .. }
-        | WalletEvent::SyncHeightAdvanced { .. } => Vec::new(),
+        | WalletEvent::SyncHeightAdvanced { .. }
+        | WalletEvent::TransactionsSwept { .. } => Vec::new(),
     }
 }
 
