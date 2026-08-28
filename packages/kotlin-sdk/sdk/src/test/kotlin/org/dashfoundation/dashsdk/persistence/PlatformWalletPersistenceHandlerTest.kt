@@ -280,7 +280,15 @@ class PlatformWalletPersistenceHandlerTest {
         )
 
         val txid = ByteArray(32) { 7 }
-        assertEquals(0, db.transactionDao().countInvolvements(txid))
+        // The observing Standard account now carries an involvement row —
+        // that is how its net slice is stored (see
+        // TransactionAccountInvolvementEntity). Exactly one, for that
+        // account. The invariant this test protects is unchanged and is
+        // asserted below: a provider-kind transaction seen by a Standard
+        // account must not reach an unrelated PROVIDER account's restore set.
+        // That query is scoped by `accounts.accountType BETWEEN 8 AND 11`, so
+        // a Standard account's row cannot satisfy it.
+        assertEquals(1, db.transactionDao().countInvolvements(txid))
         assertTrue(handler.onLoadWalletList().single().providerSpecialTxs.isEmpty())
     }
 
@@ -3237,5 +3245,138 @@ class PlatformWalletPersistenceHandlerTest {
 
         // Promote-only and idempotent: a second pass matches nothing.
         assertEquals(0, db.identityDao().healIsLocalFlags())
+    }
+
+    // ── Per-account slices (cross-batch fold) ────────────────────────
+
+    private val foldTxid = ByteArray(32) { 0x7A }
+
+    /** Register a funds account and return its Room id. */
+    private suspend fun seedFundsAccount(typeTag: Int, index: Int, name: String): Long {
+        db.walletDao().upsert(WalletEntity(walletId, networkRaw = Network.TESTNET.ffiValue))
+        return db.accountDao().insert(
+            org.dashfoundation.dashsdk.persistence.entities.AccountEntity(
+                walletId = walletId,
+                accountType = typeTag,
+                accountIndex = index,
+                accountTypeName = name,
+                userIdentityId = ByteArray(32),
+                friendIdentityId = ByteArray(32),
+            ),
+        )
+    }
+
+    /** Deliver one account's slice of a transaction. */
+    private suspend fun deliverSlice(typeTag: Int, index: Int, netAmount: Long) {
+        handler.onWalletChangesetTransaction(
+            walletId = walletId,
+            txid = foldTxid,
+            txData = byteArrayOf(1, 2, 3),
+            context = 2,
+            blockHeight = 1_400_000,
+            blockHash = ByteArray(32),
+            blockTimestamp = 1_700_000_000,
+            direction = 0,
+            transactionType = "Standard",
+            transactionTypeKind = 0,
+            netAmount = netAmount,
+            fee = 0,
+            hasFee = false,
+            label = "",
+            firstSeen = 1_700_000_000,
+            inputOutpoints = ByteArray(0),
+            inputOutpointCount = 0,
+            accountTypeTag = typeTag.toByte(),
+            accountStandardTag = 0,
+            accountIndex = index,
+            accountRegistrationIndex = 0,
+            accountKeyClass = 0,
+            accountUserIdentityId = ByteArray(32),
+            accountFriendIdentityId = ByteArray(32),
+            blockPosition = 0,
+            hasBlockPosition = false,
+        )
+    }
+
+    @Test
+    fun slicesDeliveredInSeparateBatchesSumToTheWalletNet() = runTest {
+        // A CoinJoin-funded send with BIP44 change: upstream emits one record
+        // per matched account, each carrying only its own net. Delivered in
+        // DIFFERENT persistence batches — what a rescan produces — the second
+        // used to overwrite the first and the stored net became a fragment
+        // (field case: a 10.0001 DASH send stored as -0.00100227).
+        seedFundsAccount(typeTag = 1, index = 0, name = "coinJoin")
+        seedFundsAccount(typeTag = 0, index = 0, name = "standardBip44")
+
+        handler.onChangesetBegin(walletId)
+        deliverSlice(typeTag = 1, index = 0, netAmount = -1_000_010_000L)
+        handler.onChangesetEnd(walletId, success = true)
+
+        handler.onChangesetBegin(walletId)
+        deliverSlice(typeTag = 0, index = 0, netAmount = 660_000_000L)
+        handler.onChangesetEnd(walletId, success = true)
+
+        assertEquals(
+            "the stored net must be the sum of both slices, not the last one",
+            -340_010_000L,
+            db.transactionDao().getByTxid(foldTxid)!!.netAmount,
+        )
+        assertEquals(2, db.transactionDao().countInvolvements(foldTxid))
+    }
+
+    @Test
+    fun aRedeliveredSliceReplacesRatherThanAccumulates() = runTest {
+        // Rescans and corrective callbacks re-deliver the same slice. Keying
+        // on (txid, accountId) makes that a replace: summing must stay
+        // idempotent, or the fix would trade a visibly wrong number for a
+        // plausibly wrong one.
+        seedFundsAccount(typeTag = 1, index = 0, name = "coinJoin")
+        seedFundsAccount(typeTag = 0, index = 0, name = "standardBip44")
+
+        deliverSlice(typeTag = 1, index = 0, netAmount = -1_000_010_000L)
+        deliverSlice(typeTag = 0, index = 0, netAmount = 660_000_000L)
+        deliverSlice(typeTag = 1, index = 0, netAmount = -1_000_010_000L)
+        deliverSlice(typeTag = 0, index = 0, netAmount = 660_000_000L)
+
+        assertEquals(
+            "re-delivery must not accumulate",
+            -340_010_000L,
+            db.transactionDao().getByTxid(foldTxid)!!.netAmount,
+        )
+        assertEquals(2, db.transactionDao().countInvolvements(foldTxid))
+    }
+
+    @Test
+    fun aCorrectedSliceRestatesTheWalletNet() = runTest {
+        // A corrective callback re-delivers one account's slice with a new
+        // value; the wallet net must follow it, not keep the stale one.
+        seedFundsAccount(typeTag = 1, index = 0, name = "coinJoin")
+        seedFundsAccount(typeTag = 0, index = 0, name = "standardBip44")
+
+        deliverSlice(typeTag = 1, index = 0, netAmount = -1_000_010_000L)
+        deliverSlice(typeTag = 0, index = 0, netAmount = 0L)
+        deliverSlice(typeTag = 0, index = 0, netAmount = 660_000_000L)
+
+        assertEquals(-340_010_000L, db.transactionDao().getByTxid(foldTxid)!!.netAmount)
+    }
+
+    @Test
+    fun aSingleAccountTransactionKeepsItsNet() = runTest {
+        // The common case must be unchanged: one slice, one account.
+        seedFundsAccount(typeTag = 0, index = 0, name = "standardBip44")
+        deliverSlice(typeTag = 0, index = 0, netAmount = -12_345L)
+        assertEquals(-12_345L, db.transactionDao().getByTxid(foldTxid)!!.netAmount)
+        assertEquals(1, db.transactionDao().countInvolvements(foldTxid))
+    }
+
+    @Test
+    fun anUnresolvableAccountFallsBackToTheDeliveredNet() = runTest {
+        // No account row for the tuple (a store damaged past its account
+        // registrations): no slice can be keyed, so the delivered net stands
+        // rather than being zeroed.
+        db.walletDao().upsert(WalletEntity(walletId, networkRaw = Network.TESTNET.ffiValue))
+        deliverSlice(typeTag = 0, index = 0, netAmount = -999L)
+        assertEquals(-999L, db.transactionDao().getByTxid(foldTxid)!!.netAmount)
+        assertEquals(0, db.transactionDao().countInvolvements(foldTxid))
     }
 }

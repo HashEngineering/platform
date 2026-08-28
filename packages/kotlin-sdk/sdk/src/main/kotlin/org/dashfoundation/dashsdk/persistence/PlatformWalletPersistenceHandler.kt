@@ -816,24 +816,47 @@ class PlatformWalletPersistenceHandler(
             // Only provider-key accounts (AccountTypeTagFFI 8…11) can own
             // provider-special payload involvement. A provider-kind record
             // merely observed by a Standard account must not leak into an
-            // unrelated provider account's restore set.
+            // unrelated provider account's restore set — the provider restore
+            // query stays scoped by `accounts.accountType BETWEEN 8 AND 11`,
+            // so the slice rows written below cannot reach it.
             val accountType = accountTypeTag.toInt() and 0xFF
             val isProviderAccount = accountType in 8..11
             val isProviderTransaction = transactionTypeKind in 2..5
-            if (isProviderAccount && isProviderTransaction) {
-                val account = fetchAccount(
-                    db,
-                    walletId,
-                    accountType,
-                    accountIndex,
-                    accountStandardTag.toInt() and 0xFF,
-                    accountRegistrationIndex,
-                    accountKeyClass,
-                    accountUserIdentityId,
-                    accountFriendIdentityId,
-                ) ?: error("transaction callback account tuple was not persisted")
+            val account = fetchAccount(
+                db,
+                walletId,
+                accountType,
+                accountIndex,
+                accountStandardTag.toInt() and 0xFF,
+                accountRegistrationIndex,
+                accountKeyClass,
+                accountUserIdentityId,
+                accountFriendIdentityId,
+            )
+            if (isProviderAccount && isProviderTransaction && account == null) {
+                error("transaction callback account tuple was not persisted")
+            }
+            // Record THIS account's slice and restate the transaction's net as
+            // the sum of every slice. Upstream emits one record per matched
+            // account, each carrying only its own `netAmount`; the row above
+            // was written with this slice alone, which is a fragment whenever
+            // more than one account is involved. Keying on
+            // `(txid, accountId)` makes a re-delivered slice replace rather
+            // than accumulate, so the sum is right however the slices are
+            // scheduled — including when they land in different persistence
+            // batches, which is what a rescan produces.
+            //
+            // `direction` is deliberately left as upstream set it: it is not a
+            // function of the net (CoinJoin and Internal are assigned from the
+            // transaction type and from wallet-owned-output analysis), so
+            // recomputing it here would erase those classifications.
+            if (account != null) {
                 db.transactionDao().upsertInvolvement(
-                    TransactionAccountInvolvementEntity(txid, account.id),
+                    TransactionAccountInvolvementEntity(txid, account.id, netAmount),
+                )
+                db.transactionDao().updateNetAmount(
+                    txid,
+                    db.transactionDao().sumInvolvementNet(txid),
                 )
             }
             // Reconcile every spent input outpoint against our TXOs — a 1:1
