@@ -121,7 +121,7 @@ import org.dashfoundation.dashsdk.persistence.entities.WalletManagerMetadataEnti
  * owned, unlisted row until the first native marketplace sync refreshes it.
  */
 @Database(
-    version = 10,
+    version = 11,
     exportSchema = true,
     entities = [
         WalletEntity::class,
@@ -562,6 +562,32 @@ abstract class DashDatabase : RoomDatabase() {
          * `withTransaction`, mirroring the changeset bracketing contract of
          * `platform-wallet-ffi`.
          */
+        /**
+         * Per-account transaction slices (the cross-batch fold fix).
+         *
+         * Upstream emits one record per matched account, each carrying only
+         * that account's net. The transactions table holds one row per txid,
+         * so a later slice overwrote an earlier one and the stored net became
+         * a fragment whenever slices landed in different persistence batches.
+         * The slice now lives on the involvement row, keyed
+         * `(transactionTxid, accountId)`, and the transaction's net is the sum
+         * over those rows.
+         *
+         * Existing rows default to 0: legacy involvement rows are
+         * membership-only (provider special transactions, which carry no TXO
+         * and contribute no net). Transaction nets already stored are left
+         * untouched — they are restated the next time a slice for that
+         * transaction is delivered.
+         */
+        val MIGRATION_10_11: Migration = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE `transaction_account_involvements` " +
+                        "ADD COLUMN `netAmount` INTEGER NOT NULL DEFAULT 0",
+                )
+            }
+        }
+
         fun create(context: Context): DashDatabase =
             Room.databaseBuilder(context, DashDatabase::class.java, DATABASE_NAME)
                 .addMigrations(
@@ -574,6 +600,7 @@ abstract class DashDatabase : RoomDatabase() {
                     MIGRATION_7_8,
                     MIGRATION_8_9,
                     MIGRATION_9_10,
+                    MIGRATION_10_11,
                 )
                 .build()
 

@@ -97,6 +97,22 @@ interface TransactionDao {
     @Query("SELECT COUNT(*) FROM transaction_account_involvements WHERE transactionTxid = :txid")
     suspend fun countInvolvements(txid: ByteArray): Int
 
+    /**
+     * The transaction's wallet-level net: the sum of its per-account slices.
+     * Each slice is keyed on `(transactionTxid, accountId)` and replaced on
+     * re-delivery, so this sum is correct however the slices were scheduled
+     * across persistence batches, and idempotent under rescans.
+     */
+    @Query(
+        "SELECT COALESCE(SUM(netAmount), 0) FROM transaction_account_involvements " +
+            "WHERE transactionTxid = :txid"
+    )
+    suspend fun sumInvolvementNet(txid: ByteArray): Long
+
+    /** Restate a transaction's net from its summed slices. */
+    @Query("UPDATE transactions SET netAmount = :netAmount WHERE txid = :txid")
+    suspend fun updateNetAmount(txid: ByteArray, netAmount: Long)
+
     @Delete
     suspend fun delete(transaction: TransactionEntity)
 
