@@ -54,16 +54,43 @@ pub(super) fn trigger_contact_backfill_rescan(
     let synced_height = info.core_wallet.synced_height();
     // 0 means "scan from genesis / not yet started" — already a full
     // historical scan, nothing to backfill toward.
+    //
+    // Every exit below logs through the `log` crate, not `tracing`: on
+    // Android the global tracing subscriber (rs-sdk-ffi's fmt/stdout) eats
+    // tracing output, while `log` records reach logcat via the JNI
+    // android_logger — the same channel core_bridge's batch line uses.
+    // On-device diagnosis of the in-session rewind suppression seen in the
+    // 2026-09-03 job-flower runs depends on these lines being visible.
     if synced_height == 0 {
+        log::info!(
+            target: "platform_wallet::dashpay_rescan",
+            "trigger({owner}, {contact}): SKIP synced_height=0 (full historical scan in progress)"
+        );
         return None;
     }
 
     let funding = {
-        let managed = info.identity_manager.managed_identity(owner)?;
+        let Some(managed) = info.identity_manager.managed_identity(owner) else {
+            log::info!(
+                target: "platform_wallet::dashpay_rescan",
+                "trigger({owner}, {contact}): SKIP owner has no managed identity yet (guard NOT marked; retried on a later pass)"
+            );
+            return None;
+        };
         if managed.dashpay().rescan_triggered.contains(contact) {
+            log::info!(
+                target: "platform_wallet::dashpay_rescan",
+                "trigger({owner}, {contact}): SKIP already handled this lifetime (rescan_triggered guard)"
+            );
             return None;
         }
-        let established = managed.dashpay().established_contacts().get(contact)?;
+        let Some(established) = managed.dashpay().established_contacts().get(contact) else {
+            log::info!(
+                target: "platform_wallet::dashpay_rescan",
+                "trigger({owner}, {contact}): SKIP contact not yet established (guard NOT marked; retried on a later pass)"
+            );
+            return None;
+        };
         established
             .outgoing_request
             .core_height_created_at
@@ -80,11 +107,20 @@ pub(super) fn trigger_contact_backfill_rescan(
     let lowered = (funding < synced_height).then_some(funding);
     if let Some(floor) = lowered {
         info.core_wallet.update_synced_height(floor);
+        log::info!(
+            target: "platform_wallet::dashpay_rescan",
+            "trigger({owner}, {contact}): LOWERED synced_height {synced_height} -> {floor} to backfill historical contact payments"
+        );
         tracing::info!(
             owner = %owner,
             contact = %contact,
             floor,
             "DashPay rescan: lowered SPV synced_height to backfill historical contact payments"
+        );
+    } else {
+        log::info!(
+            target: "platform_wallet::dashpay_rescan",
+            "trigger({owner}, {contact}): forward-covered (funding {funding} >= synced_height {synced_height}); guard marked, no rewind"
         );
     }
     if let Some(managed) = info.identity_manager.managed_identity_mut(owner) {
@@ -204,12 +240,19 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
         // (deeper-funded contacts are in the watch set, so the backfill
         // matches them too). See [`trigger_contact_backfill_rescan`] for the
         // per-contact contract (funding floor, forward-covered marking).
+        let pair_count = receival_pairs.len();
         let mut floor: Option<u32> = None;
         for (owner, contact) in receival_pairs {
             if let Some(lowered) = trigger_contact_backfill_rescan(info, &owner, &contact) {
                 floor = Some(floor.map_or(lowered, |cur| cur.min(lowered)));
             }
         }
+        // `log`, not `tracing`, for on-device visibility — see the note in
+        // `trigger_contact_backfill_rescan`.
+        log::info!(
+            target: "platform_wallet::dashpay_rescan",
+            "sweep: {pair_count} receival pair(s) consulted, floor={floor:?}"
+        );
         Ok(floor)
     }
 

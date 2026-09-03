@@ -195,6 +195,14 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
                 .dashpay_receival_accounts
                 .contains_key(&key)
             {
+                // `log` for on-device visibility (tracing is stdout-eaten on
+                // Android) — this exit means the registration-time backfill
+                // trigger below does NOT run; an existing account's backfill
+                // is the recurring sweep's job.
+                log::info!(
+                    target: "platform_wallet::dashpay_rescan",
+                    "register_contact_account({our_identity_id}, {contact_identity_id}): account exists, no-op (backfill trigger not run on this path)"
+                );
                 return Ok(());
             }
         }
@@ -273,6 +281,11 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
             contact_identity_id,
         );
 
+        // `log` for on-device visibility (tracing is stdout-eaten on Android).
+        log::info!(
+            target: "platform_wallet::dashpay_rescan",
+            "register_contact_account({our_identity_id}, {contact_identity_id}): registered; backfill trigger consulted (see trigger lines above)"
+        );
         tracing::info!(
             our_identity = %our_identity_id,
             contact = %contact_identity_id,
