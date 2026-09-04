@@ -1225,6 +1225,69 @@ class PlatformWalletManager(
     }
 
     /**
+     * Reconcile the Room `txos` mirror against the engine's live UTXO
+     * inventory, healing rows a changeset failed to deliver. The mirror is
+     * write-behind with no other feedback loop, and the engine is REBUILT
+     * from it on restart — an unhealed hole becomes a fund-loss on the next
+     * launch (the job-flower 106.43→86.33 restart drop: rescan
+     * nondeterministically drops the change outputs of sends funded from
+     * CoinJoin-account outputs). Insert-only; never flips spent state or
+     * deletes.
+     *
+     * Both directions of the sweep are paged, so neither this process nor
+     * the engine ever holds a whole wallet's inventory: UTXO counts are
+     * chain-controlled, and a periodic full-inventory read would let anyone
+     * who knows a watched address decide how much a phone allocates. See
+     * [PlatformWalletPersistenceHandler.reconcileTxos].
+     *
+     * Call it after the L1 scan settles and again on a slow cadence;
+     * [tipHeight] is the synced chain height — only outputs at least
+     * [minConfirmations] deep are healed (immature holes age into the next
+     * sweep). Returns null when the engine inventory read failed at the
+     * FIRST page: there is nothing to reconcile against, so there is no
+     * report to make. A page or classification batch failing later
+     * truncates the sweep instead, which the report's
+     * `transportFailures` records.
+     */
+    suspend fun reconcileTxoStore(
+        walletId: ByteArray,
+        tipHeight: Int,
+        minConfirmations: Int = 100,
+    ): PlatformWalletPersistenceHandler.TxoReconcileReport? {
+        suspend fun page(cursor: String?, limit: Int): String? = withContext(Dispatchers.IO) {
+            mapNativeErrors {
+                WalletManagerNative.walletManagerUtxosPageJson(
+                    managerHandle, walletId, network.ffiValue, cursor, limit,
+                )
+            }
+        }
+        val pageSize = PlatformWalletPersistenceHandler.TXO_RECONCILE_PAGE_SIZE
+        // Read the first page before entering the reconcile so a dead
+        // transport still means "no report", the contract callers had
+        // before the sweep was paged. The handler asks for the null cursor
+        // exactly once, so this page is spent, not re-read.
+        val firstPage = page(null, pageSize) ?: return null
+        return persistenceHandler.reconcileTxos(
+            walletId = walletId,
+            tipHeight = tipHeight,
+            minConfirmations = minConfirmations,
+            pageSize = pageSize,
+            engineUtxoPage = { cursor, limit ->
+                if (cursor == null) firstPage else page(cursor, limit)
+            },
+            classifyOutpoints = { outpoints ->
+                withContext(Dispatchers.IO) {
+                    mapNativeErrors {
+                        WalletManagerNative.walletManagerClassifyOutpoints(
+                            managerHandle, walletId, outpoints,
+                        )
+                    }
+                }
+            },
+        )
+    }
+
+    /**
      * Refresh the persisted DashPay payment history for one identity:
      * one FFI read (`managed_identity_get_dashpay_payments`) + one Room
      * pass upserting [DashpayPaymentEntity] rows so the UI can observe
@@ -1662,6 +1725,65 @@ class PlatformWalletManager(
     }
 
     /**
+     * Create an identity funded from a ONE-TIME Orchard key (Type 20) — the
+     * L2-invitation *claim* side. Like [shieldedIdentityCreateFromPool], but the
+     * Orchard spend authority is the invitation's single-use 32-byte spending
+     * key [oneTimeSk] rather than the wallet's own bound pool: the wallet
+     * derives that key's viewing keys, transiently scans the network for the
+     * note(s) funded to it, and spends a note of the fixed exit [denomination]
+     * to fund a new identity at [identityIndex]. [changeAddressRaw43] is the
+     * claimer's OWN 43-byte default Orchard address that receives any
+     * over-funding change note (zero for a well-formed invitation).
+     * [fundingBirthHeight] is an advisory scan hint; pass `null` when unknown.
+     * [keys] are the rich registration rows (built via
+     * `RegistrationKeys.buildRegistrationRows`), encoded to the same blob every
+     * registration path uses; each row's private half must already be
+     * persisted. [fallbackAddress] is the REQUIRED 21-byte PlatformAddress that
+     * receives the value (minus a penalty) if creation fails a stateful check.
+     * Signed by the Keystore identity signer ([signerHandle]). Blocks for the
+     * ~30s Halo 2 proof.
+     *
+     * @return the new 32-byte identity id.
+     */
+    suspend fun shieldedIdentityCreateFromOneTimeKey(
+        walletId: ByteArray,
+        oneTimeSk: ByteArray,
+        changeAddressRaw43: ByteArray,
+        identityIndex: Int,
+        keys: List<org.dashfoundation.dashsdk.identity.IdentityPubkey>,
+        denomination: Long,
+        fallbackAddress: ByteArray,
+        fundingBirthHeight: Int? = null,
+    ): ByteArray = teardownGate.op {
+        require(oneTimeSk.size == 32) { "oneTimeSk must be 32 bytes, got ${oneTimeSk.size}" }
+        require(changeAddressRaw43.size == 43) {
+            "changeAddressRaw43 must be 43 bytes, got ${changeAddressRaw43.size}"
+        }
+        require(identityIndex >= 0) { "identityIndex must be non-negative, got $identityIndex" }
+        require(denomination > 0) { "denomination must be positive, got $denomination" }
+        require(fallbackAddress.size == 21) {
+            "fallbackAddress must be 21 bytes, got ${fallbackAddress.size}"
+        }
+        require(keys.isNotEmpty()) { "keys must not be empty" }
+        val packed = mapNativeErrors {
+            FundingNative.shieldedIdentityCreateFromOneTimeKey(
+                managerHandle,
+                walletId,
+                oneTimeSk,
+                // A negative birth-height signals "no hint" across JNI.
+                fundingBirthHeight ?: -1,
+                changeAddressRaw43,
+                identityIndex,
+                org.dashfoundation.dashsdk.identity.IdentityPubkeyCodec.encode(keys),
+                denomination,
+                fallbackAddress,
+                signerHandle,
+            )
+        }
+        decodeShieldedCreatePayload(packed)
+    }
+
+    /**
      * Resume a stuck shielded fund-from-asset-lock from an already-tracked
      * lock — port of Swift's `shieldedResumeFundFromAssetLock`.
      *
@@ -1788,6 +1910,69 @@ class PlatformWalletManager(
                 account,
                 recipientRaw43,
                 amount,
+                memo?.takeIf { it.isNotEmpty() },
+            )
+        }
+    }
+
+    /**
+     * Multi-output shielded → shielded transfer (Type 16). Spends notes from
+     * [account] on [walletId] and creates ONE note per entry of [outputs] in
+     * a single atomic transition.
+     *
+     * Repeating the same address across entries is allowed and is the point
+     * of this call: it funds one address with several independent notes, so
+     * a later spend of that address spends several REAL notes rather than
+     * one real note plus an Orchard padding dummy (whose nullifier is
+     * randomly generated and therefore not reproducible offline).
+     *
+     * The transition always emits a change note, so the spendable balance
+     * must strictly exceed the summed amounts plus the fee. The fee grows
+     * with the output count: the bundle publishes
+     * `max(spentNotes, outputs.size + 1, 2)` Orchard actions.
+     *
+     * @param walletId the 32-byte wallet id.
+     * @param outputs (raw 43-byte Orchard address, credits) pairs; must be
+     *   non-empty, hold at most [MAX_SHIELDED_TRANSFER_RECIPIENTS] entries
+     *   (the native ceiling — 5, bound by the 20 KiB transition-size limit),
+     *   and every amount must be positive.
+     * @param account the ZIP-32 shielded account to spend from (usually 0).
+     * @param memo optional UTF-8 memo attached to EVERY recipient note
+     *   (null / empty = no memo; at most 32 UTF-8 bytes).
+     */
+    suspend fun shieldedTransferMulti(
+        walletId: ByteArray,
+        outputs: List<Pair<ByteArray, Long>>,
+        account: Int = 0,
+        memo: String? = null,
+    ): Unit = teardownGate.op {
+        require(outputs.isNotEmpty()) { "outputs must not be empty" }
+        // Mirror the native ceiling BEFORE flattening: the arrays built below are sized by
+        // `outputs.size`, and the native layer would reject an oversized call anyway — after
+        // this side had already allocated for it.
+        require(outputs.size <= MAX_SHIELDED_TRANSFER_RECIPIENTS) {
+            "outputs must hold at most $MAX_SHIELDED_TRANSFER_RECIPIENTS entries, got ${outputs.size}"
+        }
+        require(account >= 0) { "account must be non-negative, got $account" }
+        outputs.forEachIndexed { index, (recipientRaw43, amount) ->
+            require(recipientRaw43.size == 43) {
+                "outputs[$index] address must be exactly 43 bytes, got ${recipientRaw43.size}"
+            }
+            require(amount > 0) { "outputs[$index] amount must be positive, got $amount" }
+        }
+        val recipientsRaw43 = ByteArray(outputs.size * 43)
+        outputs.forEachIndexed { index, (recipientRaw43, _) ->
+            recipientRaw43.copyInto(recipientsRaw43, index * 43)
+        }
+        val amounts = LongArray(outputs.size) { outputs[it].second }
+        mapNativeErrors {
+            FundingNative.shieldedTransferMulti(
+                managerHandle,
+                walletId,
+                mnemonicResolver.nativeHandle,
+                account,
+                recipientsRaw43,
+                amounts,
                 memo?.takeIf { it.isNotEmpty() },
             )
         }
@@ -2001,6 +2186,7 @@ class PlatformWalletManager(
                 if (running) {
                     runCatching { spvSyncProgress() }.getOrNull()?.let { next ->
                         if (next != _spvProgress.value) _spvProgress.value = next
+                        maybeReconcileTxoStores(next)
                     }
                     runCatching { spvTipUnixSeconds() }.getOrNull()?.let { tip ->
                         if (tip != _spvTipUnixSeconds.value) _spvTipUnixSeconds.value = tip
@@ -2010,6 +2196,46 @@ class PlatformWalletManager(
                     _spvProgress.value = SpvSyncProgressData.EMPTY
                 }
                 delay(POLL_INTERVAL_MS)
+            }
+        }
+    }
+
+    private var lastTxoReconcileAtMs = 0L
+    private var txoReconcileWasSynced = false
+
+    /**
+     * SDK-internal trigger for [reconcileTxoStore] — runs on the SYNCED
+     * transition of the SPV progress poll and again every
+     * [TXO_RECONCILE_INTERVAL_MS] while synced, for every loaded wallet.
+     * Lives here rather than in the host apps so Android and iOS-parity
+     * hosts both get the heal without wiring anything: the mirror hole it
+     * repairs (rescan dropping change outputs of CoinJoin-funded sends)
+     * becomes a fund-loss on the next engine reload if any host forgets
+     * to call it. Failures are logged and re-tried on the next cadence
+     * tick — never allowed to kill the progress poll.
+     */
+    private fun maybeReconcileTxoStores(progress: SpvSyncProgressData) {
+        val synced = progress.overallState == SpvSyncState.SYNCED
+        val transitioned = synced && !txoReconcileWasSynced
+        txoReconcileWasSynced = synced
+        if (!synced) return
+        val now = System.currentTimeMillis()
+        if (!transitioned && now - lastTxoReconcileAtMs < TXO_RECONCILE_INTERVAL_MS) return
+        val tipHeight = (progress.filters?.currentHeight ?: 0L).toInt()
+        if (tipHeight <= 0) return
+        val walletIds = wallets.value.values.map { it.walletId }
+        if (walletIds.isEmpty()) return
+        lastTxoReconcileAtMs = now
+        scope.launch {
+            for (walletId in walletIds) {
+                runCatching { reconcileTxoStore(walletId, tipHeight) }
+                    .onFailure { t ->
+                        android.util.Log.w(
+                            "PlatformWalletManager",
+                            "txos reconcile failed for wallet ${walletId.toHex()}",
+                            t,
+                        )
+                    }
             }
         }
     }
@@ -2390,6 +2616,69 @@ class PlatformWalletManager(
         }
     }
 
+    // ── Reconcile / rescan diagnostics ────────────────────────────────
+
+    /**
+     * Read one wallet's Core SPV state — `syncedHeight` (the filter-scan
+     * checkpoint), `lastProcessedHeight`, and `monitorRevision`. The direct
+     * way to confirm a [spvRescanFilters] rewind actually took: read
+     * `syncedHeight` before and after, rather than inferring it from a
+     * host-side gate. See [CoreWalletState].
+     */
+    suspend fun coreWalletState(walletId: ByteArray): CoreWalletState = teardownGate.op {
+        require(walletId.size == 32) { "walletId must be 32 bytes, got ${walletId.size}" }
+        withContext(Dispatchers.IO) {
+            CoreWalletState.fromLongArray(
+                mapNativeErrors { WalletManagerNative.coreWalletState(managerHandle, walletId) },
+            )
+        }
+    }
+
+    /**
+     * Read one account's spent-outpoint inventory — the engine's record of
+     * the coins the account has spent, the reconcile complement to the
+     * unspent set. Pair it with the UTXO page to reason about coins the
+     * engine believes are spent but the Room mirror still marks unspent (or
+     * vice versa). See [OutPoint].
+     *
+     * The account is addressed by its `AccountType` fields; [typeTag] is
+     * the `AccountTypeTagFFI` byte (0 Standard, 1 CoinJoin,
+     * 12 DashpayReceivingFunds, 13 DashpayExternalAccount, …) and
+     * [standardTag] the `StandardAccountTypeTagFFI` byte (0 BIP44, 1 BIP32)
+     * used only when [typeTag] is 0. Fill [index] / [registrationIndex] /
+     * [keyClass] and the identity ids per the selected type; leave the
+     * rest at 0 / null.
+     */
+    suspend fun accountSpentOutpoints(
+        walletId: ByteArray,
+        typeTag: Int,
+        standardTag: Int = 0,
+        index: Int = 0,
+        registrationIndex: Int = 0,
+        keyClass: Int = 0,
+        userIdentityId: ByteArray? = null,
+        friendIdentityId: ByteArray? = null,
+    ): List<OutPoint> = teardownGate.op {
+        require(walletId.size == 32) { "walletId must be 32 bytes, got ${walletId.size}" }
+        withContext(Dispatchers.IO) {
+            OutPoint.decodeList(
+                mapNativeErrors {
+                    WalletManagerNative.accountSpentOutpoints(
+                        managerHandle,
+                        walletId,
+                        typeTag,
+                        standardTag,
+                        index,
+                        registrationIndex,
+                        keyClass,
+                        userIdentityId,
+                        friendIdentityId,
+                    )
+                },
+            )
+        }
+    }
+
     // ── Lifecycle ─────────────────────────────────────────────────────
 
     val isClosed: Boolean get() = bundleRef.get() == 0L
@@ -2495,9 +2784,93 @@ class PlatformWalletManager(
         /** SPV progress poll cadence — matches Swift's 1 Hz `startProgressPolling`. */
         const val POLL_INTERVAL_MS = 1_000L
 
+        /**
+         * Cadence of the steady-state TXO-store reconcile
+         * ([maybeReconcileTxoStores]) while SPV reports SYNCED. The
+         * SYNCED transition itself always triggers a pass regardless of
+         * this interval.
+         */
+        const val TXO_RECONCILE_INTERVAL_MS = 30 * 60 * 1_000L
+
+        /**
+         * Recipient ceiling of [shieldedTransferMulti] — mirrors
+         * `MAX_SHIELDED_TRANSFER_RECIPIENTS` in
+         * `packages/rs-platform-wallet-ffi/src/shielded_send.rs`, which the JNI adapter enforces
+         * from the array lengths before allocating. Checked here too so an oversized call is
+         * refused before this side flattens caller-sized buffers.
+         *
+         * 5 = the effective per-transition Orchard action ceiling (6, bound by the 20 KiB
+         * `max_state_transition_size` — a 7-action transition serializes to ~21.7 KiB) minus
+         * the unconditional change output. The native constant is pinned to the dpp derivation
+         * by a Rust test; raise this only in lockstep with it.
+         */
+        const val MAX_SHIELDED_TRANSFER_RECIPIENTS = 5
+
         /** De-offset `PlatformWalletFFIResultCode::ErrorInvalidParameter`. */
         const val PWFFI_INVALID_PARAMETER = 2
     }
+}
+
+/**
+ * A freshly generated one-time Orchard key for an L2 shielded invitation —
+ * the *inviter* side. Returned by [generateOneTimeOrchardKey].
+ *
+ * The inviter funds an Orchard note to [address]; a claimer handed
+ * [spendingKey] re-derives its viewing keys and spends that note via
+ * [PlatformWalletManager.shieldedIdentityCreateFromOneTimeKey]. All Orchard
+ * key material is generated in Rust — the app only ever sees these bytes.
+ */
+data class OneTimeOrchardKey(
+    /** The 32-byte one-time Orchard spending key (the claimer's spend authority). */
+    val spendingKey: ByteArray,
+    /** The 43-byte raw default Orchard payment address the inviter funds. */
+    val address: ByteArray,
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is OneTimeOrchardKey) return false
+        return spendingKey.contentEquals(other.spendingKey) &&
+            address.contentEquals(other.address)
+    }
+
+    override fun hashCode(): Int = 31 * spendingKey.contentHashCode() + address.contentHashCode()
+}
+
+/**
+ * Generate a fresh one-time Orchard spending key together with the default
+ * Orchard address it funds — the *inviter* side of an L2 shielded invitation.
+ *
+ * Handle-less (process-local Orchard crypto). The inviter funds a note to the
+ * returned [OneTimeOrchardKey.address]; the claimer, handed
+ * [OneTimeOrchardKey.spendingKey], spends it. The spending key is exactly the
+ * 32-byte value [PlatformWalletManager.shieldedIdentityCreateFromOneTimeKey]
+ * accepts.
+ */
+fun generateOneTimeOrchardKey(): OneTimeOrchardKey {
+    val blob = mapNativeErrors { FundingNative.generateOneTimeOrchardKey() }
+    // The blob's first 32 bytes are bearer spend authority; wipe the transient
+    // JVM copy once the two owned arrays have been sliced out (#4204 key-hygiene).
+    try {
+        require(blob.size == 75) { "expected a 75-byte sk||address blob, got ${blob.size}" }
+        return OneTimeOrchardKey(
+            spendingKey = blob.copyOfRange(0, 32),
+            address = blob.copyOfRange(32, 75),
+        )
+    } finally {
+        blob.fill(0)
+    }
+}
+
+/**
+ * Derive the default 43-byte raw Orchard payment address from a 32-byte
+ * one-time Orchard [spendingKey] — the RNG-free counterpart of
+ * [generateOneTimeOrchardKey], for round-trip validation and recomputing the
+ * recipient an inviter must fund for a given key. Handle-less; throws if
+ * [spendingKey] is not a valid Orchard spending key.
+ */
+fun orchardAddressFromSpendingKey(spendingKey: ByteArray): ByteArray {
+    require(spendingKey.size == 32) { "spendingKey must be 32 bytes, got ${spendingKey.size}" }
+    return mapNativeErrors { FundingNative.orchardAddressFromSpendingKey(spendingKey) }
 }
 
 /**

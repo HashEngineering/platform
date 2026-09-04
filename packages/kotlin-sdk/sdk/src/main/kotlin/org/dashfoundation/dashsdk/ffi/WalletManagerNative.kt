@@ -129,6 +129,39 @@ internal object WalletManagerNative {
     external fun walletGetBalance(walletHandle: Long): LongArray
 
     /**
+     * One bounded page of the engine's UTXO inventory for one wallet,
+     * across every account, as JSON
+     * `{"utxos":[...],"errors":[...],"cursor":<string|null>,"hasMore":<bool>}`
+     * — the source of truth the TXO-store reconciler
+     * ([PlatformWalletManager.reconcileTxoStore]) diffs against the Room
+     * `txos` mirror.
+     *
+     * Paged, not swept whole: a wallet's UTXO count is chain-controlled
+     * (anyone who knows a watched address can keep sending dust to it), so
+     * a full-inventory read would let a remote party decide how much this
+     * process allocates on every SYNCED transition and every 30-minute
+     * pass. Pass [cursor] `null` to start, then hand back the returned
+     * `cursor` verbatim while `hasMore` is true. [limit] caps the rows in
+     * one page; non-positive means the native default, and oversized
+     * values are clamped natively.
+     *
+     * Each `utxos` row carries the owning account tags, the txid hex in
+     * the same byte order the changeset path hands
+     * [PlatformWalletPersistenceHandler] (so hex→bytes reproduces the
+     * `txos.txid` blob), vout, amount (duffs), derived address (empty when
+     * the script has no address form), scriptHex, height and isLocked.
+     * Per-account read failures land in `errors` instead of failing the
+     * page. `network` is [org.dashfoundation.dashsdk.Network.ffiValue].
+     */
+    external fun walletManagerUtxosPageJson(
+        managerHandle: Long,
+        walletId: ByteArray,
+        network: Int,
+        cursor: String?,
+        limit: Int,
+    ): String?
+
+    /**
      * Widen an account's address-pool gap limit, generating the addresses
      * the wider limit now requires (capped Rust-side at MAX_GAP_LIMIT =
      * 1000). The compact-filter scan watches `last used index + gap`, so
@@ -144,6 +177,28 @@ internal object WalletManagerNative {
         accountIndex: Int,
         gapLimit: Int,
     )
+
+    /**
+     * Classify a batch of outpoints against the engine's live state: the
+     * reverse half of the reconcile transport, and the reason the paged
+     * inventory above carries no spent-outpoint list. The caller pages its
+     * OWN mirror rows and asks about them a batch at a time, so neither
+     * side ever builds a set over the whole engine inventory.
+     *
+     * [outpoints] is a flat `n * 36` byte blob in the store's own encoding
+     * — 32-byte txid in wire order then vout as little-endian `Int`, which
+     * is exactly the `txos.outpoint` primary key, so callers concatenate
+     * the column and read the answers back positionally. Returns `n`
+     * bytes: 0 unknown, 1 unspent, 2 spent.
+     *
+     * A 2 means SOME recorded transaction spends the outpoint — possibly
+     * one still in the mempool. It is not proof of a settled spend.
+     */
+    external fun walletManagerClassifyOutpoints(
+        managerHandle: Long,
+        walletId: ByteArray,
+        outpoints: ByteArray,
+    ): ByteArray?
 
     // ── Core transaction builder (1:1 over `core_wallet_tx_builder_*`) ─
     //
@@ -738,5 +793,49 @@ internal object WalletManagerNative {
         identitySignerHandle: Long,
         budgetSecs: Long,
         gapLimit: Int,
+    ): ByteArray
+
+    // ── Reconcile / rescan diagnostics ────────────────────────────────
+
+    /**
+     * Per-wallet Core SPV state as `long[3]` =
+     * `{ syncedHeight, lastProcessedHeight, monitorRevision }`. Wraps
+     * `platform_wallet_core_wallet_state`. `syncedHeight` is the
+     * filter-scan checkpoint [spvRescanFilters] rewinds and the pipeline
+     * advances — read it before and after arming a rescan to confirm the
+     * rewind actually took. Throws on a bad handle or unknown wallet.
+     */
+    external fun coreWalletState(managerHandle: Long, walletId: ByteArray): LongArray
+
+    /**
+     * One account's spent-outpoint inventory — the engine's record of the
+     * coins this account has spent, the reconcile complement to
+     * [walletManagerUtxosPageJson]'s unspent set. Wraps
+     * `platform_wallet_account_spent_outpoints`.
+     *
+     * The account is addressed by its `AccountType` fields (no xpub is
+     * consulted for the lookup). [typeTag] is the `AccountTypeTagFFI` byte
+     * (0 Standard, 1 CoinJoin, 12 DashpayReceivingFunds,
+     * 13 DashpayExternalAccount, 14 PlatformPayment, …); [standardTag] the
+     * `StandardAccountTypeTagFFI` byte (0 BIP44, 1 BIP32), read only when
+     * [typeTag] == 0. [index] / [registrationIndex] / [keyClass] and the
+     * two 32-byte identity ids fill the fields the selected type needs;
+     * pass 0 / null for the ones it doesn't.
+     *
+     * Returns a flat big-endian blob, 36 bytes per outpoint (32-byte txid
+     * in the same raw byte order as the UTXO page's hex + u32 vout); empty
+     * inventory returns a zero-length array. Throws on a bad handle,
+     * unknown wallet, or an unmappable account spec.
+     */
+    external fun accountSpentOutpoints(
+        managerHandle: Long,
+        walletId: ByteArray,
+        typeTag: Int,
+        standardTag: Int,
+        index: Int,
+        registrationIndex: Int,
+        keyClass: Int,
+        userIdentityId: ByteArray?,
+        friendIdentityId: ByteArray?,
     ): ByteArray
 }
