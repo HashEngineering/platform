@@ -109,9 +109,58 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
         };
 
         let synced_height = info.core_wallet.synced_height();
-        // 0 means "scan from genesis / not yet started" — already a full
-        // historical scan, nothing to backfill toward.
         if synced_height == 0 {
+            // 0 means "scan from genesis / not yet started": a full historical
+            // scan is running or about to, and it already covers every
+            // contact's funding height, so no backfill rewind is or ever will
+            // be owed for a contact whose receival account exists now. Mark
+            // such contacts covered instead of skipping silently: the ordered
+            // bring-up (`start_wallet_subsystems`) registers receival accounts
+            // BEFORE SPV starts, i.e. while `synced_height` is still 0. Left
+            // unmarked, the first post-scan sweep sees "unhandled" contacts
+            // with funding heights below the tip and forces a redundant rewind
+            // to the earliest of them — re-scanning every block from there to
+            // tip for coins the full scan already found (observed 2026-09-04:
+            // ~15k blocks on a small wallet, 321k on a large CoinJoin wallet).
+            let receival_pairs: Vec<(Identifier, Identifier)> = info
+                .core_wallet
+                .accounts
+                .dashpay_receival_accounts
+                .keys()
+                .map(|k| {
+                    (
+                        Identifier::from(k.user_identity_id),
+                        Identifier::from(k.friend_identity_id),
+                    )
+                })
+                .collect();
+            let mut marked = 0usize;
+            for (owner, contact) in receival_pairs {
+                let Some(managed) = info.identity_manager.managed_identity_mut(&owner) else {
+                    continue;
+                };
+                // Only an ESTABLISHED contact is meaningfully covered; one that
+                // has not established yet records nothing, and a later pass
+                // handles it once it does.
+                if managed.dashpay().rescan_triggered.contains(&contact)
+                    || !managed
+                        .dashpay()
+                        .established_contacts()
+                        .contains_key(&contact)
+                {
+                    continue;
+                }
+                managed.dashpay_rescan_triggered_mut().insert(contact);
+                marked += 1;
+            }
+            if marked > 0 {
+                // `log`, not `tracing`: on Android only the log crate reaches
+                // logcat (the tracing subscriber writes to a dead stdout).
+                log::info!(
+                    target: "platform_wallet::dashpay_rescan",
+                    "DashPay rescan: synced_height=0, full historical scan covers {marked} established contact(s) — marked rescan_triggered, no backfill owed"
+                );
+            }
             return Ok(None);
         }
 
@@ -2648,6 +2697,100 @@ mod tests {
             "ignore must propagate a persist failure (got {result:?}), \
              else the ignore is lost and the sender resurfaces"
         );
+    }
+
+    /// A receival account registered BEFORE the scan runs (`synced_height ==
+    /// 0` — the ordered bring-up registers contact accounts before SPV starts)
+    /// is covered by the coming full scan. The sweep must mark such a contact
+    /// `rescan_triggered` and not rewind; the first post-scan sweep must then be
+    /// a no-op for it. Without the mark, the post-scan sweep forced a redundant
+    /// rewind to the contact's funding height (321k blocks on a large CoinJoin
+    /// wallet, 2026-09-04).
+    #[tokio::test]
+    async fn sweep_at_synced_height_zero_marks_established_contacts_covered() {
+        use crate::wallet::identity::{ContactRequest, EstablishedContact};
+        use key_wallet::wallet::managed_wallet_info::wallet_info_interface::WalletInfoInterface;
+
+        let (manager, persister, wallet_id) = make_wallet().await;
+        let owner = Identifier::from([0xAA; 32]);
+        let contact = Identifier::from([0xBB; 32]);
+        let wallet = manager.get_wallet(&wallet_id).await.expect("wallet");
+        let iw = wallet.identity();
+        let p = WalletPersister::new(wallet_id, Arc::clone(&persister) as _);
+
+        {
+            let mut wm = iw.wallet_manager.write().await;
+            let info = wm.get_wallet_info_mut(&wallet_id).expect("info");
+            info.identity_manager
+                .add_identity(bare_identity([0xAA; 32]), 0, wallet_id, &p)
+                .expect("add owner");
+            let outgoing = ContactRequest::new(owner, contact, 0, 0, 0, vec![0u8; 96], 200, 0);
+            let incoming = ContactRequest::new(contact, owner, 0, 0, 0, vec![0u8; 96], 100, 0);
+            info.identity_manager
+                .managed_identity_mut(&owner)
+                .expect("managed")
+                .apply_established_contact(EstablishedContact::new(contact, outgoing, incoming));
+            // synced_height stays 0: the scan has not run yet.
+        }
+        iw.dashpay()
+            .register_contact_account(&owner, &contact, 0, test_receiving_xpub(&owner, &contact))
+            .await
+            .expect("register receival account");
+
+        // The sweep at synced_height=0 (what the bring-up runs after its drain):
+        // no rewind, but the contact is now marked covered.
+        assert_eq!(
+            iw.dashpay()
+                .reconcile_dashpay_rescan()
+                .await
+                .expect("sweep"),
+            None
+        );
+        {
+            let wm = iw.wallet_manager.read().await;
+            let info = wm.get_wallet_info(&wallet_id).unwrap();
+            assert_eq!(
+                info.core_wallet.synced_height(),
+                0,
+                "must not rewind at synced_height=0"
+            );
+            assert!(
+                info.identity_manager
+                    .managed_identity(&owner)
+                    .unwrap()
+                    .dashpay()
+                    .rescan_triggered
+                    .contains(&contact),
+                "contact must be marked covered by the full scan"
+            );
+        }
+
+        // The scan advances past the contact's funding heights; the post-scan
+        // sweep must NOT rewind for a contact the full scan covered.
+        {
+            let mut wm = iw.wallet_manager.write().await;
+            wm.get_wallet_info_mut(&wallet_id)
+                .unwrap()
+                .core_wallet
+                .update_synced_height(1000);
+        }
+        assert_eq!(
+            iw.dashpay()
+                .reconcile_dashpay_rescan()
+                .await
+                .expect("sweep"),
+            None,
+            "post-scan sweep must be a no-op for a contact covered by the full scan"
+        );
+        {
+            let wm = iw.wallet_manager.read().await;
+            let info = wm.get_wallet_info(&wallet_id).unwrap();
+            assert_eq!(
+                info.core_wallet.synced_height(),
+                1000,
+                "no redundant rewind"
+            );
+        }
     }
 
     /// DIP-15 §12.6: when a contact's receival account is registered after SPV
