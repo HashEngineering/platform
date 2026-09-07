@@ -831,12 +831,19 @@ async fn build_core_changeset(
                 collect_usage_deltas(wallet_manager, wallet_id, vec![&**record]).await;
             let mut folded = owned.clone();
             crate::changeset::changeset::fold_same_txid_records(&mut folded);
+            let observed_spent = observed_spent_outpoints_for(wallet_manager, wallet_id).await;
             CoreChangeSet {
                 // New UTXOs from the owned slices only (a watch-only
                 // chain's outputs are the contact's coins); spends
                 // from ALL slices, so a contact spending an output a
                 // pre-fix build persisted still clears the stale row.
-                new_utxos: owned.iter().flat_map(derive_new_utxos).collect(),
+                // Outputs the wallet already saw spent are never
+                // persisted as coins — see `drop_born_spent`.
+                new_utxos: drop_born_spent(
+                    owned.iter().flat_map(derive_new_utxos).collect(),
+                    &observed_spent,
+                    wallet_id,
+                ),
                 spent_utxos: slices.iter().flat_map(derive_spent_utxos).collect(),
                 records: folded,
                 account_records: owned,
@@ -884,6 +891,14 @@ async fn build_core_changeset(
                 cs.new_utxos.extend(derive_new_utxos(r));
                 cs.spent_utxos.extend(derive_spent_utxos(r));
             }
+            // An output the wallet has already seen spent in an earlier-
+            // processed block is not a coin — see `drop_born_spent`.
+            let observed_spent = observed_spent_outpoints_for(wallet_manager, wallet_id).await;
+            cs.new_utxos = drop_born_spent(
+                std::mem::take(&mut cs.new_utxos),
+                &observed_spent,
+                wallet_id,
+            );
             // Updated records (re-confirmation, IS-lock applied to a known
             // mempool tx, etc.) don't usually change UTXO topology — the
             // record's content does change though, so re-emit it.
@@ -1254,6 +1269,83 @@ async fn wallet_slices_for_txid(
 /// cannot drift apart.
 fn is_contact_watch_only(record: &TransactionRecord) -> bool {
     record.account_type.is_contact_owned()
+}
+
+/// Every outpoint the wallet has already seen spent in a block — key-wallet's
+/// `observed_spent_outpoints` (dashpay/rust-dashcore#649). Empty when the
+/// manager does not know the wallet (removed mid-flight, or a bare test
+/// manager), which makes [`drop_born_spent`] a no-op.
+async fn observed_spent_outpoints_for(
+    wallet_manager: &Arc<RwLock<WalletManager<PlatformWalletInfo>>>,
+    wallet_id: &WalletId,
+) -> HashSet<OutPoint> {
+    let guard = wallet_manager.read().await;
+    guard
+        .get_wallet_info(wallet_id)
+        .map(|info| {
+            info.core_wallet
+                .observed_spent_outpoints()
+                .keys()
+                .copied()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Remove from `new_utxos` every output the wallet has already observed spent.
+///
+/// Compact-filter block processing is not strictly height-ordered: a block
+/// whose only relevance is a script derived by a gap-limit extension is
+/// re-fetched and processed *after* higher blocks. When the spend of a coin
+/// (typically a spend-only transaction — an OP_RETURN-only CoinJoin collateral
+/// burn, an asset-lock top-up, a no-change send) is processed before the block
+/// that created the coin, key-wallet records the spent outpoint in
+/// `observed_spent_outpoints` (the spend itself is not relevant yet: unknown
+/// input, no wallet output) and, when the coin's block arrives, correctly
+/// **skips inserting the UTXO** (#649). Its in-memory balance is right. The
+/// record it emits for the coin's transaction, however, still lists the output
+/// as `Received`/`Change` with nothing marking it spent — so
+/// [`derive_new_utxos`] would persist a spendable coin the engine itself does
+/// not hold, no spend row ever follows (the spend was never recorded), and the
+/// next launch reloads the over-count from the store. Observed 2026-09-05 on a
+/// 370-burn CoinJoin wallet: exactly the 6 spends that landed on the run's
+/// height inversions were persisted unspent; the engine total was exact.
+///
+/// Mirroring the engine's skip here keeps the store equal to the engine. The
+/// transaction row itself is still persisted (history keeps the receive); only
+/// the coin is withheld. Logged through `log` so it reaches logcat on Android.
+fn drop_born_spent(
+    new_utxos: Vec<Utxo>,
+    observed_spent: &HashSet<OutPoint>,
+    wallet_id: &WalletId,
+) -> Vec<Utxo> {
+    if observed_spent.is_empty() {
+        return new_utxos;
+    }
+    let (born_spent, live): (Vec<Utxo>, Vec<Utxo>) = new_utxos
+        .into_iter()
+        .partition(|u| observed_spent.contains(&u.outpoint));
+    if !born_spent.is_empty() {
+        let listed: Vec<String> = born_spent
+            .iter()
+            .take(4)
+            .map(|u| {
+                format!(
+                    "{}:{} ({} duffs)",
+                    u.outpoint.txid, u.outpoint.vout, u.txout.value
+                )
+            })
+            .collect();
+        log::info!(
+            target: "platform_wallet::born_spent",
+            "wallet {}: withholding {} new UTXO(s) already observed spent in an earlier-processed block (#649): {}{}",
+            hex::encode(wallet_id),
+            born_spent.len(),
+            listed.join(", "),
+            if born_spent.len() > 4 { ", …" } else { "" }
+        );
+    }
+    live
 }
 
 /// Derive the "ours" UTXOs created by a transaction's outputs.
@@ -4302,6 +4394,193 @@ mod tests {
             diag.to_string(),
             "wallet-event batch: folded=512 wallets=2 synced_height_persisted=Some(100) \
              synced_height_frozen=None synced_height_rejected=Some(200) faulted=0"
+        );
+    }
+
+    /// Spend-first ordering (dashpay/rust-dashcore#649 at the persistence
+    /// layer): a block spending coin X is processed before the block that
+    /// creates X (gap-extension re-fetch). key-wallet records X as observed
+    /// spent, then skips inserting X as a UTXO when its block arrives — but the
+    /// emitted record still lists X as `Received`. The changeset must not
+    /// persist X as a spendable coin; the transaction row itself stays.
+    /// Observed on a 370-burn CoinJoin wallet, 2026-09-05: 6 coins over-counted.
+    #[tokio::test]
+    async fn born_spent_output_is_not_persisted_as_a_coin() {
+        use super::build_core_changeset;
+        use crate::wallet::core::WalletGeneration;
+        use crate::wallet::identity::IdentityManager;
+        use dashcore::hashes::Hash;
+        use dashcore::{BlockHash, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Witness};
+        use key_wallet::managed_account::transaction_record::OutputRole;
+        use key_wallet::test_utils::TestWalletContext;
+        use key_wallet::transaction_checking::{BlockInfo, TransactionContext};
+
+        let mut ctx = TestWalletContext::new_random();
+        let coin_tx = Transaction::dummy(&ctx.receive_address, 0..1, &[100_000]);
+        let coin = OutPoint {
+            txid: coin_tx.txid(),
+            vout: 0,
+        };
+        // The spend-only "burn": spends X, pays only an OP_RETURN output.
+        let burn = Transaction {
+            version: 2,
+            lock_time: 0,
+            input: vec![TxIn {
+                previous_output: coin,
+                script_sig: ScriptBuf::new(),
+                sequence: 0xffffffff,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: 0,
+                script_pubkey: ScriptBuf::from_bytes(vec![0x6a]), // OP_RETURN
+            }],
+            special_transaction_payload: None,
+        };
+        let block = |height: u32| {
+            TransactionContext::InBlock(BlockInfo::new(
+                height,
+                BlockHash::from_slice(&[height as u8; 32]).expect("valid block hash"),
+                1_700_000_000,
+            ))
+        };
+        // 1. Spend processed first: irrelevant to the wallet (input unknown,
+        //    no wallet output) — but its inputs are recorded as observed spent.
+        let spend_result = ctx.check_transaction(&burn, block(900)).await;
+        assert!(
+            !spend_result.is_relevant,
+            "a spend of an unknown coin is not relevant yet"
+        );
+        assert!(
+            ctx.managed_wallet
+                .observed_spent_outpoints()
+                .contains_key(&coin),
+            "key-wallet must have recorded the spent outpoint"
+        );
+        // 2. The coin's block arrives later: relevant (pays our address), the
+        //    record lists the output as received, but the UTXO is skipped.
+        let coin_result = ctx.check_transaction(&coin_tx, block(800)).await;
+        assert!(coin_result.is_relevant);
+        assert!(
+            !ctx.bip44_account().utxos.contains_key(&coin),
+            "engine skips the born-spent UTXO (#649)"
+        );
+        let coin_record = coin_result
+            .new_records
+            .first()
+            .expect("the coin's record was emitted")
+            .clone();
+        assert!(
+            coin_record
+                .output_details
+                .iter()
+                .any(|d| d.index == 0 && matches!(d.role, OutputRole::Received)),
+            "the record still says Received — nothing on it marks the output spent"
+        );
+
+        let info = PlatformWalletInfo {
+            core_wallet: ctx.managed_wallet,
+            generation: Arc::new(WalletGeneration::new()),
+            identity_manager: IdentityManager::new(),
+            tracked_asset_locks: BTreeMap::new(),
+            dpns_name_states: BTreeMap::new(),
+            observed_input_conflicts: Default::default(),
+        };
+        let mut wm = WalletManager::<PlatformWalletInfo>::new(dashcore::Network::Testnet);
+        let wallet_id = wm.insert_wallet(ctx.wallet, info).expect("insert wallet");
+        let manager = Arc::new(RwLock::new(wm));
+
+        // 3. The BlockProcessed event for the coin's block.
+        let event = WalletEvent::BlockProcessed {
+            wallet_id,
+            height: 800,
+            chain_lock: None,
+            inserted: vec![coin_record.clone()],
+            updated: vec![],
+            matured: vec![],
+            balance: WalletCoreBalance::default(),
+            account_balances: BTreeMap::new(),
+            addresses_derived: vec![],
+        };
+        let cs = build_core_changeset(&manager, &event).await;
+        assert!(
+            cs.new_utxos.iter().all(|u| u.outpoint != coin),
+            "a born-spent output must not be persisted as a spendable coin"
+        );
+        assert_eq!(
+            cs.records.len(),
+            1,
+            "the transaction row itself is still persisted"
+        );
+        assert_eq!(cs.records[0].txid, coin_tx.txid());
+
+        // 4. Same through the live-detection arm.
+        let detected = WalletEvent::TransactionDetected {
+            wallet_id,
+            record: Box::new(coin_record),
+            balance: WalletCoreBalance::default(),
+            account_balances: BTreeMap::new(),
+            addresses_derived: vec![],
+        };
+        let cs = build_core_changeset(&manager, &detected).await;
+        assert!(cs.new_utxos.iter().all(|u| u.outpoint != coin));
+    }
+
+    /// Control: the same coin with no spend observed IS persisted.
+    #[tokio::test]
+    async fn unspent_output_is_still_persisted_as_a_coin() {
+        use super::build_core_changeset;
+        use crate::wallet::core::WalletGeneration;
+        use crate::wallet::identity::IdentityManager;
+        use dashcore::hashes::Hash;
+        use dashcore::{BlockHash, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Witness};
+        use key_wallet::managed_account::transaction_record::OutputRole;
+        use key_wallet::test_utils::TestWalletContext;
+        use key_wallet::transaction_checking::{BlockInfo, TransactionContext};
+
+        let mut ctx = TestWalletContext::new_random();
+        let coin_tx = Transaction::dummy(&ctx.receive_address, 0..1, &[100_000]);
+        let coin_result = ctx
+            .check_transaction(
+                &coin_tx,
+                TransactionContext::InBlock(BlockInfo::new(
+                    800,
+                    BlockHash::from_slice(&[8u8; 32]).expect("valid block hash"),
+                    1_700_000_000,
+                )),
+            )
+            .await;
+        let coin_record = coin_result.new_records.first().expect("record").clone();
+        let info = PlatformWalletInfo {
+            core_wallet: ctx.managed_wallet,
+            generation: Arc::new(WalletGeneration::new()),
+            identity_manager: IdentityManager::new(),
+            tracked_asset_locks: BTreeMap::new(),
+            dpns_name_states: BTreeMap::new(),
+            observed_input_conflicts: Default::default(),
+        };
+        let mut wm = WalletManager::<PlatformWalletInfo>::new(dashcore::Network::Testnet);
+        let wallet_id = wm.insert_wallet(ctx.wallet, info).expect("insert wallet");
+        let manager = Arc::new(RwLock::new(wm));
+        let event = WalletEvent::BlockProcessed {
+            wallet_id,
+            height: 800,
+            chain_lock: None,
+            inserted: vec![coin_record],
+            updated: vec![],
+            matured: vec![],
+            balance: WalletCoreBalance::default(),
+            account_balances: BTreeMap::new(),
+            addresses_derived: vec![],
+        };
+        let cs = build_core_changeset(&manager, &event).await;
+        assert_eq!(cs.new_utxos.len(), 1);
+        assert_eq!(
+            cs.new_utxos[0].outpoint,
+            OutPoint {
+                txid: coin_tx.txid(),
+                vout: 0
+            }
         );
     }
 }
