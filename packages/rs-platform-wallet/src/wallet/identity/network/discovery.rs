@@ -151,13 +151,6 @@ impl Default for IdentityDiscoveryOptions {
 }
 
 impl IdentityWallet {
-    /// Thin wrapper around [`Self::discover`] using default options —
-    /// resume from the cached scan index, stop after `IDENTITY_GAP_LIMIT`
-    /// consecutive misses. Kept for back-compat with existing callers.
-    pub async fn sync(&self) -> Result<Vec<Identity>, PlatformWalletError> {
-        self.discover(IdentityDiscoveryOptions::default()).await
-    }
-
     /// Discover identities owned by this wallet via gap-limit scanning.
     ///
     /// For each identity index starting at `opts.start_index` (or one
@@ -851,7 +844,7 @@ mod tests {
     use dpp::identity::{Identity, IdentityPublicKey, KeyID, KeyType, Purpose, SecurityLevel};
     use dpp::prelude::Identifier;
     use key_wallet::bip32::ExtendedPrivKey;
-    use key_wallet::mnemonic::{Language, Mnemonic};
+    use key_wallet::mnemonic::Mnemonic;
     use key_wallet::Network;
     use std::collections::BTreeMap;
 
@@ -859,7 +852,7 @@ mod tests {
          abandon abandon abandon abandon abandon about";
 
     fn test_master() -> ExtendedPrivKey {
-        let mnemonic = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English).expect("mnemonic");
+        let mnemonic = Mnemonic::from_phrase(TEST_MNEMONIC).expect("mnemonic");
         let seed = mnemonic.to_seed("");
         ExtendedPrivKey::new_master(Network::Testnet, &seed).expect("master xpriv")
     }

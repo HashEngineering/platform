@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use dash_spv::chain::CheckpointManager;
-use key_wallet::mnemonic::{Language, Mnemonic};
+use key_wallet::mnemonic::Mnemonic;
 use key_wallet::wallet::initialization::WalletAccountCreationOptions;
 use key_wallet::wallet::managed_wallet_info::ManagedWalletInfo;
 use key_wallet::wallet::Wallet;
@@ -22,33 +22,15 @@ use crate::wallet::PlatformWallet;
 
 use super::PlatformWalletManager;
 
-/// Parse a BIP-39 mnemonic against every supported wordlist in turn,
-/// returning the first language that yields a valid mnemonic.
+/// Parse a BIP-39 mnemonic in any supported language.
 ///
-/// `key_wallet::Mnemonic` only exposes language-tagged constructors,
-/// so callers that take a user-supplied mnemonic must walk the
-/// language list themselves to avoid rejecting non-English phrases as
-/// "invalid English". BIP-39 wordlists are mutually exclusive per
-/// phrase, so the first match is unambiguous.
+/// Since rust-dashcore#981 `Mnemonic::from_phrase` IS the auto-detecting
+/// parse — one path, with English diagnostics kept when nothing matches —
+/// so there is no language list left for a caller to walk. What remains is
+/// the error narrowing: callers report a `&'static str`, and this is where
+/// upstream's richer error is reduced to one.
 fn parse_mnemonic_any_language(phrase: &str) -> Result<Mnemonic, &'static str> {
-    const LANGUAGES: [Language; 10] = [
-        Language::English,
-        Language::Spanish,
-        Language::French,
-        Language::Italian,
-        Language::Japanese,
-        Language::Korean,
-        Language::ChineseSimplified,
-        Language::ChineseTraditional,
-        Language::Czech,
-        Language::Portuguese,
-    ];
-    for lang in LANGUAGES {
-        if let Ok(m) = Mnemonic::from_phrase(phrase, lang) {
-            return Ok(m);
-        }
-    }
-    Err("phrase does not match any supported BIP-39 wordlist")
+    Mnemonic::from_phrase(phrase).map_err(|_| "phrase does not match any supported BIP-39 wordlist")
 }
 
 /// Test-only rendezvous fired inside [`PlatformWalletManager::remove_wallet_with_teardown`],
@@ -620,24 +602,17 @@ impl<P: PlatformWalletPersistence + 'static> PlatformWalletManager<P> {
             }
         }
 
-        // Best-effort identity discovery. For a recovery flow (existing
-        // mnemonic re-typed by the user) this hydrates every identity
-        // the wallet had on Platform without the caller having to fire
-        // `discover` manually. For a fresh wallet the gap-limit miss
-        // loop bails out after a handful of empty queries (~seconds)
-        // and produces nothing — same end state, slightly slower than
-        // skipping. Failures here are logged but never block wallet
-        // registration: a sync hiccup or offline DAPI shouldn't lose
-        // the user the wallet they just imported.
-        if let Err(e) = platform_wallet.identity().sync().await {
-            tracing::warn!(
-                wallet_id = %hex::encode(wallet_id),
-                error = %e,
-                "Identity discovery failed during wallet registration; \
-                 callers can retry via PlatformWallet::identity().discover()"
-            );
-        }
-
+        // Registration deliberately runs no identity discovery. The wallet
+        // was downgraded to external-signable above, so the resident-key
+        // scan (`identity().discover(..)`) cannot derive its first auth key and
+        // fails before ever reaching Platform — all it did here was wait on
+        // the wallet-manager lock twice, spend one host persistence round
+        // and leave a spurious "scan incomplete at index 0" verdict behind
+        // (on a host whose persister commit was in flight, that wait
+        // stretched a wallet import to minutes). Discovery belongs to the
+        // host's startup sequence (`start_wallet_subsystems`: budgeted,
+        // master key resolved on demand) or to an explicit
+        // `identity().discover_from_master(..)`.
         Ok(platform_wallet)
     }
 
@@ -956,7 +931,7 @@ impl<P: PlatformWalletPersistence + 'static> PlatformWalletManager<P> {
 
 #[cfg(test)]
 mod scoped_wallet_id_tests {
-    use key_wallet::mnemonic::{Language, Mnemonic};
+    use key_wallet::mnemonic::Mnemonic;
     use key_wallet::wallet::initialization::WalletAccountCreationOptions;
     use key_wallet::wallet::Wallet;
     use key_wallet::Network;
@@ -967,8 +942,7 @@ mod scoped_wallet_id_tests {
          abandon abandon abandon abandon abandon about";
 
     fn wallet_id_for(network: Network) -> [u8; 32] {
-        let mnemonic =
-            Mnemonic::from_phrase(TEST_MNEMONIC, Language::English).expect("valid test mnemonic");
+        let mnemonic = Mnemonic::from_phrase(TEST_MNEMONIC).expect("valid test mnemonic");
         let wallet =
             Wallet::from_mnemonic(mnemonic, network, WalletAccountCreationOptions::Default)
                 .expect("wallet construction");
@@ -983,8 +957,7 @@ mod scoped_wallet_id_tests {
     /// "Networks" section can group a seed's sibling-network wallets.
     /// Mirrors the `register_wallet` derivation exactly.
     fn wallet_group_id_for(network: Network) -> [u8; 32] {
-        let mnemonic =
-            Mnemonic::from_phrase(TEST_MNEMONIC, Language::English).expect("valid test mnemonic");
+        let mnemonic = Mnemonic::from_phrase(TEST_MNEMONIC).expect("valid test mnemonic");
         let wallet =
             Wallet::from_mnemonic(mnemonic, network, WalletAccountCreationOptions::Default)
                 .expect("wallet construction");
@@ -1065,9 +1038,9 @@ mod scoped_wallet_id_tests {
 
 #[cfg(test)]
 mod register_wallet_duplicate_tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
-    use key_wallet::mnemonic::{Language, Mnemonic};
+    use key_wallet::mnemonic::Mnemonic;
     use key_wallet::wallet::initialization::WalletAccountCreationOptions;
     use key_wallet::Network;
 
@@ -1109,11 +1082,90 @@ mod register_wallet_duplicate_tests {
     impl EventHandler for NoopEventHandler {}
     impl PlatformEventHandler for NoopEventHandler {}
 
+    /// Persister that records every store round so a test can assert on
+    /// exactly what registration hands the host.
+    #[derive(Default)]
+    struct RecordingPersister {
+        stores: Mutex<Vec<(WalletId, PlatformWalletChangeSet)>>,
+    }
+
+    impl PlatformWalletPersistence for RecordingPersister {
+        fn store(
+            &self,
+            wallet_id: WalletId,
+            changeset: PlatformWalletChangeSet,
+        ) -> Result<(), PersistenceError> {
+            self.stores.lock().unwrap().push((wallet_id, changeset));
+            Ok(())
+        }
+
+        fn flush(&self, _wallet_id: WalletId) -> Result<(), PersistenceError> {
+            Ok(())
+        }
+
+        fn load(&self) -> Result<ClientStartState, PersistenceError> {
+            Ok(ClientStartState::default())
+        }
+    }
+
+    /// Registration must not run (or record) an identity scan: the wallet
+    /// is downgraded to external-signable before it could, so the scan
+    /// never reached Platform — it only left a spurious "incomplete at
+    /// index 0" verdict and one extra host persistence round behind.
+    /// Against the pre-fix `register_wallet` both assertions fail.
+    #[tokio::test]
+    async fn register_wallet_records_no_identity_scan_verdict() {
+        let sdk = Arc::new(dash_sdk::SdkBuilder::new_mock().build().expect("mock sdk"));
+        let persister = Arc::new(RecordingPersister::default());
+        let event_handler: Arc<dyn PlatformEventHandler> = Arc::new(NoopEventHandler);
+        let manager = Arc::new(PlatformWalletManager::new(
+            sdk,
+            Arc::clone(&persister),
+            event_handler,
+        ));
+
+        let seed_bytes = Mnemonic::from_phrase(TEST_MNEMONIC)
+            .expect("valid test mnemonic")
+            .to_seed("");
+        let wallet = manager
+            .create_wallet_from_seed_bytes(
+                Network::Testnet,
+                &seed_bytes,
+                WalletAccountCreationOptions::Default,
+                Some(0),
+            )
+            .await
+            .expect("create should succeed");
+
+        // Read the verdict out before the await below (no std guard across it).
+        let persisted_no_scan = persister
+            .stores
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, cs)| cs.identity_scan_state.is_none() && cs.identities.is_none());
+        assert!(
+            persisted_no_scan,
+            "registration must not persist an identity-scan verdict or identities"
+        );
+
+        let wm = wallet.wallet_manager().read().await;
+        let info = wm
+            .get_wallet_info(&wallet.wallet_id())
+            .expect("wallet info");
+        assert!(
+            !info
+                .identity_manager
+                .identity_scan_is_incomplete(&wallet.wallet_id()),
+            "registration must not leave an incomplete-scan verdict behind"
+        );
+    }
+
     /// Build a manager wired to a no-op persister over a mock SDK. The
-    /// duplicate-create path under test never reaches the network: the
-    /// first `create` returns `Ok` (its only network touch — best-effort
-    /// `identity().sync()` — is logged-and-ignored), and the second
-    /// fails at `WalletManager::insert_wallet` before any query.
+    /// duplicate-create path under test never reaches the network:
+    /// registration runs no identity discovery, so the first `create`
+    /// returns `Ok` without a query, and the second fails at
+    /// `WalletManager::insert_wallet` before any.
     fn make_manager() -> Arc<PlatformWalletManager<NoopPersister>> {
         let sdk = Arc::new(dash_sdk::SdkBuilder::new_mock().build().expect("mock sdk"));
         let persister = Arc::new(NoopPersister);
@@ -1133,8 +1185,7 @@ mod register_wallet_duplicate_tests {
         let manager = make_manager();
 
         let network = Network::Testnet;
-        let mnemonic =
-            Mnemonic::from_phrase(TEST_MNEMONIC, Language::English).expect("valid test mnemonic");
+        let mnemonic = Mnemonic::from_phrase(TEST_MNEMONIC).expect("valid test mnemonic");
         let seed_bytes = mnemonic.to_seed("");
 
         // First registration succeeds. `Some(0)` skips the SPV-tip
@@ -1194,7 +1245,7 @@ mod register_wallet_duplicate_tests {
 
         let manager = make_manager();
         let network = Network::Testnet;
-        let seed_bytes = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+        let seed_bytes = Mnemonic::from_phrase(TEST_MNEMONIC)
             .expect("valid test mnemonic")
             .to_seed("");
 
@@ -1272,7 +1323,7 @@ mod register_wallet_duplicate_tests {
         use dashcore::{OutPoint, ScriptBuf, Transaction, TxIn, Txid, Witness};
 
         let manager = make_manager();
-        let seed_bytes = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+        let seed_bytes = Mnemonic::from_phrase(TEST_MNEMONIC)
             .expect("valid test mnemonic")
             .to_seed("");
 
@@ -1338,7 +1389,7 @@ mod remove_versus_recreate_tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use key_wallet::mnemonic::{Language, Mnemonic};
+    use key_wallet::mnemonic::Mnemonic;
     use key_wallet::wallet::initialization::WalletAccountCreationOptions;
     use key_wallet::Network;
 
@@ -1457,8 +1508,8 @@ mod remove_versus_recreate_tests {
                     if already_fired {
                         return;
                     }
-                    let mnemonic = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
-                        .expect("valid test mnemonic");
+                    let mnemonic =
+                        Mnemonic::from_phrase(TEST_MNEMONIC).expect("valid test mnemonic");
                     let seed_bytes = mnemonic.to_seed("");
                     // The real registration path: inner `WalletManager` first,
                     // then `self.wallets`. `Some(0)` skips the SPV-tip lookup.

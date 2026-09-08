@@ -1688,7 +1688,7 @@ mod tests {
     use dpp::prelude::Identifier;
     use key_wallet::account::account_collection::DashpayAccountKey;
     use key_wallet::managed_account::managed_account_trait::ManagedAccountTrait;
-    use key_wallet::mnemonic::{Language, Mnemonic};
+    use key_wallet::mnemonic::Mnemonic;
     use key_wallet::wallet::initialization::WalletAccountCreationOptions;
     use key_wallet::Network;
 
@@ -1925,8 +1925,7 @@ mod tests {
             Arc::clone(&persister),
             handler,
         ));
-        let mnemonic =
-            Mnemonic::from_phrase(TEST_MNEMONIC, Language::English).expect("valid mnemonic");
+        let mnemonic = Mnemonic::from_phrase(TEST_MNEMONIC).expect("valid mnemonic");
         let seed = mnemonic.to_seed("");
         let wallet = manager
             .create_wallet_from_seed_bytes(
@@ -1958,8 +1957,7 @@ mod tests {
             Arc::clone(&persister),
             handler,
         ));
-        let mnemonic =
-            Mnemonic::from_phrase(TEST_MNEMONIC, Language::English).expect("valid mnemonic");
+        let mnemonic = Mnemonic::from_phrase(TEST_MNEMONIC).expect("valid mnemonic");
         let seed = mnemonic.to_seed("");
         let wallet = manager
             .create_wallet_from_seed_bytes(
@@ -1994,8 +1992,7 @@ mod tests {
             Arc::clone(&persister),
             handler,
         ));
-        let mnemonic =
-            Mnemonic::from_phrase(TEST_MNEMONIC, Language::English).expect("valid mnemonic");
+        let mnemonic = Mnemonic::from_phrase(TEST_MNEMONIC).expect("valid mnemonic");
         let seed = mnemonic.to_seed("");
         let wallet = manager
             .create_wallet_from_seed_bytes(
@@ -2021,7 +2018,7 @@ mod tests {
         owner: &Identifier,
         contact: &Identifier,
     ) -> key_wallet::bip32::ExtendedPubKey {
-        let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+        let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
             .expect("valid mnemonic")
             .to_seed("");
         let wallet = key_wallet::wallet::Wallet::from_seed_bytes(
@@ -2641,8 +2638,7 @@ mod tests {
             Arc::clone(&persister),
             handler,
         ));
-        let mnemonic =
-            Mnemonic::from_phrase(TEST_MNEMONIC, Language::English).expect("valid mnemonic");
+        let mnemonic = Mnemonic::from_phrase(TEST_MNEMONIC).expect("valid mnemonic");
         let seed = mnemonic.to_seed("");
         let wallet = manager
             .create_wallet_from_seed_bytes(
@@ -4911,7 +4907,7 @@ mod tests {
         let shared_key = [0x55u8; 32];
         let iv = [0x11u8; 16];
         let compact = {
-            let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+            let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
                 .expect("mnemonic")
                 .to_seed("");
             let w = key_wallet::wallet::Wallet::from_seed_bytes(
@@ -5217,8 +5213,7 @@ mod tests {
 
         // The signer's seed (the faithful test stand-in derives from it).
         let seed = {
-            let mnemonic =
-                Mnemonic::from_phrase(TEST_MNEMONIC, Language::English).expect("valid mnemonic");
+            let mnemonic = Mnemonic::from_phrase(TEST_MNEMONIC).expect("valid mnemonic");
             mnemonic.to_seed("")
         };
 
@@ -5362,7 +5357,7 @@ mod tests {
 
         let watched = Identifier::from([0x42; 32]);
         let contact = Identifier::from([0x22; 32]);
-        let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+        let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
             .expect("valid mnemonic")
             .to_seed("");
 
@@ -5489,7 +5484,7 @@ mod tests {
             Arc::clone(&persister),
             handler,
         ));
-        let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+        let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
             .expect("valid mnemonic")
             .to_seed("");
         let wallet_id = manager
@@ -5634,7 +5629,7 @@ mod tests {
         }
 
         let provider = SeedCryptoProvider::from_seed(
-            Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+            Mnemonic::from_phrase(TEST_MNEMONIC)
                 .expect("valid mnemonic")
                 .to_seed(""),
             Network::Testnet,
@@ -5710,7 +5705,7 @@ mod tests {
             )
             .expect("auth path at the legacy key id");
 
-        let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+        let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
             .expect("valid mnemonic")
             .to_seed("");
         let provider = SeedCryptoProvider::from_seed(seed, Network::Testnet);
@@ -5857,7 +5852,7 @@ mod tests {
             Arc::clone(&persister),
             handler,
         ));
-        let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+        let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
             .expect("valid mnemonic")
             .to_seed("");
         let wallet_id = manager
@@ -6088,7 +6083,7 @@ mod tests {
         let (manager, _persister, wallet_id) = make_watch_only_wallet().await;
         let iw = manager.get_wallet(&wallet_id).await.expect("wallet");
         let iw = iw.identity();
-        let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+        let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
             .expect("mnemonic")
             .to_seed("");
         let provider = SeedCryptoProvider::from_seed(seed, Network::Testnet);
@@ -6196,7 +6191,7 @@ mod tests {
         // so the send fails AFTER the drain has run.
         let pay_contact = Identifier::from([0x22; 32]);
 
-        let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+        let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
             .expect("valid mnemonic")
             .to_seed("");
 
@@ -6301,7 +6296,7 @@ mod tests {
         let shared_key = [0x55u8; 32];
         let iv = [0x11u8; 16];
         let compact = {
-            let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+            let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
                 .expect("mnemonic")
                 .to_seed("");
             let w = key_wallet::wallet::Wallet::from_seed_bytes(
@@ -6334,7 +6329,7 @@ mod tests {
             .await
             .expect("register external account");
 
-        let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+        let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
             .expect("valid mnemonic")
             .to_seed("");
         let provider = SeedCryptoProvider::from_seed(seed, Network::Testnet);
@@ -6410,7 +6405,7 @@ mod tests {
 
         // The sending side, so the external-account lookup passes.
         let shared_key = [0x55u8; 32];
-        let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+        let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
             .expect("mnemonic")
             .to_seed("");
         let compact = {
@@ -6495,7 +6490,7 @@ mod tests {
         let shared_key = [0x55u8; 32];
         let iv = [0x11u8; 16];
         let compact = {
-            let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+            let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
                 .expect("mnemonic")
                 .to_seed("");
             let w = key_wallet::wallet::Wallet::from_seed_bytes(
@@ -6528,7 +6523,7 @@ mod tests {
             .await
             .expect("register external account");
 
-        let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+        let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
             .expect("valid mnemonic")
             .to_seed("");
         let provider = SeedCryptoProvider::from_seed(seed, Network::Testnet);
@@ -6609,7 +6604,7 @@ mod tests {
             .expect("register receiving account");
         plant_receival_utxo(&manager, wallet_id, owner_id, contact_id, 0xC2, 60_000).await;
 
-        let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+        let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
             .expect("valid mnemonic")
             .to_seed("");
         let provider = SeedCryptoProvider::from_seed(seed, Network::Testnet);
@@ -6657,7 +6652,7 @@ mod tests {
         // broadcast (and its preceding used-flip persist).
         fund_bip44_account_0(&manager, wallet_id, 0xB7, 120_000).await;
 
-        let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+        let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
             .expect("valid mnemonic")
             .to_seed("");
         let provider = SeedCryptoProvider::from_seed(seed, Network::Testnet);
@@ -6832,7 +6827,7 @@ mod tests {
         let shared_key = [0x55u8; 32];
         let iv = [0x11u8; 16];
         let compact = {
-            let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+            let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
                 .expect("mnemonic")
                 .to_seed("");
             let w = key_wallet::wallet::Wallet::from_seed_bytes(
@@ -6875,7 +6870,7 @@ mod tests {
         // broadcast (a funding-build failure returns before it).
         fund_bip44_account_0(&manager, wallet_id, 0xA1, 60_000).await;
 
-        let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+        let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
             .expect("valid mnemonic")
             .to_seed("");
         let provider = SeedCryptoProvider::from_seed(seed, Network::Testnet);
@@ -6960,7 +6955,7 @@ mod tests {
             vout: 0,
         };
 
-        let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+        let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
             .expect("valid mnemonic")
             .to_seed("");
         let provider = SeedCryptoProvider::from_seed(seed, Network::Testnet);
@@ -7059,7 +7054,7 @@ mod tests {
             vout: 0,
         };
 
-        let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+        let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
             .expect("valid mnemonic")
             .to_seed("");
         let provider = SeedCryptoProvider::from_seed(seed, Network::Testnet);
@@ -7171,7 +7166,7 @@ mod tests {
             vout: 0,
         };
 
-        let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+        let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
             .expect("valid mnemonic")
             .to_seed("");
         let provider = SeedCryptoProvider::from_seed(seed, Network::Testnet);
@@ -7468,7 +7463,7 @@ mod tests {
         let shared_key = [0x55u8; 32];
         let iv = [0x11u8; 16];
         let compact = {
-            let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+            let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
                 .expect("mnemonic")
                 .to_seed("");
             let w = key_wallet::wallet::Wallet::from_seed_bytes(
@@ -7528,7 +7523,7 @@ mod tests {
         let funded = amount + 526;
         fund_bip44_account_0(&manager, wallet_id, 0xA1, funded).await;
 
-        let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+        let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
             .expect("valid mnemonic")
             .to_seed("");
         let provider = SeedCryptoProvider::from_seed(seed, Network::Testnet);
@@ -7583,7 +7578,7 @@ mod tests {
         let funded = amount + 1226;
         fund_bip44_account_0(&manager, wallet_id, 0xB2, funded).await;
 
-        let seed = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
+        let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
             .expect("valid mnemonic")
             .to_seed("");
         let provider = SeedCryptoProvider::from_seed(seed, Network::Testnet);
