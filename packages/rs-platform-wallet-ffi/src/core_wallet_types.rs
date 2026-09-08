@@ -407,6 +407,14 @@ impl WalletChangeSetFFI {
             }
         }
 
+        // Outputs the engine never inserted as UTXOs (already observed spent
+        // in an earlier-processed block — see `CoreChangeSet::born_spent_outpoints`).
+        // The per-account UTXO list below is re-derived from the records'
+        // `output_details`, which still say `Received`/`Change` for them, so
+        // they have to be excluded here or the store gets a spendable coin the
+        // engine does not hold.
+        let born_spent: std::collections::HashSet<dashcore::OutPoint> =
+            cs.born_spent_outpoints.iter().copied().collect();
         let mut ffi_accounts = Vec::with_capacity(by_account.len());
         for (account_type, tx_rows, utxo_slices) in by_account {
             let type_name = CString::new(format!("{:?}", account_type))
@@ -420,7 +428,7 @@ impl WalletChangeSetFFI {
             let mut utxos_added: Vec<UtxoEntryFFI> = Vec::new();
             let mut utxos_spent: Vec<SpentOutPointFFI> = Vec::new();
             for rec in &utxo_slices {
-                utxos_added.extend(record_new_utxos_ffi(rec));
+                utxos_added.extend(record_new_utxos_ffi(rec, &born_spent));
                 utxos_spent.extend(record_spent_outpoints_ffi(rec));
             }
 
@@ -863,6 +871,7 @@ pub fn account_type_to_tags(at: &key_wallet::account::AccountType) -> AccountCha
 /// further down the stack so the FFI conversion stays self-contained.
 fn record_new_utxos_ffi(
     rec: &key_wallet::managed_account::transaction_record::TransactionRecord,
+    born_spent: &std::collections::HashSet<dashcore::OutPoint>,
 ) -> Vec<UtxoEntryFFI> {
     use key_wallet::managed_account::transaction_record::OutputRole;
     use key_wallet::transaction_checking::TransactionContext;
@@ -880,6 +889,14 @@ fn record_new_utxos_ffi(
         .iter()
         .filter_map(|d| {
             if !matches!(d.role, OutputRole::Received | OutputRole::Change) {
+                return None;
+            }
+            // Born-spent: the engine skipped this UTXO (#649); do not hand the
+            // persister a coin it does not hold. Checked before any allocation.
+            if born_spent.contains(&dashcore::OutPoint {
+                txid: rec.txid,
+                vout: d.index,
+            }) {
                 return None;
             }
             let txout = rec.transaction.output.get(d.index as usize)?;
@@ -1721,6 +1738,101 @@ mod tests {
     /// restart restoration selects provider transactions through it.
     /// The provider bucket must therefore receive the folded row even
     /// though it contributes no TXO deltas.
+    /// A record whose output the engine never inserted as a UTXO (already
+    /// observed spent in an earlier-processed block, rust-dashcore#649) still
+    /// says `Received` in `output_details`. The projection re-derives per-account
+    /// UTXOs from records, so it must honour `born_spent_outpoints` — otherwise
+    /// the store gets a spendable coin the engine does not hold (6 coins on a
+    /// 370-burn CoinJoin wallet, 2026-09-05). The transaction row itself stays.
+    #[test]
+    fn born_spent_outpoint_is_withheld_from_the_owning_bucket() {
+        use dashcore::{Address, Network, OutPoint, ScriptBuf, TxIn, TxOut, Witness};
+        use key_wallet::managed_account::transaction_record::{
+            OutputDetail, OutputRole, TransactionDirection, TransactionRecord,
+        };
+        use key_wallet::transaction_checking::transaction_router::TransactionType;
+        use key_wallet::transaction_checking::TransactionContext;
+        let bip44 = AccountType::Standard {
+            index: 0,
+            standard_account_type: StandardAccountType::BIP44Account,
+        };
+        let ours = Address::dummy(Network::Testnet, 5);
+        let tx = dashcore::Transaction {
+            version: 2,
+            lock_time: 0,
+            input: vec![TxIn {
+                previous_output: OutPoint::default(),
+                script_sig: ScriptBuf::new(),
+                sequence: 0xffffffff,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: 100_000,
+                script_pubkey: ours.script_pubkey(),
+            }],
+            special_transaction_payload: None,
+        };
+        let coin = OutPoint {
+            txid: tx.txid(),
+            vout: 0,
+        };
+        let received = TransactionRecord::new(
+            tx.clone(),
+            bip44,
+            TransactionContext::Mempool,
+            TransactionType::Standard,
+            TransactionDirection::Incoming,
+            vec![],
+            vec![OutputDetail {
+                index: 0,
+                role: OutputRole::Received,
+                address: Some(ours.clone()),
+                value: 100_000,
+            }],
+            100_000,
+        );
+        // Control: nothing withheld -> the coin is projected.
+        let plain = CoreChangeSet {
+            records: vec![received.clone()],
+            account_records: vec![received.clone()],
+            ..CoreChangeSet::default()
+        };
+        let ffi = WalletChangeSetFFI::from_changeset(&plain);
+        let buckets = unsafe { std::slice::from_raw_parts(ffi.accounts, ffi.accounts_count) };
+        let bucket = buckets
+            .iter()
+            .find(|b| b.type_tag == account_type_to_tags(&bip44).type_tag)
+            .expect("bip44 bucket");
+        assert_eq!(
+            bucket.utxos_added_count, 1,
+            "control: a plain receive projects its coin"
+        );
+        assert_eq!(bucket.transactions_count, 1);
+        unsafe { free_wallet_changeset_ffi(&ffi) };
+        // Born-spent: the same record, but the changeset says the engine never
+        // held the coin.
+        let withheld = CoreChangeSet {
+            records: vec![received.clone()],
+            account_records: vec![received],
+            born_spent_outpoints: vec![coin],
+            ..CoreChangeSet::default()
+        };
+        let ffi = WalletChangeSetFFI::from_changeset(&withheld);
+        let buckets = unsafe { std::slice::from_raw_parts(ffi.accounts, ffi.accounts_count) };
+        let bucket = buckets
+            .iter()
+            .find(|b| b.type_tag == account_type_to_tags(&bip44).type_tag)
+            .expect("bip44 bucket");
+        assert_eq!(
+            bucket.utxos_added_count, 0,
+            "a born-spent output must not reach the persister as a coin"
+        );
+        assert_eq!(
+            bucket.transactions_count, 1,
+            "the transaction row itself is still delivered"
+        );
+        unsafe { free_wallet_changeset_ffi(&ffi) };
+    }
     #[test]
     fn payload_only_provider_account_still_receives_the_transaction_row() {
         use dashcore::{Address, Network, OutPoint, ScriptBuf, TxIn, TxOut, Witness};

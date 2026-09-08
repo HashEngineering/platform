@@ -832,6 +832,11 @@ async fn build_core_changeset(
             let mut folded = owned.clone();
             crate::changeset::changeset::fold_same_txid_records(&mut folded);
             let observed_spent = observed_spent_outpoints_for(wallet_manager, wallet_id).await;
+            let (new_utxos, born_spent_outpoints) = drop_born_spent(
+                owned.iter().flat_map(derive_new_utxos).collect(),
+                &observed_spent,
+                wallet_id,
+            );
             CoreChangeSet {
                 // New UTXOs from the owned slices only (a watch-only
                 // chain's outputs are the contact's coins); spends
@@ -839,11 +844,8 @@ async fn build_core_changeset(
                 // pre-fix build persisted still clears the stale row.
                 // Outputs the wallet already saw spent are never
                 // persisted as coins — see `drop_born_spent`.
-                new_utxos: drop_born_spent(
-                    owned.iter().flat_map(derive_new_utxos).collect(),
-                    &observed_spent,
-                    wallet_id,
-                ),
+                new_utxos,
+                born_spent_outpoints,
                 spent_utxos: slices.iter().flat_map(derive_spent_utxos).collect(),
                 records: folded,
                 account_records: owned,
@@ -894,11 +896,13 @@ async fn build_core_changeset(
             // An output the wallet has already seen spent in an earlier-
             // processed block is not a coin — see `drop_born_spent`.
             let observed_spent = observed_spent_outpoints_for(wallet_manager, wallet_id).await;
-            cs.new_utxos = drop_born_spent(
+            let (live, born_spent_outpoints) = drop_born_spent(
                 std::mem::take(&mut cs.new_utxos),
                 &observed_spent,
                 wallet_id,
             );
+            cs.new_utxos = live;
+            cs.born_spent_outpoints = born_spent_outpoints;
             // Updated records (re-confirmation, IS-lock applied to a known
             // mempool tx, etc.) don't usually change UTXO topology — the
             // record's content does change though, so re-emit it.
@@ -1318,9 +1322,9 @@ fn drop_born_spent(
     new_utxos: Vec<Utxo>,
     observed_spent: &HashSet<OutPoint>,
     wallet_id: &WalletId,
-) -> Vec<Utxo> {
+) -> (Vec<Utxo>, Vec<OutPoint>) {
     if observed_spent.is_empty() {
-        return new_utxos;
+        return (new_utxos, Vec::new());
     }
     let (born_spent, live): (Vec<Utxo>, Vec<Utxo>) = new_utxos
         .into_iter()
@@ -1345,7 +1349,7 @@ fn drop_born_spent(
             if born_spent.len() > 4 { ", …" } else { "" }
         );
     }
-    live
+    (live, born_spent.into_iter().map(|u| u.outpoint).collect())
 }
 
 /// Derive the "ours" UTXOs created by a transaction's outputs.
@@ -4508,6 +4512,11 @@ mod tests {
             "a born-spent output must not be persisted as a spendable coin"
         );
         assert_eq!(
+            cs.born_spent_outpoints,
+            vec![coin],
+            "the withheld outpoint travels with the changeset for persisters that re-derive UTXOs from records"
+        );
+        assert_eq!(
             cs.records.len(),
             1,
             "the transaction row itself is still persisted"
@@ -4524,6 +4533,7 @@ mod tests {
         };
         let cs = build_core_changeset(&manager, &detected).await;
         assert!(cs.new_utxos.iter().all(|u| u.outpoint != coin));
+        assert_eq!(cs.born_spent_outpoints, vec![coin]);
     }
 
     /// Control: the same coin with no spend observed IS persisted.
@@ -4533,8 +4543,7 @@ mod tests {
         use crate::wallet::core::WalletGeneration;
         use crate::wallet::identity::IdentityManager;
         use dashcore::hashes::Hash;
-        use dashcore::{BlockHash, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Witness};
-        use key_wallet::managed_account::transaction_record::OutputRole;
+        use dashcore::{BlockHash, OutPoint, Transaction};
         use key_wallet::test_utils::TestWalletContext;
         use key_wallet::transaction_checking::{BlockInfo, TransactionContext};
 

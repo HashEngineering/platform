@@ -138,6 +138,19 @@ pub struct CoreChangeSet {
     /// `OutputRole::Change` per the upstream `TransactionRecord`).
     pub new_utxos: Vec<Utxo>,
 
+    /// Outputs of records in this batch that the wallet has ALREADY seen
+    /// spent in an earlier-processed block (key-wallet's
+    /// `observed_spent_outpoints`, dashpay/rust-dashcore#649) — so the engine
+    /// never inserted them as UTXOs, even though the record's
+    /// `output_details` still says `Received`/`Change`. They are excluded
+    /// from `new_utxos`, and every persister that re-derives UTXOs from
+    /// `records`/`account_records` (the FFI projection does, per account)
+    /// MUST skip them too, or the store ends up holding a spendable coin the
+    /// engine does not have and no spend row ever arrives. See
+    /// `core_bridge::drop_born_spent`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub born_spent_outpoints: Vec<OutPoint>,
+
     /// InstantSend locks observed for records that are NOT yet in a
     /// chain-locked block (i.e. records still in `Mempool`,
     /// `InstantSend`, or `InBlock` context — anything `InChainLockedBlock`
@@ -517,6 +530,11 @@ impl Merge for CoreChangeSet {
         });
         self.spent_utxos.extend(other.spent_utxos);
         self.new_utxos.extend(other.new_utxos);
+        for op in other.born_spent_outpoints {
+            if !self.born_spent_outpoints.contains(&op) {
+                self.born_spent_outpoints.push(op);
+            }
+        }
 
         // IS-lock map: last-write-wins per txid. A second IS-lock for
         // the same txid (e.g. a follow-up event re-confirming the lock)
@@ -616,6 +634,7 @@ impl Merge for CoreChangeSet {
             && self.account_records.is_empty()
             && self.spent_utxos.is_empty()
             && self.new_utxos.is_empty()
+            && self.born_spent_outpoints.is_empty()
             && self.instant_locks_for_non_final_records.is_empty()
             && self.last_processed_height.is_none()
             && self.synced_height.is_none()
