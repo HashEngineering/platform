@@ -1124,8 +1124,57 @@ async fn build_core_changeset(
                     .filter(|r| !is_contact_watch_only(r))
                     .cloned(),
             );
-            cs.records = cs.account_records.clone();
-            crate::changeset::changeset::fold_same_txid_records(&mut cs.records);
+            // The wallet-level row is folded over the MANAGER's slices for
+            // each txid in the batch, not over the batch alone. A block
+            // event does not carry every account's slice either: an
+            // `updated` re-emission (a context flip, or key-wallet's
+            // born-spent attribution patching the spender's record in the
+            // accounts where the patch changed something) can carry ONE
+            // account's slice of a multi-account transaction, and folding
+            // that alone stores a slice-level net as the wallet's row —
+            // observed on the large CoinJoin testnet wallet (int13,
+            // 2026-09-08): 138 cross-account spends persisted as
+            // `−Σinputs` from the owning account's slice, their received
+            // output lost. Same rule as the `TransactionDetected` arm: the
+            // manager is where a transaction's slices are complete.
+            // `None` (unknown wallet / bare test manager) and `Some([])`
+            // (pruned at chain-lock between emit and drain) fall back to the
+            // batch's own slices — for a block event those ARE the final
+            // content.
+            let mut txid_order: Vec<dashcore::Txid> = Vec::new();
+            for r in &cs.account_records {
+                if !txid_order.contains(&r.txid) {
+                    txid_order.push(r.txid);
+                }
+            }
+            let mut records: Vec<TransactionRecord> = Vec::new();
+            for txid in txid_order {
+                let from_batch = || {
+                    cs.account_records
+                        .iter()
+                        .filter(|r| r.txid == txid)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                };
+                let mut slices =
+                    match wallet_slices_for_txid(wallet_manager, wallet_id, &txid).await {
+                        Some(slices) if !slices.is_empty() => {
+                            let owned: Vec<TransactionRecord> = slices
+                                .into_iter()
+                                .filter(|r| !is_contact_watch_only(r))
+                                .collect();
+                            if owned.is_empty() {
+                                from_batch()
+                            } else {
+                                owned
+                            }
+                        }
+                        _ => from_batch(),
+                    };
+                crate::changeset::changeset::fold_same_txid_records(&mut slices);
+                records.extend(slices);
+            }
+            cs.records = records;
             cs.last_processed_height = Some(*height);
             // Pool extensions triggered by any record in this block.
             // Already deduped upstream by `project_derived_addresses`;
@@ -2948,6 +2997,121 @@ mod contact_watch_only_projection_tests {
             "funding metadata still comes from the funding slice"
         );
         assert_eq!(records[1].txid, unrelated_tx.txid());
+    }
+
+    /// A block event can carry ONE account's slice of a multi-account
+    /// transaction too — an `updated` re-emission after key-wallet's
+    /// born-spent attribution patched only the account where the patch
+    /// changed something. Folding the batch alone stored that slice's
+    /// `−Σinputs` as the wallet's row (topple int13: 138 records). The
+    /// block arm must complete the txid's slices from the manager, like
+    /// the mempool arm does.
+    #[tokio::test]
+    async fn block_event_with_a_lone_slice_rebuilds_the_full_fold_from_the_manager() {
+        use crate::wallet::core::WalletGeneration;
+        use crate::wallet::identity::IdentityManager;
+        use key_wallet::test_utils::TestWalletContext;
+
+        let mut ctx = TestWalletContext::new_random();
+        let bip44_address = ctx.receive_address.clone();
+        let bip32_address = {
+            let xpub = ctx
+                .wallet
+                .accounts
+                .standard_bip32_accounts
+                .get(&0)
+                .expect("bip32 account")
+                .account_xpub;
+            ctx.managed_wallet
+                .first_bip32_managed_account_mut()
+                .expect("bip32 managed account")
+                .next_receive_address(Some(&xpub), true)
+                .expect("bip32 receive address")
+        };
+        let bip44_funding = Transaction::dummy(&bip44_address, 0..1, &[100_000_000]);
+        let bip32_funding = Transaction::dummy(&bip32_address, 1..2, &[50_000_000]);
+        let block = |h: u32| {
+            TransactionContext::InBlock(BlockInfo::new(
+                h,
+                BlockHash::from_slice(&[h as u8; 32]).expect("valid block hash"),
+                1_700_000_000 + h,
+            ))
+        };
+        for funding in [&bip44_funding, &bip32_funding] {
+            assert!(ctx.check_transaction(funding, block(1)).await.is_relevant);
+        }
+        // Spends BOTH accounts' coins, pays away: wallet net −1.5 DASH.
+        let spend = Transaction {
+            version: 2,
+            lock_time: 0,
+            input: [&bip44_funding, &bip32_funding]
+                .iter()
+                .map(|funding| TxIn {
+                    previous_output: OutPoint {
+                        txid: funding.txid(),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: 0xffffffff,
+                    witness: Witness::new(),
+                })
+                .collect(),
+            output: vec![TxOut {
+                value: 149_999_000,
+                script_pubkey: DashAddress::dummy(Network::Testnet, 7).script_pubkey(),
+            }],
+            special_transaction_payload: None,
+        };
+        assert!(ctx.check_transaction(&spend, block(2)).await.is_relevant);
+
+        let info = PlatformWalletInfo {
+            core_wallet: ctx.managed_wallet,
+            generation: Arc::new(WalletGeneration::new()),
+            identity_manager: IdentityManager::new(),
+            tracked_asset_locks: BTreeMap::new(),
+            dpns_name_states: BTreeMap::new(),
+            observed_input_conflicts: Default::default(),
+        };
+        let mut wm = WalletManager::<PlatformWalletInfo>::new(dashcore::Network::Testnet);
+        let wallet_id = wm.insert_wallet(ctx.wallet, info).expect("insert wallet");
+        let manager = Arc::new(RwLock::new(wm));
+
+        let slices = wallet_slices_for_txid(&manager, &wallet_id, &spend.txid())
+            .await
+            .expect("manager knows the wallet");
+        assert_eq!(slices.len(), 2, "both funding accounts hold a slice");
+        let lone_slice = slices
+            .iter()
+            .find(|r| r.account_type == bip44_account_0())
+            .expect("bip44 slice")
+            .clone();
+        assert_eq!(lone_slice.net_amount, -100_000_000);
+
+        // The block event re-emits ONE slice as `updated`.
+        let event = WalletEvent::BlockProcessed {
+            wallet_id,
+            height: 2,
+            chain_lock: None,
+            inserted: vec![],
+            updated: vec![lone_slice],
+            matured: vec![],
+            balance: WalletCoreBalance::default(),
+            account_balances: BTreeMap::new(),
+            addresses_derived: vec![],
+        };
+        let cs = build_core_changeset(&manager, &event).await;
+
+        assert_eq!(cs.records.len(), 1, "one wallet-level row for the txid");
+        assert_eq!(
+            cs.records[0].net_amount, -150_000_000,
+            "the row is the fold of BOTH manager slices, not the lone slice's net"
+        );
+        assert_eq!(cs.records[0].input_details.len(), 2);
+        assert_eq!(
+            cs.account_records.len(),
+            1,
+            "the per-account projection still carries exactly what the event delivered"
+        );
     }
 
     /// The adapter drain is NOT where a multi-account transaction's
