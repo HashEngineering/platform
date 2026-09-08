@@ -2725,6 +2725,78 @@ mod contact_watch_only_projection_tests {
     /// folded net stayed correct. 2026-08-19 device run: corrected record
     /// rows landed, TXOs never arrived, the reconcile tripwire healed 4.
     /// On collision the owned role must win.
+    /// key-wallet's wallet-scope born-spent attribution (rust-dashcore#979)
+    /// patches a late-discovered input onto EVERY account's record of the
+    /// spender, so after a rescan re-processes a funding block the owning
+    /// account's slice AND the receiving account's slice both carry the
+    /// same input detail. Summing slice nets then subtracts the input twice
+    /// (topple int12: 141 records born correct at first detection, e.g.
+    /// `263be0cb…` −0.00000491, folded to −3.03447117). The fold must derive
+    /// the net from the merged, deduped details.
+    #[tokio::test]
+    async fn fold_counts_an_input_repeated_across_slices_once() {
+        const MOVED: u64 = FUNDING - 491;
+        let tx = tx_with(&[(&our_receive_address(), MOVED)]);
+        // Owning (CoinJoin) slice: knows the input, sees the output as a
+        // payment away.
+        let owning_slice = record(
+            &tx,
+            AccountType::CoinJoin { index: 0 },
+            TransactionDirection::Outgoing,
+            vec![our_input()],
+            vec![output(0, OutputRole::Sent, &our_receive_address(), MOVED)],
+            -(FUNDING as i64),
+        );
+        // Receiving (BIP44) slice: owns the output — and, after the
+        // attribution sweep re-ran on a re-processed funding block, ALSO
+        // carries the same input detail, with the net key-wallet recomputed
+        // for that slice alone.
+        let receiving_slice = record(
+            &tx,
+            bip44_account_0(),
+            TransactionDirection::Internal,
+            vec![our_input()],
+            vec![output(
+                0,
+                OutputRole::Received,
+                &our_receive_address(),
+                MOVED,
+            )],
+            MOVED as i64 - FUNDING as i64,
+        );
+
+        let event = WalletEvent::BlockProcessed {
+            wallet_id: WALLET_ID,
+            height: 1_001,
+            chain_lock: None,
+            inserted: vec![],
+            updated: vec![owning_slice, receiving_slice],
+            matured: vec![],
+            balance: WalletCoreBalance::default(),
+            account_balances: BTreeMap::new(),
+            addresses_derived: vec![],
+        };
+        let cs = build_core_changeset(&test_manager(), &event).await;
+
+        assert_eq!(cs.records.len(), 1, "same-txid slices fold to one row");
+        let folded = &cs.records[0];
+        assert_eq!(
+            folded.input_details.len(),
+            1,
+            "the repeated input is one detail after the fold"
+        );
+        assert_eq!(
+            folded.net_amount,
+            MOVED as i64 - FUNDING as i64,
+            "the input is subtracted once: a self-move nets −fee, not −fee −inputs"
+        );
+        assert_eq!(
+            folded.direction,
+            TransactionDirection::Internal,
+            "our input, our output, nothing sent away"
+        );
+    }
+
     #[tokio::test]
     async fn fold_prefers_owned_output_role_on_index_collision() {
         const CHANGE_BACK: u64 = FUNDING - PAID_TO_CONTACT - 227;
