@@ -373,13 +373,22 @@ impl HighestUsedIndexes {
 /// −0.005 stored for a −2.61920199 spend).
 ///
 /// The fold, per txid group of 2+ records:
-/// - `net_amount` — the SUM of the slices: each account's
-///   `received − spent` over disjoint detail sets, so the sum is the
-///   wallet's `Σreceived − Σspent` by construction.
 /// - `input_details` / `output_details` — the union (deduped by input
-///   index / output index): the slices are disjoint per account, and the
-///   union is exactly the wallet-relevant view downstream consumers
-///   (`derive_new_utxos`, usage sweeps) expect of a single record.
+///   index / output index): the union is exactly the wallet-relevant view
+///   downstream consumers (`derive_new_utxos`, usage sweeps) expect of a
+///   single record.
+/// - `net_amount` — recomputed over the MERGED details (`Σ owned outputs −
+///   Σ inputs`, the same formula upstream's `recompute_net_and_direction`
+///   uses per record), NOT the sum of the slice nets. Summing was exact
+///   only while the slices' detail sets were disjoint; key-wallet's
+///   wallet-scope born-spent attribution (rust-dashcore#979) patches a
+///   late-discovered input onto EVERY account's record of the spender —
+///   including the slice whose owning account already carried it — so
+///   after a rescan re-processes a funding block two slices can list the
+///   same input and the sum double-counts it (topple int12, 2026-09-08:
+///   141 Standard records born correct, then folded to `−Σinputs` twice —
+///   e.g. `263be0cb…` −0.00000491 → −3.03447117). The merged, deduped
+///   details are the truth either way.
 /// - `fee` — the first `Some` (only the funding account's record carries
 ///   one, and disjoint accounts cannot disagree); left `None` when no
 ///   record knew it.
@@ -432,13 +441,11 @@ pub(crate) fn fold_same_txid_records(records: &mut Vec<TransactionRecord>) {
             .find(|&i| !records[i].input_details.is_empty())
             .unwrap_or(group[0]);
         let mut merged = records[base_pos].clone();
-        let mut net: i64 = 0;
         let mut seen_inputs: BTreeSet<u32> = merged.input_details.iter().map(|d| d.index).collect();
         let mut seen_outputs: BTreeSet<u32> =
             merged.output_details.iter().map(|d| d.index).collect();
         for &i in group {
             let r = &records[i];
-            net = net.saturating_add(r.net_amount);
             if merged.fee.is_none() {
                 merged.fee = r.fee;
             }
@@ -497,7 +504,17 @@ pub(crate) fn fold_same_txid_records(records: &mut Vec<TransactionRecord>) {
         drop_idx.insert(base_pos);
         let first_pos = group[0];
         drop_idx.remove(&first_pos);
-        merged.net_amount = net;
+        // Over the merged, deduped details — see the doc comment: slice
+        // nets are not additive once an input appears in more than one
+        // slice.
+        let owned: i64 = merged
+            .output_details
+            .iter()
+            .filter(|d| matches!(d.role, OutputRole::Received | OutputRole::Change))
+            .map(|d| d.value as i64)
+            .sum();
+        let spent: i64 = merged.input_details.iter().map(|d| d.value as i64).sum();
+        merged.net_amount = owned.saturating_sub(spent);
         // Wallet-level direction over the merged details — same rule
         // upstream applies per account (see the doc comment). The sign
         // of the net cannot express `Internal` or `CoinJoin`.
