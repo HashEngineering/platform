@@ -225,6 +225,8 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
             return Ok(None);
         };
 
+        use key_wallet::wallet::managed_wallet_info::wallet_info_interface::WalletInfoInterface;
+
         let synced_height = info.core_wallet.synced_height();
         // 0 means "scan from genesis / not yet started" — already a full
         // historical scan, nothing to backfill toward.
