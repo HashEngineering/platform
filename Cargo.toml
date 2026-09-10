@@ -53,14 +53,14 @@ members = [
 ]
 
 [workspace.dependencies]
-dashcore = { git = "https://github.com/HashEngineering/rust-dashcore", rev = "c60745fe9e0bc7226d6f3bcf09c4023c8c23775d" }
-dash-network-seeds = { git = "https://github.com/HashEngineering/rust-dashcore", rev = "c60745fe9e0bc7226d6f3bcf09c4023c8c23775d" }
-dash-spv = { git = "https://github.com/HashEngineering/rust-dashcore", rev = "c60745fe9e0bc7226d6f3bcf09c4023c8c23775d" }
-key-wallet = { git = "https://github.com/HashEngineering/rust-dashcore", rev = "c60745fe9e0bc7226d6f3bcf09c4023c8c23775d" }
-key-wallet-ffi = { git = "https://github.com/HashEngineering/rust-dashcore", rev = "c60745fe9e0bc7226d6f3bcf09c4023c8c23775d" }
-key-wallet-manager = { git = "https://github.com/HashEngineering/rust-dashcore", rev = "c60745fe9e0bc7226d6f3bcf09c4023c8c23775d" }
-dash-network = { git = "https://github.com/HashEngineering/rust-dashcore", rev = "c60745fe9e0bc7226d6f3bcf09c4023c8c23775d" }
-dashcore-rpc = { git = "https://github.com/HashEngineering/rust-dashcore", rev = "c60745fe9e0bc7226d6f3bcf09c4023c8c23775d" }
+dashcore = { git = "https://github.com/HashEngineering/rust-dashcore", rev = "af88edf6abdfb0026406d8adfe00f6ae14cbbb91" }
+dash-network-seeds = { git = "https://github.com/HashEngineering/rust-dashcore", rev = "af88edf6abdfb0026406d8adfe00f6ae14cbbb91" }
+dash-spv = { git = "https://github.com/HashEngineering/rust-dashcore", rev = "af88edf6abdfb0026406d8adfe00f6ae14cbbb91" }
+key-wallet = { git = "https://github.com/HashEngineering/rust-dashcore", rev = "af88edf6abdfb0026406d8adfe00f6ae14cbbb91" }
+key-wallet-ffi = { git = "https://github.com/HashEngineering/rust-dashcore", rev = "af88edf6abdfb0026406d8adfe00f6ae14cbbb91" }
+key-wallet-manager = { git = "https://github.com/HashEngineering/rust-dashcore", rev = "af88edf6abdfb0026406d8adfe00f6ae14cbbb91" }
+dash-network = { git = "https://github.com/HashEngineering/rust-dashcore", rev = "af88edf6abdfb0026406d8adfe00f6ae14cbbb91" }
+dashcore-rpc = { git = "https://github.com/HashEngineering/rust-dashcore", rev = "af88edf6abdfb0026406d8adfe00f6ae14cbbb91" }
 tokio-metrics = "0.5"
 
 # Size-tuned profile for the iOS `rs-unified-sdk-ffi` staticlib, which
