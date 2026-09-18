@@ -4743,7 +4743,7 @@ unsafe fn restore_core_address_pools(
         // all) — repair is then skipped.
         //
         // The concrete account comes first, because it is the only source
-        // that covers DashPay. `key_source_for_account_type` routes through
+        // that covers DashPay. `key_source_for_account` routes through
         // `extended_public_key_for_account_type`, which has no arm for
         // either DashPay variant and so answers NoKeySource for both — yet
         // `DashpayReceivingFunds` is wallet-owned, funds-bearing, and its
@@ -4760,25 +4760,7 @@ unsafe fn restore_core_address_pools(
                     .accounts
                     .account_of_type(account_type)
                     .map(|account| key_wallet::KeySource::Public(account.account_xpub))
-                    .or_else(|| {
-                        key_wallet::transaction_checking::transaction_router::AccountTypeToCheck::try_from(
-                            &*managed_type,
-                        )
-                        .ok()
-                        .map(|check_type| {
-                            let account_index = match &account_type {
-                                AccountType::Standard { index, .. }
-                                | AccountType::CoinJoin { index }
-                                | AccountType::DashpayReceivingFunds { index, .. }
-                                | AccountType::DashpayExternalAccount { index, .. } => Some(*index),
-                                AccountType::IdentityTopUp { registration_index } => {
-                                    Some(*registration_index)
-                                }
-                                _ => None,
-                            };
-                            wallet.key_source_for_account_type(&check_type, account_index)
-                        })
-                    })
+                    .or_else(|| Some(wallet.key_source_for_account(account_type)))
             })
             .unwrap_or(key_wallet::KeySource::NoKeySource);
 
@@ -9066,7 +9048,7 @@ mod tests {
 
     /// The hole repair must cover DashPay receiving pools.
     ///
-    /// `Wallet::key_source_for_account_type` answers `NoKeySource` for both
+    /// `Wallet::key_source_for_account` answers `NoKeySource` for both
     /// DashPay variants — it routes through
     /// `extended_public_key_for_account_type`, which has no DashPay arm — so
     /// resolving the key source through that helper alone skipped the repair
