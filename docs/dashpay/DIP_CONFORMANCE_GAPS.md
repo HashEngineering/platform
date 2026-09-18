@@ -44,7 +44,7 @@
 | `$createdAt` incremental fetch with 10-min skew back-off | 8.8, 8.12 | ✅ **FULLY** | `SYNC_OVERLAP_MS=600_000` → `contact_requests.rs:770-776`; `StartAfter` paging `contact_request_queries.rs:54-108` |
 | `$createdAtCoreBlockHeight` populated | 8.7 | ✅ **FULLY** | server-side `document_create_transition/v0/mod.rs:253-256`; client sends `None` `rs-sdk/.../contact_request.rs:478` |
 | DPNS name↔identity resolve/search/cache | 11 | 🟡 **PARTIAL** | works (`network/dpns.rs:281-362`); QR-build doesn't fall back to on-chain name |
-| **L1 block re-scan from `min(coreHeightCreatedAt)` on new contact** | **8.7, 12.6** | ❌ **MISSING** | never read to drive a rescan; SPV exposes no rescan entry point |
+| **L1 block re-scan from `min(coreHeightCreatedAt)` on new contact** | **8.7, 12.6** | ✅ **IMPLEMENTED** | never read to drive a rescan; SPV exposes no rescan entry point |
 | `encryptedAccountLabel` (48–80B, padded, decrypted) | 8.5 | ✅ **FULLY** | send length-normalized in the crypto primitive (`account_label.rs`); receive decrypted + surfaced via `store_contact_account_label` (incoming-only) → `ContactDetailView` (SPEC.md Milestone 3) |
 | `acceptedAccounts` + first-request bloom gating / flood mitigation | 8.4, 10.8 | ❌ **MISSING** | codec only; unpopulated + dropped on ingest |
 | Multi-account contacts (`Account ≠ 0`) | 7.1, 8.9 | 🟡 **DEFERRED** | `account_index` hardcoded `0`; blocked on upstream |
@@ -55,10 +55,32 @@
 
 ## 1. Under-tracked gaps (the value of this audit)
 
-### 1.1 🔴 No L1 block re-scan from `coreHeightCreatedAt` on new contacts — DIP-15 §8.7 + §12.6
+### 1.1 ✅ L1 block re-scan from `coreHeightCreatedAt` on new contacts — DIP-15 §8.7 + §12.6
 
-**Status: MISSING and not mentioned anywhere in the existing docs.** This is the
-only finding with an incoming-**payment-loss** character.
+**Status: IMPLEMENTED (dashpay/platform#4740).** This was the only finding with
+an incoming-**payment-loss** character. The original analysis is preserved
+below; what shipped is:
+
+- `contacts::contact_scan_checkpoint` derives the certified Core height for a
+  pair from the requests on record — established, sent and incoming — floored
+  at `birth_height - 1`. A relationship whose DIP-15 account reference has been
+  rotated falls back to wallet birth, because its original height is gone.
+- `register_contact_account` adds the account through
+  `ManagedAccountOperations`, so the wallet's prior filter-scan generation is
+  invalidated, then clamps `synced_height` back up to that checkpoint. A deeper
+  scan already in flight is preserved.
+- The recurring sweep (`reconcile_dashpay_rescan`) uses the same checkpoint
+  helper, and at `synced_height == 0` marks its candidates covered by the
+  coming full scan rather than returning early.
+- Startup runs that sweep once more after a non-empty contact-account drain,
+  since the drain creates the receival accounts after the DashPay sync's own
+  sweep has already run.
+- The deferred-account sweep re-enqueues a contact whose external account
+  exists but whose receival account failed to build; before, such a contact was
+  skipped forever and no rescan depth could recover its payments.
+
+The dash-spv `FiltersManager` needed no change — exactly the "wiring task, not
+an SPV build" shape predicted below.
 
 DIP-15 §8.7 / §12.6 require: when a wallet learns of a new contact request, it must
 **resynchronize L1 blocks from the minimum `$coreHeightCreatedAt`** across the new
@@ -346,10 +368,11 @@ upstream guard-bypass method, not an SPV build.
 
 ## 7. Recommended priority
 
-1. **§1.1 coreHeight block re-scan (DIP-15 §12.6)** — the only untracked
-   correctness/payment-loss item. Now scoped small: a wallet-side `synced_height`
-   rewind on new-contact registration + one upstream `reset_wallet_synced_height_to`
-   method; the dash-spv `FiltersManager` rescan engine already does the rest.
+1. **§1.1 coreHeight block re-scan (DIP-15 §12.6)** — ✅ DONE
+   (dashpay/platform#4740). Was the only untracked correctness/payment-loss
+   item. Landed as predicted: a wallet-side `synced_height` clamp on
+   new-contact registration and in the recurring sweep, with no change to the
+   dash-spv `FiltersManager` rescan engine.
 2. **§1.2 account-label** — ✅ DONE. Send length-normalization fixed; receive-side
    decryption + UI surfacing implemented (incoming-only) per
    SPEC.md Milestone 3. DIP-15 §8.5 now fully conforms.
