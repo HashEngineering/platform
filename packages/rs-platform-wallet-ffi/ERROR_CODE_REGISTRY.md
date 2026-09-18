@@ -121,6 +121,11 @@ rows below); 49–54 proposed by active #4586 (the persister
 operation × kind block); 55–57 proposed by #4715 for pending identity-funded
 shield debits and durable recovery errors; 28, 30,
 32 and 33 reserved). **28, 30,
+**Next allocatable integer: 49** (as of 2026-08-28) — 27–48 are all claimed
+(27, 29, 31, 34–42 and 46 merged; 43–45 and 48 proposed by active #4313 —
+43–45 at head `0302b188ab`, 48 added 2026-08-28 for review finding
+4bf998e99652; 47 proposed by active #4356 (renumbered from 42 — see its row
+below); 28, 30, 32 and 33 reserved). **28, 30,
 32 and 33 are RESERVED, not free**: 28 and 30 were vacated when the
 reservation trio moved to 34–36; 32 and 33 lapsed when their in-repo owners
 (#4310, #4311) closed without merging. All four are deliberately left
@@ -129,6 +134,7 @@ review cycle. Rule 1's "do not reuse a gap unless this file marks it free"
 applies — this file does **not** mark any of them free, so the frontier is
 the only allocation source; use the next allocatable integer stated above.
 (42 is a cautionary tale:
+the only allocation source and a new code takes 49. (42 is a cautionary tale:
 merged #4451 minted it while active #4356 held the claim — merged ABI wins,
 the open PR renumbers. 46's near-miss went the other way: caught in review,
 renumbered before merge.)
@@ -146,8 +152,8 @@ merged table); three others — #4316, #4310 and #4311 — **closed without
 merging** (32 and 33 lapse to RESERVED; 29 passed to #4361, which **merged**
 on 2026-08-26 — it is in the merged table now, and 29 is ABI under rule 3);
 and #4313 (the shielded-invite claim) lost 37 to merged #4348, revived, and
-now holds 43–45 from the frontier at head `0302b188ab` — see its three rows
-below.
+now holds 43–45 (from the frontier at head `0302b188ab`) plus 48 (claimed
+2026-08-28, again from the frontier) — see its four rows below.
 Fork-era numbers remain in the collision history, which is immutable record.
 
 | Code | Name | Owning PR | Status |
@@ -170,6 +176,7 @@ Fork-era numbers remain in the collision history, which is immutable record.
 | 55 | `ErrorShieldedIdentityDebitPending` | #4715 | Proposed — an earlier identity-funded shield is unresolved. This request was not built or broadcast; wait for shielded sync to reconcile the original debit. Rust's blanket and shielded-operation mappers preserve the code and message; Swift and Kotlin expose matching typed errors |
 | 56 | `ErrorShieldedRecoveryCorrupted` | #4715 | Proposed — durable shielded recovery data is malformed or invalid; preserved for diagnosis. Rust, Swift and Kotlin preserve this typed error |
 | 57 | `ErrorShieldedRecoveryKeysRequired` | #4715 | Proposed — recovery needs the account and compatible keys; ciphertext damage can produce the same symptom. Rust, Swift and Kotlin preserve this typed error |
+| 58 | `ErrorShieldedClaimUnconfirmed` | #4313 | In review — originally claimed as 48 from the frontier 2026-08-28 (46 merged via #4465, 47 held by active #4356), RE-CLAIMED as 58 when 48 shipped on v4.2-dev as `ErrorAssetLockInputContested` for review finding 4bf998e99652. The AMBIGUOUS one-time-claim outcome: a panic caught inside the claim export can strike after the Type-20 transition reached the wire, so the transition may already have executed; `out_identity_id` is NOT written (unlike 17), and the retained `shielded_pending_spends` row — the only holder of the claim's padded identity id — makes a rerun a RESUME (`reserve_one_time_claim_key` finds it; `recover_executed_one_time_claim` recovers the declared id). RETRYABLE-as-resume after the claim lease expires; the host MUST preserve the identity slot. Replaces the guard's previous generic `ErrorUnknown` (99), which Kotlin exposed as a non-retryable `Generic` — the slot-forfeiting misclassification. **Rule 5 satisfied in the claiming commit, all layers together**: the Rust discriminant with its raw-value test pin, Swift's `errorShieldedClaimUnconfirmed = 48` raw case *and* its `init(ffi:)` arm *and* the typed `PlatformWalletError.shieldedClaimUnconfirmed` case with its `init(code:message:)` arm and `errorDescription`, plus an `ErrorHandlingTests` pin of raw value 48; Kotlin's typed retryable `PlatformWallet.ShieldedClaimUnconfirmed` with the `48 ->` arm in `fromPlatformWalletNative` and a `DashSdkErrorTest` pin on 48 |
 
 **Code 31 left this table on 2026-08-04.** `ErrorSigningKeyUnavailable` sat here
 as #4183's proposal until #4183 merged (`189a3abb1c`); it is now in the merged
@@ -282,6 +289,9 @@ number is copied here because any copy goes stale the moment another PR
 merges** (as the original "46+" copy in this paragraph did when #4465 shipped
 46, and as a later "48 and 49" copy did once #4356 took 48 and #4586 took the
 49–54 persister block — read the frontier note, do not copy it). 26 and
+46, and as its "48 and 49" successor did when #4313 claimed 48 on 2026-08-28
+— the frontier note reads 49 as of that date, so a pair claimed today takes
+49 and 50, recording the claim there and here in the same PR). 26 and
 27 need nothing: they are the merged base's own values, correctly inherited,
 and rule 3 keeps them where they are.
 
@@ -462,7 +472,7 @@ E0081 plus a duplicate Swift raw value in its own tree, since the 08-25 base
 merges imported merged 42) and at 43 (silent, against an active proposal).
 The full account, timeline included, is in **Non-conforming allocations**
 above. Both persister codes still owe fresh integers from the frontier note —
-the single canonical source; 48 as of 2026-08-26 — and a registry row in the
+the single canonical source; 49 as of 2026-08-28 — and a registry row in the
 same PR (rule 2).
 
 ### 26 — RESOLVED: #4196 restacked onto #4185 and is on 34 / 35 / 36

@@ -1217,7 +1217,7 @@ class WalletStorage(
                 // suppresses the biometric retry and the next write/repair
                 // regenerates the alias.
                 throw e
-            } catch (e: GeneralSecurityException) {
+            } catch (_: GeneralSecurityException) {
                 // Rotation race / provider quirk: fall through to the
                 // recovery ladder rather than failing the read outright.
                 recoverEmptyIvRsaBlob(pubkeyHex, blob, encoded)
@@ -1272,7 +1272,7 @@ class WalletStorage(
             throw e
         } catch (e: KeyPermanentlyInvalidatedException) {
             throw e
-        } catch (e: GeneralSecurityException) {
+        } catch (_: GeneralSecurityException) {
             null
         }
 
@@ -1570,9 +1570,10 @@ class WalletStorage(
             // true would report a blob belonging to a REPLACED key as healthy
             // and suppress the re-derive the key-health sheet must offer.
             unaeProvesRecoverable
+
         } catch (_: UserNotAuthenticatedException) {
             unaeProvesRecoverable
-        } catch (e: GeneralSecurityException) {
+        } catch (_: GeneralSecurityException) {
             false
         }
 
