@@ -6164,6 +6164,7 @@ mod redrive_tests {
         let id = SubwalletId::new(wallet_id, 3);
         let mut store = InMemoryShieldedStore::new();
         let archived = PendingRedrive {
+            identity_index: None,
             activity_id: [6; 32],
             anchor: [1; 32],
             nullifiers: vec![],
@@ -6211,6 +6212,7 @@ mod redrive_tests {
             .arm_redrive(
                 id,
                 PendingRedrive {
+                    identity_index: None,
                     activity_id,
                     anchor: [1; 32],
                     nullifiers: vec![],
@@ -6281,6 +6283,7 @@ mod redrive_tests {
             .arm_redrive(
                 SubwalletId::new(wallet_id, 3),
                 PendingRedrive {
+                    identity_index: None,
                     activity_id: [6; 32],
                     anchor: [1; 32],
                     nullifiers: vec![],
@@ -6311,6 +6314,7 @@ mod redrive_tests {
             .arm_redrive(
                 SubwalletId::new(wallet_id, 0),
                 PendingRedrive {
+                    identity_index: None,
                     activity_id: [8; 32],
                     anchor: [1; 32],
                     nullifiers: vec![],
@@ -6421,6 +6425,7 @@ mod redrive_tests {
             .arm_redrive(
                 previous_account,
                 PendingRedrive {
+                    identity_index: None,
                     activity_id,
                     anchor: [0xAB; 32],
                     nullifiers: vec![],
@@ -6465,6 +6470,7 @@ mod redrive_tests {
             .arm_redrive(
                 id,
                 PendingRedrive {
+                    identity_index: None,
                     activity_id,
                     anchor,
                     nullifiers: vec![],
@@ -6638,6 +6644,8 @@ mod nullifier_status_and_claim_record_tests {
                 .arm_redrive(
                     id,
                     PendingRedrive {
+                        identity_nonce_finalized: false,
+                        identity_user_abandoned: false,
                         activity_id: key,
                         anchor: [9u8; 32],
                         nullifiers: vec![[3u8; 32]],
@@ -6701,6 +6709,8 @@ mod nullifier_status_and_claim_record_tests {
             .arm_redrive(
                 id,
                 PendingRedrive {
+                    identity_nonce_finalized: false,
+                    identity_user_abandoned: false,
                     activity_id: key,
                     anchor: [9u8; 32],
                     nullifiers: vec![[3u8; 32]],
@@ -6809,6 +6819,8 @@ mod nullifier_status_and_claim_record_tests {
                 .arm_redrive(
                     id,
                     PendingRedrive {
+                        identity_nonce_finalized: false,
+                        identity_user_abandoned: false,
                         activity_id: key,
                         anchor: [0x0A; 32],
                         nullifiers: vec![[0x0F; 32]],
@@ -6846,9 +6858,9 @@ mod nullifier_status_and_claim_record_tests {
         // And the row still carries the declared id — the value the retry needs
         // and cannot otherwise reconstruct.
         let recovered_id = {
-            use dpp::serialization::PlatformDeserializable;
+            use dpp::serialization::PlatformDeserializableTrusted;
             use dpp::state_transition::state_transitions::shielded::identity_create_from_shielded_pool_transition::accessors::IdentityCreateFromShieldedPoolTransitionAccessorsV0;
-            match StateTransition::deserialize_from_bytes(&rehydrated[0].st_bytes)
+            match StateTransition::deserialize_from_bytes_trusted(&rehydrated[0].st_bytes)
                 .expect("stored transition deserializes")
             {
                 StateTransition::IdentityCreateFromShieldedPool(t) => t.identity_id(),
@@ -6876,6 +6888,8 @@ mod nullifier_status_and_claim_record_tests {
         let id = SubwalletId::new(wallet_id, ONE_TIME_CLAIM_RECORDS_ACCOUNT);
         let key = [0x5Au8; 32];
         let record = PendingRedrive {
+            identity_nonce_finalized: false,
+            identity_user_abandoned: false,
             activity_id: key,
             anchor: [0u8; 32],
             nullifiers: vec![[4u8; 32]],
@@ -8660,6 +8674,8 @@ mod one_time_claim_evidence_tests {
     /// A pending-claim record over `st_bytes`, keyed like a real one.
     fn stored_claim_record(st_bytes: Vec<u8>) -> PendingRedrive {
         PendingRedrive {
+            identity_nonce_finalized: false,
+            identity_user_abandoned: false,
             activity_id: [0x5A; 32],
             anchor: [0x07; 32],
             nullifiers: our_nullifiers(),
@@ -8693,7 +8709,7 @@ mod one_time_claim_evidence_tests {
     /// idempotent recovery probes Platform with.
     #[test]
     fn claim_binding_is_recoverable_from_the_stored_transition() {
-        use dpp::serialization::PlatformDeserializable;
+        use dpp::serialization::PlatformDeserializableTrusted;
         use dpp::state_transition::state_transitions::shielded::identity_create_from_shielded_pool_transition::accessors::IdentityCreateFromShieldedPoolTransitionAccessorsV0;
 
         let submitted = vec![
@@ -8703,7 +8719,7 @@ mod one_time_claim_evidence_tests {
         let (_, st_bytes) = stored_claim_transition(&submitted, DENOMINATION);
 
         let restored =
-            StateTransition::deserialize_from_bytes(&st_bytes).expect("stored bytes deserialize");
+            StateTransition::deserialize_from_bytes_trusted(&st_bytes).expect("stored bytes deserialize");
         let StateTransition::IdentityCreateFromShieldedPool(transition) = &restored else {
             panic!("stored record must carry a shielded identity-create transition");
         };

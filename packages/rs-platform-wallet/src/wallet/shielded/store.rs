@@ -2375,6 +2375,7 @@ mod tests {
         let id = SubwalletId::new(wallet_id, 4);
         let mut store = InMemoryShieldedStore::new();
         let identity_guard = PendingRedrive {
+            identity_index: None,
             activity_id: [0x11; 32],
             anchor: [0x22; 32],
             nullifiers: vec![],
@@ -2384,6 +2385,7 @@ mod tests {
             identity_user_abandoned: false,
         };
         let note_spend = PendingRedrive {
+            identity_index: None,
             activity_id: [0x44; 32],
             anchor: [0x55; 32],
             nullifiers: vec![[0x66; 32]],
@@ -2555,6 +2557,8 @@ mod tests {
         // The gate refuses the loser's record write, so the winner's row cannot
         // be replaced.
         let record = |b: u8| PendingRedrive {
+            identity_nonce_finalized: false,
+            identity_user_abandoned: false,
             activity_id: key,
             anchor: [b; 32],
             nullifiers: vec![[b; 32]],

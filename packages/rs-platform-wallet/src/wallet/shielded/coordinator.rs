@@ -2814,6 +2814,7 @@ mod tests {
         .into();
         (
             PendingRedrive {
+                identity_index: None,
                 activity_id: compute_activity_id(&cmxs),
                 anchor: [1; 32],
                 nullifiers: vec![],
@@ -3387,6 +3388,7 @@ mod tests {
         let coordinator = coordinator_with_one_wallet(&dir).await;
         let guard_id = SubwalletId::new([0x11; 32], 0);
         let identity_guard = super::super::store::PendingRedrive {
+            identity_index: None,
             activity_id: [0x31; 32],
             anchor: [0x32; 32],
             nullifiers: vec![],
@@ -3763,6 +3765,7 @@ mod tests {
             .expect("old account")
             .clone();
         let identity_guard = super::super::store::PendingRedrive {
+            identity_index: None,
             activity_id: [0x71; 32],
             anchor: [0x72; 32],
             nullifiers: vec![],
@@ -3876,6 +3879,7 @@ mod tests {
             .arm_redrive(
                 id,
                 super::super::store::PendingRedrive {
+                    identity_index: None,
                     activity_id: [0x71; 32],
                     anchor: [0x72; 32],
                     nullifiers: vec![],
@@ -4303,6 +4307,8 @@ mod tests {
             .arm_redrive_under_claim(
                 id,
                 PendingRedrive {
+                    identity_nonce_finalized: false,
+                    identity_user_abandoned: false,
                     activity_id: [0x5A; 32],
                     anchor: [0x0A; 32],
                     nullifiers: vec![[0x0B; 32]],
@@ -4504,6 +4510,8 @@ mod tests {
             .arm_redrive(
                 record_id,
                 PendingRedrive {
+                    identity_nonce_finalized: false,
+                    identity_user_abandoned: false,
                     activity_id: [0x33; 32],
                     anchor: [0x0A; 32],
                     nullifiers: vec![[0x0D; 32]],
@@ -4640,6 +4648,8 @@ mod tests {
                 .arm_redrive(
                     record_id,
                     PendingRedrive {
+                        identity_nonce_finalized: false,
+                        identity_user_abandoned: false,
                         activity_id: [0x55; 32],
                         anchor: [0x0A; 32],
                         nullifiers: vec![[0x0F; 32]],
@@ -4758,6 +4768,8 @@ mod tests {
                 .arm_redrive(
                     record_id,
                     PendingRedrive {
+                        identity_nonce_finalized: false,
+                        identity_user_abandoned: false,
                         activity_id: [0x66; 32],
                         anchor: [0x0A; 32],
                         nullifiers: vec![[0x1F; 32]],
@@ -4840,6 +4852,8 @@ mod tests {
             .arm_redrive(
                 record_id,
                 PendingRedrive {
+                    identity_nonce_finalized: false,
+                    identity_user_abandoned: false,
                     activity_id: [0x44; 32],
                     anchor: [0x0A; 32],
                     nullifiers: vec![[0x0E; 32]],
@@ -4922,6 +4936,8 @@ mod tests {
             .arm_redrive(
                 purged_id,
                 PendingRedrive {
+                    identity_nonce_finalized: false,
+                    identity_user_abandoned: false,
                     activity_id: [0x11; 32],
                     anchor: [0x0A; 32],
                     nullifiers: vec![[0x0C; 32]],

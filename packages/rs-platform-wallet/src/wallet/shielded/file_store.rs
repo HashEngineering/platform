@@ -1977,6 +1977,7 @@ mod tests {
         let path = temp_tree_path("identity_debit_guard");
         let id = SubwalletId::new([9u8; 32], 4);
         let redrive = PendingRedrive {
+            identity_index: None,
             activity_id: [1u8; 32],
             anchor: [2u8; 32],
             nullifiers: vec![],
@@ -2074,6 +2075,7 @@ mod tests {
                 .arm_redrive(
                     SubwalletId::new([1; 32], 2),
                     PendingRedrive {
+                        identity_index: None,
                         activity_id: [2; 32],
                         anchor: [3; 32],
                         nullifiers: vec![],
@@ -2137,6 +2139,7 @@ mod tests {
             }
             .into();
             let guard = PendingRedrive {
+                identity_index: None,
                 activity_id: [0x61; 32],
                 anchor: [0x71; 32],
                 nullifiers: vec![],
@@ -2151,6 +2154,7 @@ mod tests {
                     .arm_redrive(
                         note_id,
                         PendingRedrive {
+                            identity_index: None,
                             activity_id: [0x21; 32],
                             anchor: [0x51; 32],
                             nullifiers: vec![[0x91; 32]],
@@ -2216,6 +2220,7 @@ mod tests {
                 .arm_redrive(
                     id,
                     PendingRedrive {
+                        identity_index: None,
                         activity_id: [0xD1; 32],
                         anchor: [0xC1; 32],
                         nullifiers: vec![],
@@ -2269,6 +2274,7 @@ mod tests {
                 .arm_redrive(
                     id,
                     PendingRedrive {
+                        identity_index: None,
                         activity_id: [0xD2; 32],
                         anchor: [0xF1; 32],
                         nullifiers: vec![[0xC2; 32]],
@@ -2302,6 +2308,7 @@ mod tests {
         let path = temp_tree_path("redrive_park_failure");
         let id = SubwalletId::new([0x91; 32], 2);
         let record = PendingRedrive {
+            identity_index: None,
             activity_id: [0x12; 32],
             anchor: [0x23; 32],
             nullifiers: vec![],
@@ -2329,6 +2336,7 @@ mod tests {
         let path = temp_tree_path("clear_redrive_failure");
         let id = SubwalletId::new([0x91; 32], 2);
         let redrive = PendingRedrive {
+            identity_index: None,
             activity_id: [0x12; 32],
             anchor: [0x23; 32],
             nullifiers: vec![],
@@ -2378,6 +2386,7 @@ mod tests {
         let wallet_id = [0xA4; 32];
         let id = SubwalletId::new(wallet_id, 8);
         let identity_guard = PendingRedrive {
+            identity_index: None,
             activity_id: [0x15; 32],
             anchor: [0x26; 32],
             nullifiers: vec![],
@@ -2387,6 +2396,7 @@ mod tests {
             identity_user_abandoned: false,
         };
         let note_spend = PendingRedrive {
+            identity_index: None,
             activity_id: [0x48; 32],
             anchor: [0x59; 32],
             nullifiers: vec![[0x6A; 32]],
@@ -2879,6 +2889,8 @@ mod tests {
 
     fn admission_record(activity: u8) -> PendingRedrive {
         PendingRedrive {
+            identity_nonce_finalized: false,
+            identity_user_abandoned: false,
             activity_id: [activity; 32],
             anchor: [0x0A; 32],
             nullifiers: vec![[0x0B; 32]],
