@@ -1193,6 +1193,10 @@ mod local_balance_tests {
         assert!(ffi.accounts.is_null());
         assert_eq!(ffi.accounts_count, 0);
         unsafe { crate::platform_wallet_ffi_result_free(&mut result) };
+    }
+}
+
+#[cfg(test)]
 mod clear_path_tests {
     use super::*;
 

@@ -929,6 +929,7 @@ impl From<PlatformWalletError> for PlatformWalletFFIResult {
             }
             PlatformWalletError::ShieldedRecoveryKeysRequired { .. } => {
                 PlatformWalletFFIResultCode::ErrorShieldedRecoveryKeysRequired
+            }
             // Terminal, and deliberately NOT flattened into the retryable
             // unconfirmed code: the invitation note is spent and this wallet
             // could not prove its claim created an identity, so a host that
@@ -2243,6 +2244,9 @@ mod tests {
         assert!(
             message.contains("chainlocked: true"),
             "the spender's finality must reach the host: {message}"
+        );
+    }
+
     /// This PR's three shielded-invite codes, pinned for the same reason the
     /// marketplace block above is: the numeric values are the ABI contract with
     /// the Swift/Kotlin mirrors and nothing checks them across the boundary at
@@ -2267,15 +2271,24 @@ mod tests {
         );
     }
 
-    /// This PR's fourth shielded-invite code, pinned like 43-45 above. 48 is
-    /// from the registry frontier (46 merged via #4465, 47 reserved for
-    /// active #4356) — moving it silently reclassifies an ambiguous claim
-    /// outcome on every host built against the shipped numbering.
+    /// This PR's fourth shielded-invite code, pinned like 43-45 above.
+    ///
+    /// Originally 48, taken from the registry frontier (46 merged via #4465,
+    /// 47 reserved for active #4356). 48 has since SHIPPED on v4.2-dev as
+    /// `ErrorAssetLockInputContested`, so this code is re-claimed as 58 — the
+    /// same move this PR already made once when upstream took 32. Moving it
+    /// again silently would reclassify an ambiguous claim outcome on every
+    /// host built against the shipped numbering, so it stays pinned here.
     #[test]
-    fn shielded_claim_unconfirmed_code_is_pinned_at_48() {
+    fn shielded_claim_unconfirmed_code_is_pinned_at_58() {
         assert_eq!(
             PlatformWalletFFIResultCode::ErrorShieldedClaimUnconfirmed as i32,
-            48
+            58
+        );
+        assert_eq!(
+            PlatformWalletFFIResultCode::ErrorAssetLockInputContested as i32,
+            48,
+            "48 belongs to the shipped asset-lock code; nothing may take it back"
         );
     }
 

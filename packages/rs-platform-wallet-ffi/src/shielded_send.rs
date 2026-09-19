@@ -3344,6 +3344,7 @@ mod tests {
             .arm_redrive(
                 SubwalletId::new([7; 32], 9),
                 PendingRedrive {
+                    identity_index: None,
                     activity_id: [8; 32],
                     anchor: [9; 32],
                     nullifiers: vec![[10; 32]],
