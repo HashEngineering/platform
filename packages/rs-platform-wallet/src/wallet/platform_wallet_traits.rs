@@ -174,6 +174,10 @@ impl WalletInfoInterface for PlatformWalletInfo {
         self.core_wallet.mark_instant_send_utxos(txid, lock)
     }
 
+    fn unrecorded_spend_heights(&self, tx: &Transaction) -> BTreeSet<CoreBlockHeight> {
+        self.core_wallet.unrecorded_spend_heights(tx)
+    }
+
     fn monitor_revision(&self) -> u64 {
         self.core_wallet.monitor_revision()
     }
