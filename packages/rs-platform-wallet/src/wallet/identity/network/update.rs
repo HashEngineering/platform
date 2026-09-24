@@ -24,7 +24,7 @@ use crate::error::PlatformWalletError;
 use super::*;
 
 // Borrowed-signer adapter — see `dpns.rs` for the same pattern.
-struct SignerRef<'a, S: ?Sized>(&'a S);
+pub(super) struct SignerRef<'a, S: ?Sized>(pub(super) &'a S);
 
 impl<'a, S: ?Sized> std::fmt::Debug for SignerRef<'a, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -229,7 +229,13 @@ impl IdentityWallet {
 
                 for key in added_keys_for_local_apply {
                     let breadcrumb = identity_index.map(|idx| (self.wallet_id, idx, key.id()));
-                    managed.add_key(key, breadcrumb, &self.persister);
+                    managed
+                        .add_key(key, breadcrumb, &self.persister)
+                        .map_err(|e| {
+                            PlatformWalletError::Persistence(format!(
+                                "identity key not persisted after update: {e}"
+                            ))
+                        })?;
                 }
 
                 if !disabled_ids_for_local_apply.is_empty() {

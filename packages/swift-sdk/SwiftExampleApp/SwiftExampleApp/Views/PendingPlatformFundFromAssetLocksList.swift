@@ -7,10 +7,17 @@
 //
 //   1. In-flight controllers from `AddressFundFromAssetLockCoordinator` — the
 //      live submit-still-running case.
-//   2. Orphaned `PersistentAssetLock` rows with
-//      `fundingTypeRaw == AssetLockAddressTopUp` (4) and
-//      `statusRaw ∈ [1, 3]` — the crash-recovery case where the user
-//      killed the app between asset-lock broadcast and ST submission.
+//   2. Orphaned `PersistentAssetLock` rows on either top-up funding type —
+//      `AssetLockAddressTopUp` (4) or `AssetLockShieldedAddressTopUp` (5) —
+//      at a recoverable status (`isVisibleAsResumable`, i.e.
+//      `[1, 3] ∪ {5}`): the crash-recovery case where the user killed the
+//      app between asset-lock broadcast and ST submission.
+//
+// Both top-up funding types belong here because neither has any other
+// recovery home: the identity-side surfaces admit only funding types
+// `0...2`, and `3` is an invitation voucher owned by the reclaim flow.
+// Filtering to `4` alone left every shielded top-up — stalled or
+// RecoveredFromChain — invisible on every surface in the app.
 //
 // Anti-join: an orphaned lock is hidden if its outpoint is already
 // claimed by an in-flight controller. (We index by outpoint here
@@ -43,41 +50,58 @@ struct PendingPlatformFundFromAssetLocksList: View {
     @Binding var resumingAssetLock: PersistentAssetLock?
 
     var body: some View {
-        let inFlight = activeControllersForWallet
-        let orphans = resumableLocks(excludingControllerOutpoints: Set(inFlight.compactMap { _ in
+        let walletControllers = controllersForWallet
+        // Whether any funding is currently in flight on this wallet (a
+        // controller in `.inFlight`). We can't match a controller to the
+        // outpoint it's driving, so while this holds, ANY resumable row
+        // might be the lock that funding is consuming — a fresh fund's own
+        // lock passes through Broadcast → InstantSendLocked during its
+        // (unbounded) finality wait + ST submit, and it's indistinguishable
+        // here from an unrelated proof-ready (statusRaw 2/3) orphan. The
+        // gate below therefore suppresses Resume on EVERY row while a
+        // funding is in flight; offering it would risk a second consume on
+        // the same outpoint. Safe superset: `.inFlight` controllers are
+        // transient, so a genuinely-orphaned lock always becomes resumable
+        // once they clear. `.completed`/`.failed` controllers aren't
+        // consuming (only `.isActive` counts), and their phase transitions
+        // re-render this view via the coordinator's forwarded
+        // `objectWillChange`.
+        let hasActiveFunding = walletControllers.contains { $0.phase.isActive }
+        let orphans = resumableLocks(excludingControllerOutpoints: Set(walletControllers.compactMap { _ in
             // Controllers don't currently store the outpoint of the
             // asset lock they're driving. The de-dupe set therefore
-            // never has entries today — but the SwiftData status
-            // filter (`>=1, <=3`) already excludes locks that have
-            // been Consumed, so an in-flight controller whose lock
-            // is mid-transition lands at status 2/3 and would only
-            // briefly co-render. The plumbing is here so a future
+            // never has entries today — but the status filter
+            // (`isVisibleAsResumable`) already excludes locks that
+            // have been Consumed, so an in-flight controller whose
+            // lock is mid-transition lands at status 2/3 and would
+            // only briefly co-render. The plumbing is here so a future
             // tweak (controller exposes its outpoint after broadcast)
             // can de-dupe by returning a non-nil here.
             nil
         }))
 
-        if !inFlight.isEmpty || !orphans.isEmpty {
+        if !walletControllers.isEmpty || !orphans.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text("Pending Platform Top Ups (\(inFlight.count + orphans.count))")
+                    Text("Pending Platform Top Ups (\(walletControllers.count + orphans.count))")
                         .font(.headline)
                     Spacer()
                 }
                 .padding(.horizontal)
 
                 VStack(spacing: 0) {
-                    ForEach(Array(inFlight.enumerated()), id: \.element.platformFundFromAssetLockRowID) { idx, controller in
+                    ForEach(Array(walletControllers.enumerated()), id: \.element.platformFundFromAssetLockRowID) { idx, controller in
                         PendingPlatformFundFromAssetLockRow(controller: controller)
                             .padding(.horizontal)
                             .padding(.vertical, 10)
-                        if idx < inFlight.count - 1 || !orphans.isEmpty {
+                        if idx < walletControllers.count - 1 || !orphans.isEmpty {
                             Divider()
                         }
                     }
                     ForEach(Array(orphans.enumerated()), id: \.element.id) { idx, lock in
                         ResumablePlatformFundFromAssetLockRow(
                             lock: lock,
+                            hasActiveFunding: hasActiveFunding,
                             onResume: { resumingAssetLock = lock }
                         )
                         .padding(.horizontal)
@@ -94,22 +118,53 @@ struct PendingPlatformFundFromAssetLocksList: View {
         }
     }
 
-    /// In-flight controllers scoped to this wallet, newest-first.
-    private var activeControllersForWallet: [AddressFundFromAssetLockController] {
+    /// All funding controllers for this wallet, newest-first — named for
+    /// the wallet scope, not a phase. `coordinator.activeControllers()`
+    /// returns every slot in the map, including `.completed`/`.failed`
+    /// ones that linger until dismissed or swept, so the `.isActive`
+    /// filter in `hasActiveFunding` is doing real work, not restating the
+    /// name.
+    private var controllersForWallet: [AddressFundFromAssetLockController] {
         coordinator.activeControllers().filter { $0.walletId == walletId }
     }
 
-    /// Resumable asset-lock rows for this wallet — fundingType 4
-    /// (AssetLockAddressTopUp) and status in 1..3 (Broadcast through
-    /// ChainLocked, excluding Consumed). Excludes outpoints already
-    /// owned by an in-flight controller.
+    /// Resumable asset-lock rows for this wallet — either top-up funding
+    /// type at a recoverable status. Excludes outpoints already owned by
+    /// an in-flight controller.
     private func resumableLocks(
         excludingControllerOutpoints excluded: Set<String>
     ) -> [PersistentAssetLock] {
         assetLocks
-            .filter { $0.fundingTypeRaw == 4 }
-            .filter { $0.isVisibleAsResumable }
+            .filter { Self.isResumableTopUp($0) }
             .filter { !excluded.contains($0.outPointHex) }
+    }
+
+    /// Funding-type + status predicate for this surface, extracted as a
+    /// pure `static` (generic over `AssetLockResumeRow`) so it is
+    /// unit-testable without a SwiftData container — same shape as
+    /// `IdentitiesContentView.crossWalletResumableLocks`.
+    ///
+    /// Admits BOTH top-up funding types:
+    ///
+    ///   * `4` AssetLockAddressTopUp — resumes into
+    ///     `FundFromAssetLockPlatformAddressView`.
+    ///   * `5` AssetLockShieldedAddressTopUp — resumes into
+    ///     `ShieldedFundFromAssetLockView`.
+    ///
+    /// `5` was previously filtered out here. Because the identity
+    /// surfaces admit only `0...2` and the reclaim flow owns `3`, that
+    /// left a stalled or RecoveredFromChain shielded top-up on NO surface
+    /// in the app — real recoverable value with no way to reach it. The
+    /// status half is delegated to `isVisibleAsResumable`, which excludes
+    /// the terminal Consumed (`4`) by name while keeping
+    /// RecoveredFromChain (`5`).
+    ///
+    /// Identity-family types are rejected fail-closed: they have their own
+    /// resume surface, and dispatching one here would offer a resume flow
+    /// that submits the wrong transition for it.
+    nonisolated static func isResumableTopUp<R: AssetLockResumeRow>(_ lock: R) -> Bool {
+        guard lock.fundingTypeRaw == 4 || lock.fundingTypeRaw == 5 else { return false }
+        return lock.isVisibleAsResumable
     }
 }
 
@@ -225,6 +280,13 @@ struct PendingPlatformFundFromAssetLockRow: View {
 /// the outpoint.
 struct ResumablePlatformFundFromAssetLockRow: View {
     let lock: PersistentAssetLock
+    /// `true` when some funding is actively in flight on this wallet.
+    /// Suppresses the Resume affordance on this row (at ANY status) — the
+    /// in-flight funding might be driving this very lock (the controller
+    /// doesn't expose the outpoint it's consuming), and resuming it would
+    /// race a second consume on the same outpoint. See
+    /// `PendingPlatformFundFromAssetLocksList.body`.
+    let hasActiveFunding: Bool
     let onResume: () -> Void
 
     var body: some View {
@@ -253,26 +315,45 @@ struct ResumablePlatformFundFromAssetLockRow: View {
 
     @ViewBuilder
     private var trailingAffordance: some View {
-        if lock.canFundIdentity {
-            // `canFundIdentity` is identity-named but the predicate
-            // it encodes — `statusRaw ∈ {2, 3}` — is exactly the
-            // "lock has a usable IS or CL proof" gate the address-
-            // funding submit path needs. Naming carryover only.
-            Button(action: onResume) {
-                Label("Resume", systemImage: "arrow.clockwise")
-                    .labelStyle(.titleAndIcon)
-                    .font(.callout)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
+        if hasActiveFunding {
+            // A funding is in flight on this wallet. We can't tell whether
+            // it's driving THIS lock (the controller doesn't expose its
+            // outpoint), so offering Resume — at any status, including a
+            // proof-ready (2/3) lock whose ST is mid-consume — could race a
+            // second consume on the same outpoint. Keep the non-interactive
+            // spinner until the funding clears. Over-suppresses a genuinely
+            // orphaned lock during an unrelated fund, but only transiently.
+            waitingIndicator
         } else {
-            HStack(spacing: 6) {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Waiting for InstantSend / ChainLock…")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
+            // Nothing is driving a fund on this wallet, so every visible row
+            // (statusRaw 1/2/3/5, per the list's `isVisibleAsResumable`
+            // filter) is a genuinely-resumable orphan with no driver: a
+            // proof-ready (`canFundIdentity`, statusRaw 2/3/5) lock submits
+            // as soon as a recipient is picked; a Broadcast (statusRaw 1)
+            // lock re-enters the finality wait via `resume_asset_lock`.
+            // Without this the Broadcast case was a permanent "Waiting…"
+            // dead end.
+            resumeButton
+        }
+    }
+
+    private var resumeButton: some View {
+        Button(action: onResume) {
+            Label("Resume", systemImage: "arrow.clockwise")
+                .labelStyle(.titleAndIcon)
+                .font(.callout)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.small)
+    }
+
+    private var waitingIndicator: some View {
+        HStack(spacing: 6) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Waiting for InstantSend / ChainLock…")
+                .font(.caption)
+                .foregroundColor(.secondary)
         }
     }
 

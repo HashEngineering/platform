@@ -2,7 +2,6 @@
 
 use dpp::identity::accessors::IdentityGettersV0;
 
-use dpp::identity::identity_public_key::accessors::v0::IdentityPublicKeyGettersV0;
 use dpp::identity::Identity;
 use dpp::prelude::Identifier;
 use key_wallet::bip32::ExtendedPrivKey;
@@ -171,7 +170,6 @@ impl IdentityWallet {
         use crate::wallet::identity::state::managed_identity::key_storage::IdentityStatus;
         use dash_sdk::platform::types::identity::PublicKeyHash;
         use dash_sdk::platform::Fetch;
-        use dpp::util::hash::ripemd160_sha256;
 
         let wallet_id = self.wallet_id;
 
@@ -183,7 +181,7 @@ impl IdentityWallet {
         // unit-testable `derive_load_probe_hash` helper, which probes
         // `MASTER_KEY_INDEX` (not a hardcoded `0`) so loading and the
         // discovery scan visibly target the same slot.
-        let key_hash_array = {
+        let (key_hash_array, network) = {
             let wm = self.wallet_manager.read().await;
             let wallet = wm.get_wallet(&self.wallet_id).ok_or_else(|| {
                 crate::error::PlatformWalletError::WalletNotFound(
@@ -202,7 +200,10 @@ impl IdentityWallet {
                 }
                 LoadKeyHashSource::Master(master) => ResolvedLoadKeyHashSource::Master(master),
             };
-            derive_load_probe_hash(resolved, network, identity_index)?
+            (
+                derive_load_probe_hash(resolved, network, identity_index)?,
+                network,
+            )
         };
 
         // Query Platform for an identity registered with this key hash.
@@ -219,15 +220,20 @@ impl IdentityWallet {
 
         let identity_id = identity.id();
 
-        // Find which KeyID in the on-chain identity matches this key hash.
-        let matched_key_id_and_pub = identity
-            .public_keys()
-            .iter()
-            .find(|(_, pk)| {
-                let pk_hash = ripemd160_sha256(pk.data().as_slice());
-                pk_hash.as_slice() == key_hash_array
-            })
-            .map(|(kid, pk)| (*kid, pk.clone()));
+        // Derive + verify a candidate for EVERY on-chain key (shared with
+        // the discovery scan) so the imported identity can sign with all its
+        // re-derivable keys, not just MASTER. Runs before the write lock.
+        let key_decisions = self
+            .derive_key_breadcrumbs(
+                &identity,
+                identity_index,
+                network,
+                match source {
+                    LoadKeyHashSource::Master(master) => Some(master),
+                    LoadKeyHashSource::ResidentWallet => None,
+                },
+            )
+            .await?;
 
         // Add the identity to the manager and enrich it.
         {
@@ -247,21 +253,27 @@ impl IdentityWallet {
             }
 
             if let Some(managed) = info.identity_manager.managed_identity_mut(&identity_id) {
+                // Fold the freshly fetched on-chain state into an
+                // already-known identity too — the add above only runs for
+                // new ones, and without this a re-load kept serving the
+                // stale key set (keys added from another device never
+                // appeared, and contact requests referencing them failed
+                // key-index validation). Same replace `refresh_identity`
+                // does; the `set_status` below persists the full snapshot
+                // changeset, so the updated keys reach the store.
+                managed.identity = identity.clone();
                 managed.set_status(IdentityStatus::Active, &self.persister);
                 managed.wallet_id = Some(wallet_id);
-
-                if let Some((_kid, pub_key)) = matched_key_id_and_pub {
-                    // Emit the DIP-9 derivation breadcrumb on the
-                    // keys-changeset upsert so the client can re-derive
-                    // the private key from its wallet mnemonic. Use
-                    // `MASTER_KEY_INDEX` (not a bare `0`) so the stored
-                    // breadcrumb matches the slot we probed above.
-                    managed.add_key(
-                        pub_key,
-                        Some((wallet_id, identity_index, MASTER_KEY_INDEX)),
-                        &self.persister,
-                    );
-                }
+                // Breadcrumbs for every re-derivable key (was MASTER-only). A
+                // failed persist would silently leave the identity watch-only
+                // after restart, so surface it rather than swallow.
+                managed
+                    .add_keys(key_decisions, &self.persister)
+                    .map_err(|e| {
+                        PlatformWalletError::Persistence(format!(
+                            "identity keys not persisted during load: {e}"
+                        ))
+                    })?;
             }
         }
 
@@ -515,7 +527,7 @@ mod tests {
     };
     use super::{derive_load_probe_hash, ResolvedLoadKeyHashSource};
     use key_wallet::bip32::ExtendedPrivKey;
-    use key_wallet::mnemonic::{Language, Mnemonic};
+    use key_wallet::mnemonic::Mnemonic;
     use key_wallet::wallet::initialization::WalletAccountCreationOptions;
     use key_wallet::wallet::Wallet;
     use key_wallet::Network;
@@ -533,8 +545,7 @@ mod tests {
     /// never touches — it walks the master xpriv, not the per-account
     /// collection, so no accounts are needed.
     fn mnemonic_wallet(network: Network) -> Wallet {
-        let mnemonic = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
-            .expect("valid English test mnemonic");
+        let mnemonic = Mnemonic::from_phrase(TEST_MNEMONIC).expect("valid English test mnemonic");
         Wallet::from_mnemonic(mnemonic, network, WalletAccountCreationOptions::None)
             .expect("from_mnemonic should build a Mnemonic wallet")
     }
@@ -542,8 +553,7 @@ mod tests {
     /// The BIP-32 master node for [`TEST_MNEMONIC`] on `network` — the
     /// same node `derive_extended_private_key` reconstructs internally.
     fn master_for(network: Network) -> ExtendedPrivKey {
-        let mnemonic = Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
-            .expect("valid English test mnemonic");
+        let mnemonic = Mnemonic::from_phrase(TEST_MNEMONIC).expect("valid English test mnemonic");
         let seed = mnemonic.to_seed("");
         ExtendedPrivKey::new_master(network, &seed).expect("master xpriv from test seed")
     }

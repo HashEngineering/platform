@@ -29,12 +29,11 @@
 //!
 //! Enum-shaped TEXT columns (`network`, `account_type`, `pool_type`,
 //! `status`, `state`) carry a `CHECK (col IN (...))` clause whose
-//! IN-list is built from the `*_LABELS` const arrays in
-//! `crate::sqlite::schema::{wallet_meta, accounts, asset_locks,
-//! contacts}`. The consts are the single source of truth shared with
-//! the writer mapping functions; the per-module `*_labels_match_enum`
-//! unit tests enforce set-equality between each const and its writer's
-//! codomain.
+//! IN-list is a FROZEN literal — never the live `*_LABELS` const it
+//! mirrors. See the freeze rationale on [`migration`]. The live consts
+//! stay the single source of truth for the writer mapping functions; a
+//! `*_labels_frozen_in_v001` unit test per schema module pins each one
+//! to its literal here.
 
 fn build_check_in(labels: &[&str]) -> String {
     let quoted = labels
@@ -45,15 +44,53 @@ fn build_check_in(labels: &[&str]) -> String {
     format!("({})", quoted)
 }
 
+/// Renders V001's DDL.
+///
+/// Every `CHECK (col IN (...))` domain below is a FROZEN literal, and must
+/// stay one. Interpolating a live `*_LABELS` const would let a later enum
+/// variant rewrite this migration's generated SQL, breaking its Refinery
+/// checksum on every database that already applied it (`abort_divergent`
+/// defaults to true) — the database then fails to open, permanently, with
+/// no in-crate recovery path. Widening a domain means APPENDING a migration
+/// that rebuilds the table with the wider CHECK, as
+/// `V004__asset_lock_recovered_status.rs` does; it never means editing a
+/// list here. These lists are what `v4.2-dev` shipped, and the rendered SQL
+/// is pinned byte-for-byte against it.
 pub fn migration() -> String {
-    let network_check = build_check_in(crate::sqlite::schema::wallet_meta::NETWORK_LABELS);
-    let account_type_check =
-        build_check_in(crate::sqlite::schema::accounts::ACCOUNT_TYPE_LABELS);
-    let pool_type_check = build_check_in(crate::sqlite::schema::accounts::POOL_TYPE_LABELS);
-    let asset_lock_status_check =
-        build_check_in(crate::sqlite::schema::asset_locks::ASSET_LOCK_STATUS_LABELS);
-    let contact_state_check =
-        build_check_in(crate::sqlite::schema::contacts::CONTACT_STATE_LABELS);
+    let network_check = build_check_in(&["mainnet", "testnet", "devnet", "regtest"]);
+    let account_type_check = build_check_in(&[
+        "standard",
+        "coinjoin",
+        "identity_registration",
+        "identity_topup",
+        "identity_topup_unbound",
+        "identity_invitation",
+        "asset_lock_address_topup",
+        "asset_lock_shielded_topup",
+        "provider_voting",
+        "provider_owner",
+        "provider_operator",
+        "provider_platform",
+        "dashpay_receiving",
+        "dashpay_external",
+        "platform_payment",
+    ]);
+    let pool_type_check =
+        build_check_in(&["external", "internal", "absent", "absent_hardened"]);
+    let asset_lock_status_check = build_check_in(&[
+        "built",
+        "broadcast",
+        "is_locked",
+        "chain_locked",
+        "consumed",
+    ]);
+    let contact_state_check = build_check_in(&["sent", "received", "established"]);
+    let pending_contact_crypto_kind_check = build_check_in(&[
+        "register_receiving",
+        "register_external",
+        "contact_info_decrypt",
+        "auto_accept",
+    ]);
 
     format!(
         "\
@@ -79,6 +116,17 @@ CREATE TABLE account_address_pools (
     pool_type TEXT NOT NULL CHECK (pool_type IN {pool_type_check}),
     snapshot_blob BLOB NOT NULL,
     PRIMARY KEY (wallet_id, account_type, account_index, pool_type),
+    FOREIGN KEY (wallet_id) REFERENCES wallet_metadata(wallet_id) ON DELETE CASCADE
+);
+
+CREATE TABLE pending_contact_crypto (
+    wallet_id BLOB NOT NULL,
+    owner_identity_id BLOB NOT NULL,
+    contact_id BLOB NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN {pending_contact_crypto_kind_check}),
+    payload BLOB NOT NULL,
+    enqueued_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (wallet_id, owner_identity_id, contact_id, kind),
     FOREIGN KEY (wallet_id) REFERENCES wallet_metadata(wallet_id) ON DELETE CASCADE
 );
 
@@ -186,8 +234,29 @@ CREATE TABLE contacts (
     note TEXT,
     is_hidden INTEGER,
     accepted_accounts BLOB,
+    -- G1c: set when external-account registration permanently fails for a
+    -- contact (so the sync sweep stops retrying a poisoned channel);
+    -- cleared on a superseding rotation. Nullable — readers treat NULL as
+    -- `false`.
+    payment_channel_broken INTEGER,
     updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
     PRIMARY KEY (wallet_id, owner_id, contact_id),
+    FOREIGN KEY (wallet_id) REFERENCES wallet_metadata(wallet_id) ON DELETE CASCADE
+);
+
+-- Ignored senders (per-sender mute = block, reversible — local-only). Keyed by
+-- bare `(wallet_id, owner_id, sender_id)`: ignoring is per-sender, NOT
+-- per-request, so it suppresses ALL of a sender's incoming contactRequests
+-- (including rotated, bumped-`accountReference` ones) and survives a recurring
+-- re-sync. Un-ignore deletes the row so the sender's requests resurface. The
+-- sync ingest path consults this table before surfacing a received
+-- contactRequest in the main pending list.
+CREATE TABLE ignored_senders (
+    wallet_id BLOB NOT NULL,
+    owner_id BLOB NOT NULL,
+    sender_id BLOB NOT NULL,
+    ignored_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY (wallet_id, owner_id, sender_id),
     FOREIGN KEY (wallet_id) REFERENCES wallet_metadata(wallet_id) ON DELETE CASCADE
 );
 

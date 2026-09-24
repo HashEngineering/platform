@@ -39,6 +39,11 @@ struct IdentityDetailView: View {
         identities.first
     }
 
+    private func hasLoadedWallet(for identity: PersistentIdentity) -> Bool {
+        guard let walletId = identity.wallet?.walletId else { return false }
+        return walletManager.wallet(for: walletId) != nil
+    }
+
     @State private var isRefreshing = false
     @State private var showingEditAlias = false
     @State private var newAlias = ""
@@ -153,13 +158,11 @@ struct IdentityDetailView: View {
                         .fontWeight(.medium)
                 }
 
-                // Top-up entry point. Hidden for purely-local rows
-                // (no on-chain identity to credit yet) and for
-                // identities whose owning wallet isn't loaded into
-                // the manager — both paths would just surface a
-                // confusing error from the FFI layer.
-                if !identity.isLocal,
-                   let walletId = identity.wallet?.walletId,
+                // Top-up entry point. Hidden for identities whose
+                // owning wallet isn't loaded into the manager — that
+                // path would just surface a confusing error from the
+                // FFI layer.
+                if let walletId = identity.wallet?.walletId,
                    walletManager.wallet(for: walletId) != nil {
                     Button {
                         showingTopUp = true
@@ -218,41 +221,19 @@ struct IdentityDetailView: View {
                                       identity.identityTypeEnum == .masternode ? .purple : .orange)
                 }
 
-                if identity.isLocal {
-                    HStack {
-                        Label("Status", systemImage: "location")
-                        Spacer()
-                        Text("Local Only")
-                            .foregroundColor(.secondary)
-                    }
-                }
-            }
-
-            // DashPay Section — drill-in to the per-identity Friends
-            // screen. Sits up here next to "Identity Information"
-            // because it's the entry point to *this identity's*
-            // contacts; the richer "DashPay Profile" section further
-            // down still owns profile reads/edits separately.
-            //
-            // Hidden when the identity isn't backed by a loaded
-            // local wallet — `FriendsView.requireWallet` throws on
-            // every action there, and the failure is swallowed into
-            // a `@State errorMessage` that the body never renders.
-            // No-wallet identities (network-only fetches) would
-            // otherwise land on the empty placeholder with no path
-            // forward.
-            if let walletId = identity.wallet?.walletId,
-               walletManager.wallet(for: walletId) != nil {
-                Section("DashPay") {
-                    NavigationLink(destination: FriendsView(identity: identity)) {
-                        Label("Friends", systemImage: "person.2")
-                    }
-                }
             }
 
             // DPNS Names Section
-            if !dpnsNames.isEmpty || !contestedDpnsNames.isEmpty || !identity.isLocal {
-                Section("DPNS Names") {
+            // Every persisted identity exists on Platform, so the
+            // section always renders.
+            Section("DPNS Names") {
+                    if hasLoadedWallet(for: identity) {
+                        NavigationLink(destination: DpnsMarketplaceView(identity: identity)) {
+                            Label("Username Marketplace", systemImage: "storefront")
+                        }
+                        .accessibilityIdentifier("identity.dpnsMarketplace")
+                    }
+
                     if isLoadingDPNS {
                         HStack {
                             ProgressView()
@@ -302,8 +283,9 @@ struct IdentityDetailView: View {
                         }
                     }
 
-                    // Register name button
-                    if !identity.isLocal {
+                    // Register name button — registration signs
+                    // through the identity's loaded wallet.
+                    if hasLoadedWallet(for: identity) {
                         Button(action: { showingRegisterName = true }) {
                             HStack {
                                 Image(systemName: "plus.circle")
@@ -312,7 +294,6 @@ struct IdentityDetailView: View {
                             .foregroundColor(.blue)
                         }
                     }
-                }
             }
 
             // Tokens Section
@@ -325,8 +306,7 @@ struct IdentityDetailView: View {
             // round-trip. Transient @State only — persistence to
             // PersistentTokenBalance lives in the platform-wallet
             // sync path, not here.
-            if !identity.isLocal {
-                Section {
+            Section {
                     if isLoadingTokens && tokenBalances.isEmpty {
                         HStack(spacing: 10) {
                             ProgressView()
@@ -374,7 +354,6 @@ struct IdentityDetailView: View {
                         .disabled(isLoadingTokens)
                     }
                 }
-            }
 
             // DashPay Profile Section
             //
@@ -383,13 +362,7 @@ struct IdentityDetailView: View {
             // via `syncDashPayProfiles()` so the cache reflects the
             // latest on-chain state without blocking the first paint.
             Section("DashPay Profile") {
-                if !identity.isLocal {
-                    dashPayProfileCard(identity: identity)
-                } else {
-                    Text("Available once the identity is on the network.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
+                dashPayProfileCard(identity: identity)
             }
 
             // Keys Section
@@ -414,23 +387,38 @@ struct IdentityDetailView: View {
                     }
                     .padding(.vertical, 4)
                 }
+
+                // Bluetooth login-key sharing needs the wallet's
+                // MASTER key to sign the key registration, so it is
+                // only offered when the owning wallet is loaded.
+                if hasLoadedWallet(for: identity) {
+                    NavigationLink(destination: ShareLoginKeyView(identity: identity)
+                        .environmentObject(appState)
+                        .environmentObject(walletManager)
+                    ) {
+                        HStack {
+                            Image(systemName: "antenna.radiowaves.left.and.right")
+                            Text("Share Login Key with Browser")
+                                .fontWeight(.medium)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
             }
 
             // Actions Section
-            if !identity.isLocal {
-                Section {
-                    Button(action: refreshIdentityData) {
-                        HStack {
-                            Image(systemName: "arrow.clockwise")
-                            Text("Refresh Identity Data")
-                            Spacer()
-                            if isRefreshing {
-                                ProgressView()
-                            }
+            Section {
+                Button(action: refreshIdentityData) {
+                    HStack {
+                        Image(systemName: "arrow.clockwise")
+                        Text("Refresh Identity Data")
+                        Spacer()
+                        if isRefreshing {
+                            ProgressView()
                         }
                     }
-                    .disabled(isRefreshing)
                 }
+                .disabled(isRefreshing)
             }
         }
         .navigationTitle("Identity Details")
@@ -495,14 +483,14 @@ struct IdentityDetailView: View {
             print("🔵 IdentityDetailView onAppear - dpnsName: \(identity.dpnsName ?? "nil"), isLocal: \(identity.isLocal)")
 
             // Load DPNS names from network if we don't have any cached or if they're empty
-            if (dpnsNames.isEmpty && contestedDpnsNames.isEmpty) && !identity.isLocal {
+            if dpnsNames.isEmpty && contestedDpnsNames.isEmpty {
                 print("🔵 No cached DPNS names, loading from network...")
                 loadDPNSNames()
-            } else if !dpnsNames.isEmpty || !contestedDpnsNames.isEmpty {
+            } else {
                 print("🔵 Using cached DPNS names: \(dpnsNames.count) regular, \(contestedDpnsNames.count) contested")
             }
 
-            if !identity.isLocal {
+            do {
                 // Read whatever's currently cached synchronously so the
                 // card renders immediately, then kick off a background
                 // sync to freshen it. The sync uses the merged
@@ -580,8 +568,7 @@ struct IdentityDetailView: View {
     }
 
     private func loadDPNSNames() {
-        guard let identity = identity,
-              !identity.isLocal else { return }
+        guard identity != nil else { return }
 
         Task {
             await loadDPNSNamesFromNetwork()
@@ -589,8 +576,7 @@ struct IdentityDetailView: View {
     }
 
     private func loadDPNSNamesFromNetwork() async {
-        guard let identity = identity,
-              !identity.isLocal else { return }
+        guard let identity = identity else { return }
 
         print("🔵 loadDPNSNamesFromNetwork called for identity \(identity.identityIdBase58)")
 
@@ -912,7 +898,7 @@ struct IdentityDetailView: View {
     /// the UI can show a spinner without blocking.
     @MainActor
     private func reloadTokenBalances() {
-        guard let identity = identity, !identity.isLocal,
+        guard let identity = identity,
               let sdk = appState.sdk else { return }
 
         // In-flight guard: `onAppear` now reloads unconditionally and this
@@ -1182,17 +1168,43 @@ struct DashPayProfileEditorView: View {
 
     private var isCreating: Bool { existing == nil }
 
+    /// DashPay `profile` contract limits — live counters below gate
+    /// Save instead of failing at broadcast time.
+    private static let displayNameLimit = 25
+    private static let publicMessageLimit = 140
+
+    private var overLimit: Bool {
+        displayName.count > Self.displayNameLimit
+            || publicMessage.count > Self.publicMessageLimit
+    }
+
     var body: some View {
         NavigationView {
             Form {
-                Section("Display name") {
+                Section {
                     TextField("e.g. Alice", text: $displayName)
                         .textInputAutocapitalization(.words)
+                        .accessibilityIdentifier("dashpay.profile.displayName")
+                } header: {
+                    Text("Display name")
+                } footer: {
+                    Text("\(displayName.count)/\(Self.displayNameLimit)")
+                        .foregroundColor(
+                            displayName.count > Self.displayNameLimit ? .red : .secondary
+                        )
                 }
 
-                Section("Public message") {
+                Section {
                     TextField("A short bio that contacts can see", text: $publicMessage, axis: .vertical)
                         .lineLimit(3, reservesSpace: true)
+                        .accessibilityIdentifier("dashpay.profile.publicMessage")
+                } header: {
+                    Text("Public message")
+                } footer: {
+                    Text("\(publicMessage.count)/\(Self.publicMessageLimit)")
+                        .foregroundColor(
+                            publicMessage.count > Self.publicMessageLimit ? .red : .secondary
+                        )
                 }
 
                 Section("Avatar URL") {
@@ -1200,6 +1212,7 @@ struct DashPayProfileEditorView: View {
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                        .accessibilityIdentifier("dashpay.profile.avatarUrl")
                     Text("Paste an HTTPS image URL. SHA-256 + dHash " +
                          "are computed client-side when you save — see " +
                          "DIP-15.")
@@ -1221,12 +1234,18 @@ struct DashPayProfileEditorView: View {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button("Cancel") { dismiss() }
                         .disabled(isSaving)
+                        .accessibilityIdentifier("dashpay.profile.cancel")
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
+                    // Save flow: Save replaced by a ProgressView
+                    // while in flight; success dismisses; failure
+                    // re-enables with the red caption in the form.
                     if isSaving {
                         ProgressView()
                     } else {
                         Button(isCreating ? "Create" : "Save") { save() }
+                            .disabled(overLimit)
+                            .accessibilityIdentifier("dashpay.profile.save")
                     }
                 }
             }
@@ -1259,6 +1278,18 @@ struct DashPayProfileEditorView: View {
         let cleanedDisplay = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedMsg = publicMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedUrl = avatarUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Enforce the HTTPS-only rule the form promises, in code: the DIP-15
+        // avatar pipeline fetches the image to compute its integrity hashes,
+        // and a plaintext-http (or non-http scheme) URL is both a privacy
+        // leak and not reliably fetchable. Reject it here rather than relying
+        // on the helper text alone. Scheme-parse (not a prefix check) so
+        // "HTTPS://" and odd casings are handled.
+        if !cleanedUrl.isEmpty,
+           URL(string: cleanedUrl)?.scheme?.lowercased() != "https" {
+            errorMessage = "Avatar URL must be an https:// link."
+            return
+        }
 
         // Did the user set/change the avatar URL? If so we need to
         // fetch bytes so Rust can compute the DIP-15 integrity hashes.

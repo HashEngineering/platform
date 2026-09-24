@@ -14,7 +14,7 @@ use crate::data_contract::serialized_version::DataContractInSerializationFormat;
 #[cfg(feature = "value-conversion")]
 use crate::data_contract::v0::DataContractV0;
 use crate::data_contract::{DataContract, INITIAL_DATA_CONTRACT_VERSION};
-use crate::serialization::PlatformDeserializableWithPotentialValidationFromVersionedStructure;
+use crate::serialization::PlatformDeserializableWithPotentialValidationFromVersionedStructureUntrusted;
 #[cfg(feature = "state-transitions")]
 use crate::state_transition::data_contract_create_transition::DataContractCreateTransition;
 #[cfg(feature = "state-transitions")]
@@ -67,10 +67,36 @@ impl DataContractFactoryV0 {
         config: Option<DataContractConfig>,
         definitions: Option<Value>,
     ) -> Result<CreatedDataContract, ProtocolError> {
-        let platform_version = PlatformVersion::get(self.protocol_version)?;
-
         let data_contract_id =
             DataContract::generate_data_contract_id_v0(owner_id.to_buffer(), identity_nonce);
+
+        self.create_with_id(
+            data_contract_id,
+            owner_id,
+            identity_nonce,
+            documents,
+            config,
+            definitions,
+        )
+    }
+
+    /// Create Data Contract under a given id instead of the one derived from the owner and
+    /// the nonce.
+    ///
+    /// For the system contracts, whose ids are published constants: the document types keep
+    /// the id of the contract they belong to, and the checks that compare against it (a key
+    /// reference's `boundTo`, which requires the key bound to this contract, and a lookup into
+    /// a document type of the same contract) have to see the real one.
+    pub fn create_with_id(
+        &self,
+        data_contract_id: Identifier,
+        owner_id: Identifier,
+        identity_nonce: IdentityNonce,
+        documents: Value,
+        config: Option<DataContractConfig>,
+        definitions: Option<Value>,
+    ) -> Result<CreatedDataContract, ProtocolError> {
+        let platform_version = PlatformVersion::get(self.protocol_version)?;
 
         let defs = definitions
             .map(|defs| defs.into_btree_string_map())
@@ -113,18 +139,24 @@ impl DataContractFactoryV0 {
             .contract_versions
             .contract_structure_version
         {
-            0 => Ok(DataContractV0::from_value(
-                data_contract_object,
-                full_validation,
-                platform_version,
-            )?
-            .into()),
-            1 => Ok(DataContractV1::from_value(
-                data_contract_object,
-                full_validation,
-                platform_version,
-            )?
-            .into()),
+            0 => {
+                let v0 = if full_validation {
+                    DataContractV0::from_value(data_contract_object, true, platform_version)?
+                } else {
+                    platform_value::from_value::<DataContractV0>(data_contract_object)
+                        .map_err(ProtocolError::ValueError)?
+                };
+                Ok(v0.into())
+            }
+            1 => {
+                let v1 = if full_validation {
+                    DataContractV1::from_value(data_contract_object, true, platform_version)?
+                } else {
+                    platform_value::from_value::<DataContractV1>(data_contract_object)
+                        .map_err(ProtocolError::ValueError)?
+                };
+                Ok(v1.into())
+            }
             version => Err(ProtocolError::UnknownVersionMismatch {
                 method: "DataContractFactoryV0::create_from_object".to_string(),
                 known_versions: vec![0, 1],
@@ -143,7 +175,7 @@ impl DataContractFactoryV0 {
         #[cfg(not(feature = "validation"))]
         let skip_validation = true;
 
-        let data_contract: DataContract = DataContract::versioned_deserialize(
+        let data_contract: DataContract = DataContract::versioned_deserialize_untrusted(
             buffer.as_slice(),
             !skip_validation,
             platform_version,
@@ -229,10 +261,8 @@ mod tests {
         let created_data_contract =
             get_data_contract_fixture(None, 0, platform_version.protocol_version);
 
-        let raw_data_contract = created_data_contract
-            .data_contract()
-            .to_value(platform_version)
-            .unwrap();
+        let raw_data_contract =
+            platform_value::to_value(created_data_contract.data_contract()).unwrap();
 
         let factory = DataContractFactoryV0::new(platform_version.protocol_version);
         TestData {
@@ -343,20 +373,28 @@ mod tests {
             .create_unsigned_data_contract_create_transition(created_data_contract.clone())
             .expect("Data Contract Transition should be created");
 
-        assert_eq!(0, result.state_transition_protocol_version());
+        assert_eq!(
+            platform_version
+                .dpp
+                .state_transition_serialization_versions
+                .contract_create_state_transition
+                .default_current_version,
+            result.state_transition_protocol_version()
+        );
         assert_eq!(
             created_data_contract.identity_nonce(),
             result.identity_nonce()
         );
 
-        let contract_value = DataContract::try_from_platform_versioned(
-            result.data_contract().to_owned(),
-            false,
-            &mut vec![],
-            platform_version,
+        let contract_value = platform_value::to_value(
+            DataContract::try_from_platform_versioned(
+                result.data_contract().to_owned(),
+                false,
+                &mut vec![],
+                platform_version,
+            )
+            .unwrap(),
         )
-        .unwrap()
-        .to_value(platform_version)
         .unwrap();
 
         assert_eq!(raw_data_contract, contract_value);

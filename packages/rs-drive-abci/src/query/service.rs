@@ -10,6 +10,7 @@ use crate::utils::spawn_blocking_task_with_name_if_supported;
 use async_trait::async_trait;
 use dapi_grpc::drive::v0::drive_internal_server::DriveInternal;
 use dapi_grpc::drive::v0::{GetProofsRequest, GetProofsResponse};
+use dapi_grpc::platform::v0::get_path_elements_request;
 use dapi_grpc::platform::v0::platform_server::Platform as PlatformService;
 use dapi_grpc::platform::v0::{
     BroadcastStateTransitionRequest, BroadcastStateTransitionResponse, GetAddressInfoRequest,
@@ -19,11 +20,19 @@ use dapi_grpc::platform::v0::{
     GetContestedResourceIdentityVotesRequest, GetContestedResourceIdentityVotesResponse,
     GetContestedResourceVoteStateRequest, GetContestedResourceVoteStateResponse,
     GetContestedResourceVotersForIdentityRequest, GetContestedResourceVotersForIdentityResponse,
-    GetContestedResourcesRequest, GetContestedResourcesResponse, GetCurrentQuorumsInfoRequest,
-    GetCurrentQuorumsInfoResponse, GetDataContractHistoryRequest, GetDataContractHistoryResponse,
-    GetDataContractRequest, GetDataContractResponse, GetDataContractsRequest,
-    GetDataContractsResponse, GetDocumentHistoryRequest, GetDocumentHistoryResponse,
-    GetDocumentsRequest, GetDocumentsResponse, GetEpochsInfoRequest, GetEpochsInfoResponse,
+    GetContestedResourcesRequest, GetContestedResourcesResponse,
+    GetContractDocumentRemovalsRequest, GetContractDocumentRemovalsResponse,
+    GetContractFeePotsRequest, GetContractFeePotsResponse, GetContractGroupInfoRequest,
+    GetContractGroupInfoResponse, GetContractGroupMembersRequest, GetContractGroupMembersResponse,
+    GetContractGroupsForContractRequest, GetContractGroupsForContractResponse,
+    GetContractModerationEntriesRequest, GetContractModerationEntriesResponse,
+    GetContractModerationStatusRequest, GetContractModerationStatusResponse,
+    GetCurrentQuorumsInfoRequest, GetCurrentQuorumsInfoResponse, GetDataContractHistoryRequest,
+    GetDataContractHistoryResponse, GetDataContractRequest, GetDataContractResponse,
+    GetDataContractsByRangeRequest, GetDataContractsLatestVersionsRequest,
+    GetDataContractsLatestVersionsResponse, GetDataContractsRequest, GetDataContractsResponse,
+    GetDocumentHistoryRequest, GetDocumentHistoryResponse, GetDocumentsRequest,
+    GetDocumentsResponse, GetEpochsInfoRequest, GetEpochsInfoResponse,
     GetEvonodesProposedEpochBlocksByIdsRequest, GetEvonodesProposedEpochBlocksByRangeRequest,
     GetEvonodesProposedEpochBlocksResponse, GetFinalizedEpochInfosRequest,
     GetFinalizedEpochInfosResponse, GetGroupActionSignersRequest, GetGroupActionSignersResponse,
@@ -36,9 +45,11 @@ use dapi_grpc::platform::v0::{
     GetIdentityBalanceAndRevisionResponse, GetIdentityBalanceRequest, GetIdentityBalanceResponse,
     GetIdentityByNonUniquePublicKeyHashRequest, GetIdentityByNonUniquePublicKeyHashResponse,
     GetIdentityByPublicKeyHashRequest, GetIdentityByPublicKeyHashResponse,
-    GetIdentityContractNonceRequest, GetIdentityContractNonceResponse, GetIdentityKeysRequest,
-    GetIdentityKeysResponse, GetIdentityNonceRequest, GetIdentityNonceResponse, GetIdentityRequest,
-    GetIdentityResponse, GetIdentityTokenBalancesRequest, GetIdentityTokenBalancesResponse,
+    GetIdentityContractNonceRequest, GetIdentityContractNonceResponse,
+    GetIdentityKeysRemainingBudgetsRequest, GetIdentityKeysRemainingBudgetsResponse,
+    GetIdentityKeysRequest, GetIdentityKeysResponse, GetIdentityNonceRequest,
+    GetIdentityNonceResponse, GetIdentityRequest, GetIdentityResponse,
+    GetIdentityTokenBalancesRequest, GetIdentityTokenBalancesResponse,
     GetIdentityTokenInfosRequest, GetIdentityTokenInfosResponse,
     GetMostRecentShieldedAnchorRequest, GetMostRecentShieldedAnchorResponse,
     GetPathElementsRequest, GetPathElementsResponse, GetPrefundedSpecializedBalanceRequest,
@@ -61,12 +72,15 @@ use dapi_grpc::platform::v0::{
 };
 use dapi_grpc::tonic::{Code, Request, Response, Status};
 use dpp::version::PlatformVersion;
-use std::fmt::Debug;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 use tracing::Instrument;
+
+const MAX_PATH_COMPONENTS: usize = 256;
+const MAX_GROVEDB_KEY_BYTES: usize = 255;
+const MAX_PATH_QUERY_BYTES: usize = 64 * 1024;
 
 /// Service to handle platform queries
 pub struct QueryService {
@@ -94,13 +108,11 @@ impl QueryService {
     ) -> Result<Response<RS>, Status>
     where
         RS: Clone + Send + 'static,
-        RQ: Debug + Send + Clone + 'static,
+        RQ: Send + Clone + 'static,
     {
         let mut response_duration_metric = query_duration_metric(endpoint_name);
 
         let platform = Arc::clone(&self.platform);
-
-        let request_debug = format!("{:?}", &request);
 
         let result = spawn_blocking_task_with_name_if_supported("query", move || {
             let mut result;
@@ -229,7 +241,6 @@ impl QueryService {
                 let elapsed_time = response_duration_metric.elapsed().as_secs_f64();
 
                 tracing::trace!(
-                    request = request_debug,
                     elapsed_time,
                     endpoint_name,
                     code = code_label,
@@ -242,7 +253,6 @@ impl QueryService {
             // System errors
             Code::Unknown | Code::Unimplemented | Code::Internal | Code::DataLoss => {
                 tracing::error!(
-                    request = request_debug,
                     endpoint_name,
                     code = code_label,
                     "query '{}' execution failed with code {:?}",
@@ -331,6 +341,18 @@ impl PlatformService for QueryService {
         .await
     }
 
+    async fn get_identity_keys_remaining_budgets(
+        &self,
+        request: Request<GetIdentityKeysRemainingBudgetsRequest>,
+    ) -> Result<Response<GetIdentityKeysRemainingBudgetsResponse>, Status> {
+        self.handle_blocking_query(
+            request,
+            Platform::<DefaultCoreRPC>::query_identity_keys_remaining_budgets,
+            "get_identity_keys_remaining_budgets",
+        )
+        .await
+    }
+
     async fn get_identity_balance(
         &self,
         request: Request<GetIdentityBalanceRequest>,
@@ -387,6 +409,114 @@ impl PlatformService for QueryService {
             request,
             Platform::<DefaultCoreRPC>::query_data_contracts,
             "get_data_contracts",
+        )
+        .await
+    }
+
+    async fn get_data_contracts_by_range(
+        &self,
+        request: Request<GetDataContractsByRangeRequest>,
+    ) -> Result<Response<GetDataContractsResponse>, Status> {
+        self.handle_blocking_query(
+            request,
+            Platform::<DefaultCoreRPC>::query_data_contracts_by_range,
+            "get_data_contracts_by_range",
+        )
+        .await
+    }
+
+    async fn get_data_contracts_latest_versions(
+        &self,
+        request: Request<GetDataContractsLatestVersionsRequest>,
+    ) -> Result<Response<GetDataContractsLatestVersionsResponse>, Status> {
+        self.handle_blocking_query(
+            request,
+            Platform::<DefaultCoreRPC>::query_data_contracts_latest_versions,
+            "get_data_contracts_latest_versions",
+        )
+        .await
+    }
+
+    async fn get_contract_group_info(
+        &self,
+        request: Request<GetContractGroupInfoRequest>,
+    ) -> Result<Response<GetContractGroupInfoResponse>, Status> {
+        self.handle_blocking_query(
+            request,
+            Platform::<DefaultCoreRPC>::query_contract_group_info,
+            "get_contract_group_info",
+        )
+        .await
+    }
+
+    async fn get_contract_moderation_status(
+        &self,
+        request: Request<GetContractModerationStatusRequest>,
+    ) -> Result<Response<GetContractModerationStatusResponse>, Status> {
+        self.handle_blocking_query(
+            request,
+            Platform::<DefaultCoreRPC>::query_contract_moderation_status,
+            "get_contract_moderation_status",
+        )
+        .await
+    }
+
+    async fn get_contract_document_removals(
+        &self,
+        request: Request<GetContractDocumentRemovalsRequest>,
+    ) -> Result<Response<GetContractDocumentRemovalsResponse>, Status> {
+        self.handle_blocking_query(
+            request,
+            Platform::<DefaultCoreRPC>::query_contract_document_removals,
+            "get_contract_document_removals",
+        )
+        .await
+    }
+
+    async fn get_contract_moderation_entries(
+        &self,
+        request: Request<GetContractModerationEntriesRequest>,
+    ) -> Result<Response<GetContractModerationEntriesResponse>, Status> {
+        self.handle_blocking_query(
+            request,
+            Platform::<DefaultCoreRPC>::query_contract_moderation_entries,
+            "get_contract_moderation_entries",
+        )
+        .await
+    }
+
+    async fn get_contract_fee_pots(
+        &self,
+        request: Request<GetContractFeePotsRequest>,
+    ) -> Result<Response<GetContractFeePotsResponse>, Status> {
+        self.handle_blocking_query(
+            request,
+            Platform::<DefaultCoreRPC>::query_contract_fee_pots,
+            "get_contract_fee_pots",
+        )
+        .await
+    }
+
+    async fn get_contract_group_members(
+        &self,
+        request: Request<GetContractGroupMembersRequest>,
+    ) -> Result<Response<GetContractGroupMembersResponse>, Status> {
+        self.handle_blocking_query(
+            request,
+            Platform::<DefaultCoreRPC>::query_contract_group_members,
+            "get_contract_group_members",
+        )
+        .await
+    }
+
+    async fn get_contract_groups_for_contract(
+        &self,
+        request: Request<GetContractGroupsForContractRequest>,
+    ) -> Result<Response<GetContractGroupsForContractResponse>, Status> {
+        self.handle_blocking_query(
+            request,
+            Platform::<DefaultCoreRPC>::query_contract_groups_for_contract,
+            "get_contract_groups_for_contract",
         )
         .await
     }
@@ -493,6 +623,7 @@ impl PlatformService for QueryService {
         &self,
         request: Request<GetPathElementsRequest>,
     ) -> Result<Response<GetPathElementsResponse>, Status> {
+        validate_path_elements_request(request.get_ref())?;
         self.handle_blocking_query(
             request,
             Platform::<DefaultCoreRPC>::query_path_elements,
@@ -990,6 +1121,8 @@ fn query_error_into_status(error: QueryError) -> Status {
         QueryError::NotFound(message) => Status::not_found(message),
         QueryError::InvalidArgument(message) => Status::invalid_argument(message),
         QueryError::Query(error) => Status::invalid_argument(error.to_string()),
+        QueryError::TooManyElements(message) => Status::invalid_argument(message),
+        QueryError::ResourceExhausted(message) => Status::resource_exhausted(message),
         _ => {
             tracing::error!("unexpected query error: {:?}", error);
 
@@ -1000,4 +1133,80 @@ fn query_error_into_status(error: QueryError) -> Status {
 
 fn error_into_status(error: Error) -> Status {
     Status::internal(format!("query: {}", error))
+}
+
+fn validate_path_elements_request(request: &GetPathElementsRequest) -> Result<(), Status> {
+    let v0 = match request.version.as_ref() {
+        Some(get_path_elements_request::Version::V0(v0)) => v0,
+        None => return Err(Status::invalid_argument("missing request version")),
+    };
+    let max_keys = PlatformVersion::latest()
+        .drive_abci
+        .query
+        .max_returned_elements as usize;
+    if v0.path.len() > MAX_PATH_COMPONENTS || v0.keys.len() > max_keys {
+        return Err(Status::resource_exhausted(
+            "too many path or key components",
+        ));
+    }
+
+    let total_bytes = v0
+        .path
+        .iter()
+        .chain(&v0.keys)
+        .try_fold(0usize, |total, component| {
+            if component.len() > MAX_GROVEDB_KEY_BYTES {
+                return Err(Status::resource_exhausted(
+                    "path or key component is too large",
+                ));
+            }
+            total
+                .checked_add(component.len())
+                .ok_or_else(|| Status::resource_exhausted("path query size overflow"))
+        })?;
+
+    if total_bytes > MAX_PATH_QUERY_BYTES {
+        return Err(Status::resource_exhausted(
+            "aggregate path query bytes exceed limit",
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dapi_grpc::platform::v0::get_path_elements_request::GetPathElementsRequestV0;
+
+    #[test]
+    fn path_elements_request_is_bounded_before_debug_formatting() {
+        let request = GetPathElementsRequest {
+            version: Some(get_path_elements_request::Version::V0(
+                GetPathElementsRequestV0 {
+                    path: vec![vec![]; MAX_PATH_COMPONENTS + 1],
+                    keys: vec![],
+                    prove: false,
+                },
+            )),
+        };
+
+        let status = validate_path_elements_request(&request)
+            .expect_err("expected excessive path depth to be rejected");
+        assert_eq!(status.code(), Code::ResourceExhausted);
+    }
+}
+
+#[cfg(test)]
+mod query_error_status_tests {
+    use super::*;
+
+    #[test]
+    fn resource_exhausted_query_error_maps_to_retryable_grpc_status() {
+        let status = query_error_into_status(QueryError::ResourceExhausted(
+            "server-side retained state is over capacity".to_string(),
+        ));
+
+        assert_eq!(status.code(), Code::ResourceExhausted);
+    }
 }

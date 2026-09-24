@@ -20,21 +20,21 @@ const TS_TYPES: &str = r#"
 /**
  * AssetLockProof serialized as a plain object.
  *
- * Internally-tagged discriminated union — `type` discriminates the variant and
+ * Internally-tagged discriminated union — `$type` discriminates the variant and
  * the variant's fields sit alongside it. Mirrors the rs-dpp serde shape (which
- * uses `#[serde(tag = "type")]` on the enum) and the convention used by
+ * uses `#[serde(tag = "$type")]` on the enum) and the convention used by
  * `AddressWitness` / `AddressFundsFeeStrategyStep`.
  */
 export type AssetLockProofObject =
-    | ({ type: "instant" } & InstantAssetLockProofObject)
-    | ({ type: "chain" } & ChainAssetLockProofObject);
+    | ({ $type: "instant" } & InstantAssetLockProofObject)
+    | ({ $type: "chain" } & ChainAssetLockProofObject);
 
 /**
  * AssetLockProof serialized as JSON.
  */
 export type AssetLockProofJSON =
-    | ({ type: "instant" } & InstantAssetLockProofJSON)
-    | ({ type: "chain" } & ChainAssetLockProofJSON);
+    | ({ $type: "instant" } & InstantAssetLockProofJSON)
+    | ({ $type: "chain" } & ChainAssetLockProofJSON);
 "#;
 
 #[wasm_bindgen]
@@ -166,7 +166,7 @@ impl AssetLockProofWasm {
     }
 
     /// Returns the lock type as a lowercase wire-shape string ("instant" or
-    /// "chain") — matching the `type` discriminator emitted by `toObject()` /
+    /// "chain") — matching the `$type` discriminator emitted by `toObject()` /
     /// `toJSON()`.
     #[wasm_bindgen(getter = "lockType")]
     pub fn lock_type(&self) -> String {
@@ -211,9 +211,10 @@ impl AssetLockProofWasm {
     ) -> WasmDppResult<AssetLockProofWasm> {
         let bytes = hex::decode(asset_lock_proof)
             .map_err(|e| WasmDppError::serialization(e.to_string()))?;
-        let proof: AssetLockProof = bincode::decode_from_slice(&bytes, bincode::config::standard())
-            .map_err(|e| WasmDppError::serialization(e.to_string()))?
-            .0;
+        let proof: AssetLockProof =
+            bincode::decode_from_slice_untrusted(&bytes, bincode::config::standard())
+                .map_err(|e| WasmDppError::serialization(e.to_string()))?
+                .0;
         Ok(AssetLockProofWasm(proof))
     }
 
@@ -225,9 +226,10 @@ impl AssetLockProofWasm {
 
     #[wasm_bindgen(js_name = "fromBytes")]
     pub fn from_bytes(bytes: Vec<u8>) -> WasmDppResult<AssetLockProofWasm> {
-        let proof: AssetLockProof = bincode::decode_from_slice(&bytes, bincode::config::standard())
-            .map_err(|e| WasmDppError::serialization(e.to_string()))?
-            .0;
+        let proof: AssetLockProof =
+            bincode::decode_from_slice_untrusted(&bytes, bincode::config::standard())
+                .map_err(|e| WasmDppError::serialization(e.to_string()))?
+                .0;
         Ok(AssetLockProofWasm(proof))
     }
 }
@@ -235,8 +237,9 @@ impl AssetLockProofWasm {
 impl_try_from_js_value!(AssetLockProofWasm, "AssetLockProof");
 impl_try_from_options!(AssetLockProofWasm);
 impl_wasm_type_info!(AssetLockProofWasm, AssetLockProof);
-crate::impl_wasm_conversions_serde!(
+crate::impl_wasm_conversions_inner!(
     AssetLockProofWasm,
+    AssetLockProof,
     AssetLockProof,
     AssetLockProofObjectJs,
     AssetLockProofJSONJs

@@ -1,14 +1,16 @@
 //! Definitions of errors
+use crate::platform::encrypted_for::EncryptedForError;
 use dapi_grpc::platform::v0::StateTransitionBroadcastError as StateTransitionBroadcastErrorProto;
 use dapi_grpc::tonic::Code;
 pub use dash_context_provider::ContextProviderError;
 use dpp::block::block_info::BlockInfo;
+use dpp::block::epoch::EpochIndex;
 use dpp::consensus::basic::state_transition::{
     OutputBelowMinimumError, TransitionNoInputsError, TransitionNoOutputsError,
 };
 use dpp::consensus::state::address_funds::{AddressDoesNotExistError, AddressNotEnoughFundsError};
 use dpp::consensus::ConsensusError;
-use dpp::serialization::PlatformDeserializable;
+use dpp::serialization::PlatformDeserializableUntrusted;
 use dpp::validation::SimpleConsensusValidationResult;
 use dpp::version::PlatformVersionError;
 use dpp::{dashcore_rpc, ProtocolError};
@@ -40,6 +42,12 @@ pub enum Error {
     /// Invalid Proved Response error
     #[error("Invalid Proved Response error: {0}")]
     InvalidProvedResponse(String),
+    /// The proof authenticated only the state the transition affects (a
+    /// height-pinned snapshot), while the caller required evidence that this
+    /// specific transition executed. Use the `*_affected_state` wait APIs to
+    /// accept snapshot outcomes explicitly.
+    #[error("proof authenticates the transition's affected state only, not its execution: {0}")]
+    ExecutionNotProved(String),
     /// DAPI client error, for example, connection error
     #[error("Dapi client error: {0}")]
     DapiClientError(rs_dapi_client::DapiClientError),
@@ -124,6 +132,20 @@ pub enum Error {
     /// Contains the last meaningful error that caused addresses to be banned.
     #[error("no available addresses to retry, last error: {0}")]
     NoAvailableAddressesToRetry(Box<Error>),
+
+    /// A property declared `encryptedFor` could not be encrypted or decrypted
+    #[error(transparent)]
+    EncryptedFor(#[from] EncryptedForError),
+}
+
+impl From<dash_platform_queries::Error> for Error {
+    fn from(value: dash_platform_queries::Error) -> Self {
+        match value {
+            dash_platform_queries::Error::Config(msg) => Self::Config(msg),
+            dash_platform_queries::Error::Drive(e) => Self::Drive(e),
+            dash_platform_queries::Error::Protocol(e) => Self::Protocol(e),
+        }
+    }
 }
 
 /// State transition broadcast error
@@ -143,8 +165,8 @@ impl TryFrom<StateTransitionBroadcastErrorProto> for StateTransitionBroadcastErr
 
     fn try_from(value: StateTransitionBroadcastErrorProto) -> Result<Self, Self::Error> {
         let cause = if !value.data.is_empty() {
-            let consensus_error =
-                ConsensusError::deserialize_from_bytes(&value.data).map_err(|e| {
+            let consensus_error = ConsensusError::deserialize_from_bytes_untrusted(&value.data)
+                .map_err(|e| {
                     tracing::debug!("Failed to deserialize consensus error: {}", e);
 
                     Error::Protocol(e)
@@ -175,7 +197,7 @@ impl From<DapiClientError> for Error {
                 return consensus_error_value
                     .to_bytes()
                     .map(|bytes| {
-                        ConsensusError::deserialize_from_bytes(&bytes)
+                        ConsensusError::deserialize_from_bytes_untrusted(&bytes)
                             .map(|consensus_error| {
                                 Self::Protocol(ProtocolError::ConsensusError(Box::new(
                                     consensus_error,
@@ -379,6 +401,19 @@ pub enum StaleNodeError {
         received_timestamp_ms: u64,
         /// Tolerance in milliseconds
         tolerance_ms: u64,
+    },
+    /// Server kept reporting a current epoch that its own proofs contradict
+    ///
+    /// The epoch index in response metadata is not covered by the quorum
+    /// signature, so `ExtendedEpochInfo::fetch_current` only uses it to shape a
+    /// proved query and then checks it against the proof. This error means the
+    /// check kept failing: every proof showed a newer epoch already started.
+    #[error("received epoch is outdated: hinted {hinted_epoch}, proven started epoch {proven_epoch}; try another server")]
+    Epoch {
+        /// Epoch index the server reported as current in unsigned response metadata
+        hinted_epoch: EpochIndex,
+        /// Newer epoch index that the server's own proof showed as already started
+        proven_epoch: EpochIndex,
     },
 }
 

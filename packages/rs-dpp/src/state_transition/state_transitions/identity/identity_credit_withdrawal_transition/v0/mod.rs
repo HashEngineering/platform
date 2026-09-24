@@ -1,15 +1,11 @@
 mod identity_signed;
-#[cfg(feature = "json-conversion")]
-mod json_conversion;
 mod state_transition_like;
 mod types;
-#[cfg(feature = "value-conversion")]
-mod value_conversion;
 mod version;
 
 #[cfg(feature = "json-conversion")]
 use crate::serialization::json_safe_fields;
-use bincode::{Decode, Encode};
+use bincode::{Decode, DecodeUntrusted, Encode};
 use platform_serialization_derive::PlatformSignable;
 use platform_value::BinaryData;
 #[cfg(feature = "serde-conversion")]
@@ -24,7 +20,7 @@ use crate::{
 };
 
 #[cfg_attr(feature = "json-conversion", json_safe_fields)]
-#[derive(Debug, Clone, Encode, Decode, PlatformSignable, PartialEq)]
+#[derive(Debug, Clone, Encode, Decode, PlatformSignable, PartialEq, DecodeUntrusted)]
 #[cfg_attr(
     feature = "serde-conversion",
     derive(Serialize, Deserialize),
@@ -54,24 +50,46 @@ mod test {
     use crate::identity::core_script::CoreScript;
     use crate::identity::KeyID;
     use crate::prelude::{IdentityNonce, UserFeeIncrease};
-    use crate::serialization::{PlatformDeserializable, PlatformSerializable};
+    use crate::serialization::{PlatformDeserializableUntrusted, PlatformSerializable};
     use crate::state_transition::identity_credit_withdrawal_transition::v0::Pooling;
     use crate::ProtocolError;
-    use bincode::{Decode, Encode};
-    use platform_serialization_derive::{PlatformDeserialize, PlatformSerialize};
+    use bincode::{Decode, DecodeUntrusted, Encode};
+    use platform_serialization_derive::{
+        PlatformDeserializeTrusted, PlatformDeserializeUntrusted, PlatformSerialize,
+    };
     use platform_value::{BinaryData, Identifier};
     use rand::Rng;
     use std::fmt::Debug;
 
     // Structure with 1 property
-    #[derive(Debug, Clone, Encode, Decode, PlatformDeserialize, PlatformSerialize, PartialEq)]
+    #[derive(
+        Debug,
+        Clone,
+        Encode,
+        Decode,
+        PlatformDeserializeTrusted,
+        PlatformDeserializeUntrusted,
+        PlatformSerialize,
+        PartialEq,
+        DecodeUntrusted,
+    )]
     #[platform_serialize(unversioned)]
     struct IdentityCreditWithdrawalTransitionV01 {
         pub identity_id: Identifier,
     }
 
     // Structure with 2 properties
-    #[derive(Debug, Clone, Encode, Decode, PlatformDeserialize, PlatformSerialize, PartialEq)]
+    #[derive(
+        Debug,
+        Clone,
+        Encode,
+        Decode,
+        PlatformDeserializeTrusted,
+        PlatformDeserializeUntrusted,
+        PlatformSerialize,
+        PartialEq,
+        DecodeUntrusted,
+    )]
     #[platform_serialize(unversioned)]
     struct IdentityCreditWithdrawalTransitionV02 {
         pub identity_id: Identifier,
@@ -79,7 +97,17 @@ mod test {
     }
 
     // Structure with 3 properties
-    #[derive(Debug, Clone, Encode, Decode, PlatformDeserialize, PlatformSerialize, PartialEq)]
+    #[derive(
+        Debug,
+        Clone,
+        Encode,
+        Decode,
+        PlatformDeserializeTrusted,
+        PlatformDeserializeUntrusted,
+        PlatformSerialize,
+        PartialEq,
+        DecodeUntrusted,
+    )]
     #[platform_serialize(unversioned)]
     struct IdentityCreditWithdrawalTransitionV03 {
         pub identity_id: Identifier,
@@ -88,7 +116,17 @@ mod test {
     }
 
     // Structure with 4 properties
-    #[derive(Debug, Clone, Encode, Decode, PlatformDeserialize, PlatformSerialize, PartialEq)]
+    #[derive(
+        Debug,
+        Clone,
+        Encode,
+        Decode,
+        PlatformDeserializeTrusted,
+        PlatformDeserializeUntrusted,
+        PlatformSerialize,
+        PartialEq,
+        DecodeUntrusted,
+    )]
     #[platform_serialize(unversioned)]
     struct IdentityCreditWithdrawalTransitionV04 {
         pub identity_id: Identifier,
@@ -98,7 +136,17 @@ mod test {
     }
 
     // Structure with 5 properties
-    #[derive(Debug, Clone, Encode, Decode, PlatformDeserialize, PlatformSerialize, PartialEq)]
+    #[derive(
+        Debug,
+        Clone,
+        Encode,
+        Decode,
+        PlatformDeserializeTrusted,
+        PlatformDeserializeUntrusted,
+        PlatformSerialize,
+        PartialEq,
+        DecodeUntrusted,
+    )]
     #[platform_serialize(unversioned)]
     struct IdentityCreditWithdrawalTransitionV05 {
         pub identity_id: Identifier,
@@ -109,7 +157,17 @@ mod test {
     }
 
     // Structure with 6 properties
-    #[derive(Debug, Clone, Encode, Decode, PlatformDeserialize, PlatformSerialize, PartialEq)]
+    #[derive(
+        Debug,
+        Clone,
+        Encode,
+        Decode,
+        PlatformDeserializeTrusted,
+        PlatformDeserializeUntrusted,
+        PlatformSerialize,
+        PartialEq,
+        DecodeUntrusted,
+    )]
     #[platform_serialize(unversioned)]
     struct IdentityCreditWithdrawalTransitionV06 {
         pub identity_id: Identifier,
@@ -121,7 +179,17 @@ mod test {
     }
 
     // Structure with 7 properties
-    #[derive(Debug, Clone, Encode, Decode, PlatformDeserialize, PlatformSerialize, PartialEq)]
+    #[derive(
+        Debug,
+        Clone,
+        Encode,
+        Decode,
+        PlatformDeserializeTrusted,
+        PlatformDeserializeUntrusted,
+        PlatformSerialize,
+        PartialEq,
+        DecodeUntrusted,
+    )]
     #[platform_serialize(unversioned)]
     struct IdentityCreditWithdrawalTransitionV07 {
         pub identity_id: Identifier,
@@ -134,7 +202,17 @@ mod test {
     }
 
     // Structure with 8 properties
-    #[derive(Debug, Clone, Encode, Decode, PlatformDeserialize, PlatformSerialize, PartialEq)]
+    #[derive(
+        Debug,
+        Clone,
+        Encode,
+        Decode,
+        PlatformDeserializeTrusted,
+        PlatformDeserializeUntrusted,
+        PlatformSerialize,
+        PartialEq,
+        DecodeUntrusted,
+    )]
     #[platform_serialize(unversioned)]
     struct IdentityCreditWithdrawalTransitionV08 {
         pub identity_id: Identifier,
@@ -148,7 +226,17 @@ mod test {
     }
 
     // Structure with 9 properties
-    #[derive(Debug, Clone, Encode, Decode, PlatformDeserialize, PlatformSerialize, PartialEq)]
+    #[derive(
+        Debug,
+        Clone,
+        Encode,
+        Decode,
+        PlatformDeserializeTrusted,
+        PlatformDeserializeUntrusted,
+        PlatformSerialize,
+        PartialEq,
+        DecodeUntrusted,
+    )]
     #[platform_serialize(unversioned)]
     struct IdentityCreditWithdrawalTransitionV09 {
         pub identity_id: Identifier,
@@ -163,15 +251,15 @@ mod test {
     }
 
     fn test_identity_credit_withdrawal_transition<
-        T: PlatformSerializable + PlatformDeserializable + Debug + PartialEq,
+        T: PlatformSerializable + PlatformDeserializableUntrusted + Debug + PartialEq,
     >(
         transition: T,
     ) where
         <T as PlatformSerializable>::Error: std::fmt::Debug,
     {
         let serialized = T::serialize_to_bytes(&transition).expect("expected to serialize");
-        let deserialized =
-            T::deserialize_from_bytes(serialized.as_slice()).expect("expected to deserialize");
+        let deserialized = T::deserialize_from_bytes_untrusted(serialized.as_slice())
+            .expect("expected to deserialize");
         assert_eq!(transition, deserialized);
     }
 
@@ -383,99 +471,8 @@ mod test {
         }
     }
 
-    #[test]
-    fn test_value_conversion_roundtrip_v0() {
-        use crate::state_transition::StateTransitionValueConvert;
-        use crate::version::LATEST_PLATFORM_VERSION;
-        let t = make_withdrawal_v0();
-        let obj = t.to_object(false).expect("to_object should work");
-        let restored =
-            super::IdentityCreditWithdrawalTransitionV0::from_object(obj, LATEST_PLATFORM_VERSION)
-                .expect("from_object should work");
-        assert_eq!(t, restored);
-    }
-
-    #[test]
-    fn test_to_cleaned_object_v0() {
-        use crate::state_transition::StateTransitionValueConvert;
-        let t = make_withdrawal_v0();
-        let obj = t.to_cleaned_object(false).expect("should work");
-        assert!(obj.is_map());
-    }
-
-    #[test]
-    fn test_to_canonical_cleaned_object_v0() {
-        use crate::state_transition::StateTransitionValueConvert;
-        let t = make_withdrawal_v0();
-        let obj = t.to_canonical_cleaned_object(false).expect("should work");
-        assert!(obj.is_map());
-    }
-
-    #[test]
-    fn test_from_value_map_v0() {
-        use crate::state_transition::StateTransitionValueConvert;
-        use crate::version::LATEST_PLATFORM_VERSION;
-        let t = make_withdrawal_v0();
-        let obj = t.to_object(false).expect("to_object should work");
-        let map = obj.into_btree_string_map().expect("should be a map");
-        let restored = super::IdentityCreditWithdrawalTransitionV0::from_value_map(
-            map,
-            LATEST_PLATFORM_VERSION,
-        )
-        .expect("should work");
-        assert_eq!(t, restored);
-    }
-
-    #[test]
-    fn test_to_object_skip_signature_removes_signature() {
-        use crate::state_transition::StateTransitionValueConvert;
-        let t = make_withdrawal_v0();
-        let obj = t.to_object(true).expect("should work");
-        let map = obj.into_btree_string_map().expect("should be a map");
-        assert!(!map.contains_key("signature"));
-    }
-
-    #[test]
-    fn test_to_cleaned_object_skip_signature() {
-        use crate::state_transition::StateTransitionValueConvert;
-        let t = make_withdrawal_v0();
-        let obj = t.to_cleaned_object(true).expect("should work");
-        let map = obj.into_btree_string_map().expect("should be a map");
-        assert!(!map.contains_key("signature"));
-    }
-
-    #[test]
-    fn test_to_canonical_cleaned_object_skip_signature() {
-        use crate::state_transition::StateTransitionValueConvert;
-        let t = make_withdrawal_v0();
-        let obj = t.to_canonical_cleaned_object(true).expect("should work");
-        let map = obj.into_btree_string_map().expect("should be a map");
-        assert!(!map.contains_key("signature"));
-    }
-
-    #[test]
-    fn test_pooling_roundtrip_never() {
-        use crate::state_transition::StateTransitionValueConvert;
-        use crate::version::LATEST_PLATFORM_VERSION;
-        let mut t = make_withdrawal_v0();
-        t.pooling = Pooling::Never;
-        let obj = t.to_object(false).expect("to_object");
-        let restored =
-            super::IdentityCreditWithdrawalTransitionV0::from_object(obj, LATEST_PLATFORM_VERSION)
-                .expect("from_object");
-        assert_eq!(restored.pooling, Pooling::Never);
-    }
-
-    #[test]
-    fn test_pooling_roundtrip_standard() {
-        use crate::state_transition::StateTransitionValueConvert;
-        use crate::version::LATEST_PLATFORM_VERSION;
-        let mut t = make_withdrawal_v0();
-        t.pooling = Pooling::Standard;
-        let obj = t.to_object(false).expect("to_object");
-        let restored =
-            super::IdentityCreditWithdrawalTransitionV0::from_object(obj, LATEST_PLATFORM_VERSION)
-                .expect("from_object");
-        assert_eq!(restored.pooling, Pooling::Standard);
-    }
+    // Legacy `StateTransitionValueConvert` round-trip / pooling tests on
+    // the V0 inner struct deleted in Phase D step 9. The canonical
+    // `JsonConvertible` / `ValueConvertible` round-trip is exercised on
+    // the outer enum derive — these tested methods that no longer exist.
 }

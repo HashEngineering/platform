@@ -1,16 +1,12 @@
-#[cfg(feature = "json-conversion")]
-mod json_conversion;
 mod proved;
 mod state_transition_like;
 mod types;
 pub(super) mod v0_methods;
-#[cfg(feature = "value-conversion")]
-mod value_conversion;
 mod version;
 
 #[cfg(feature = "json-conversion")]
 use crate::serialization::json_safe_fields;
-use bincode::{Decode, Encode};
+use bincode::{Decode, DecodeUntrusted, Encode};
 use platform_serialization_derive::PlatformSignable;
 
 use platform_value::BinaryData;
@@ -33,7 +29,7 @@ mod property_names {
 }
 
 #[cfg_attr(feature = "json-conversion", json_safe_fields)]
-#[derive(Debug, Clone, Encode, Decode, PlatformSignable, PartialEq)]
+#[derive(Debug, Clone, Encode, Decode, PlatformSignable, PartialEq, DecodeUntrusted)]
 #[cfg_attr(
     feature = "serde-conversion",
     derive(Serialize, Deserialize),

@@ -7,13 +7,15 @@ use crate::document::Document;
 use crate::serialization::JsonConvertible;
 #[cfg(feature = "value-conversion")]
 use crate::serialization::ValueConvertible;
-use crate::serialization::{PlatformDeserializable, PlatformSerializable};
+use crate::serialization::{PlatformDeserializableUntrusted, PlatformSerializable};
 use crate::voting::contender_structs::contender::v0::ContenderV0;
 use crate::voting::contender_structs::ContenderWithSerializedDocumentV0;
 use crate::ProtocolError;
-use bincode::{Decode, Encode};
+use bincode::{Decode, DecodeUntrusted, Encode};
 use derive_more::From;
-use platform_serialization_derive::{PlatformDeserialize, PlatformSerialize};
+use platform_serialization_derive::{
+    PlatformDeserializeTrusted, PlatformDeserializeUntrusted, PlatformSerialize,
+};
 use platform_value::Identifier;
 use platform_version::version::PlatformVersion;
 
@@ -37,7 +39,17 @@ pub enum Contender {
     derive(JsonConvertible)
 )]
 #[derive(
-    Debug, PartialEq, Eq, Clone, From, Encode, Decode, PlatformSerialize, PlatformDeserialize,
+    Debug,
+    PartialEq,
+    Eq,
+    Clone,
+    From,
+    Encode,
+    Decode,
+    PlatformSerialize,
+    PlatformDeserializeTrusted,
+    PlatformDeserializeUntrusted,
+    DecodeUntrusted,
 )]
 #[cfg_attr(
     feature = "serde-conversion",
@@ -215,7 +227,9 @@ impl Contender {
         Self: Sized,
     {
         let serialized_contender =
-            ContenderWithSerializedDocument::deserialize_from_bytes(serialized_contender)?;
+            ContenderWithSerializedDocument::deserialize_from_bytes_untrusted(
+                serialized_contender,
+            )?;
         serialized_contender.try_into_contender(document_type, platform_version)
     }
 }
@@ -380,8 +394,9 @@ mod tests {
             assert!(!bytes.is_empty());
 
             // Deserialize back
-            let restored = ContenderWithSerializedDocument::deserialize_from_bytes(&bytes)
-                .expect("should deserialize from bytes");
+            let restored =
+                ContenderWithSerializedDocument::deserialize_from_bytes_untrusted(&bytes)
+                    .expect("should deserialize from bytes");
 
             assert_eq!(wrapped, restored);
         }
@@ -399,8 +414,9 @@ mod tests {
             let bytes = wrapped
                 .serialize_to_bytes()
                 .expect("should serialize to bytes");
-            let restored = ContenderWithSerializedDocument::deserialize_from_bytes(&bytes)
-                .expect("should deserialize from bytes");
+            let restored =
+                ContenderWithSerializedDocument::deserialize_from_bytes_untrusted(&bytes)
+                    .expect("should deserialize from bytes");
 
             assert_eq!(wrapped, restored);
         }
@@ -455,5 +471,80 @@ mod tests {
             });
             assert_ne!(a, b);
         }
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "json-conversion",
+    feature = "value-conversion",
+    feature = "serde-conversion"
+))]
+mod json_convertible_tests_contender_with_serialized_document {
+    use super::*;
+    use platform_value::{platform_value, Identifier, Value};
+    use serde_json::json;
+
+    /// Non-default values per field (real identity_id bytes, non-empty
+    /// serialized_document, non-zero tally) so the wire-shape assertion
+    /// catches silent zero-out / flip on round-trip.
+    fn fixture() -> ContenderWithSerializedDocument {
+        ContenderWithSerializedDocument::V0(ContenderWithSerializedDocumentV0 {
+            identity_id: Identifier::new([0xa1; 32]),
+            serialized_document: Some(vec![0xde, 0xad, 0xbe, 0xef]),
+            vote_tally: Some(42),
+        })
+    }
+
+    #[test]
+    fn json_round_trip_with_full_wire_shape() {
+        use crate::serialization::JsonConvertible;
+        let original = fixture();
+        let json = original.to_json().expect("to_json");
+        // `Identifier` renders as base58 in JSON. `Vec<u8>` (from the default
+        // `serialize_seq` in serde_json) renders as an array of numbers — NOT
+        // bytes — so each element appears as `Number(...)`. `vote_tally` is
+        // `Option<u32>`; JSON erases the size — the value-path assertion uses
+        // `42u32` to lock in `Value::U32`.
+        assert_eq!(
+            json,
+            json!({
+                "$formatVersion": "0",
+                "identityId": "Bswb3UyeD1pUTaGiE6WvqwFpJZsQSEY1xhJePCDTHdvp",
+                "serializedDocument": [222, 173, 190, 239],
+                "voteTally": 42,
+            })
+        );
+        let recovered = ContenderWithSerializedDocument::from_json(json).expect("from_json");
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn value_round_trip_with_full_wire_shape() {
+        use crate::serialization::ValueConvertible;
+        let original = fixture();
+        let value = original.to_object().expect("to_object");
+        // platform_value preserves typed variants: `Identifier` renders as
+        // `Value::Identifier`, `Vec<u8>` renders as `Value::Array([U8(...), ...])`
+        // (NOT `Value::Bytes`, because `Vec<u8>` uses the generic `serialize_seq`
+        // path), `Option<u32>` becomes `Value::U32`.
+        let id = Identifier::new([0xa1; 32]);
+        let bytes_array = Value::Array(vec![
+            Value::U8(0xde),
+            Value::U8(0xad),
+            Value::U8(0xbe),
+            Value::U8(0xef),
+        ]);
+        assert_eq!(
+            value,
+            platform_value!({
+                "$formatVersion": "0",
+                "identityId": id,
+                "serializedDocument": bytes_array,
+                "voteTally": 42u32,
+            })
+        );
+        let recovered = ContenderWithSerializedDocument::from_object(value).expect("from_object");
+        assert_eq!(original, recovered);
     }
 }

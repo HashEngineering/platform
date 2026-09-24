@@ -1,11 +1,7 @@
 mod identity_signed;
-#[cfg(feature = "json-conversion")]
-mod json_conversion;
 mod state_transition_like;
 mod types;
 pub(super) mod v0_methods;
-#[cfg(feature = "value-conversion")]
-mod value_conversion;
 mod version;
 
 #[cfg(feature = "json-conversion")]
@@ -14,7 +10,7 @@ use platform_value::BinaryData;
 #[cfg(feature = "serde-conversion")]
 use serde::{Deserialize, Serialize};
 
-use bincode::{Decode, Encode};
+use bincode::{Decode, DecodeUntrusted, Encode};
 use platform_serialization_derive::PlatformSignable;
 use platform_version::version::PlatformVersion;
 use platform_version::{TryFromPlatformVersioned, TryIntoPlatformVersioned};
@@ -26,7 +22,7 @@ use crate::state_transition::StateTransition;
 use crate::{data_contract::DataContract, identity::KeyID, ProtocolError};
 
 #[cfg_attr(feature = "json-conversion", json_safe_fields)]
-#[derive(Debug, Clone, Encode, Decode, PartialEq, PlatformSignable)]
+#[derive(Debug, Clone, Encode, Decode, PartialEq, PlatformSignable, DecodeUntrusted)]
 #[cfg_attr(
     feature = "serde-conversion",
     derive(Serialize, Deserialize),

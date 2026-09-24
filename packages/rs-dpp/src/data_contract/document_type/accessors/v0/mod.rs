@@ -1,6 +1,6 @@
 use crate::data_contract::document_type::index::Index;
 use crate::data_contract::document_type::index_level::IndexLevel;
-use crate::data_contract::document_type::property::DocumentProperty;
+use crate::data_contract::document_type::property::{DocumentProperty, EncryptedFor};
 
 use platform_value::{Identifier, Value};
 
@@ -42,6 +42,23 @@ pub trait DocumentTypeV0Getters {
     /// Returns the properties of the document type.
     fn properties(&self) -> &IndexMap<String, DocumentProperty>;
 
+    /// The properties declared `encryptedFor`, each by its dotted path in
+    /// schema order, with the declaration that says for whom, under which
+    /// keys and under which scheme their bytes were encrypted. Empty on a
+    /// document type declaring none, and on every contract parsed before
+    /// protocol version 14, which ignores the keyword.
+    fn encrypted_properties(&self) -> Vec<(&String, &EncryptedFor)> {
+        self.flattened_properties()
+            .iter()
+            .filter_map(|(path, property)| {
+                property
+                    .encrypted_for
+                    .as_ref()
+                    .map(|encrypted_for| (path, encrypted_for))
+            })
+            .collect()
+    }
+
     /// Returns the identifier paths of the document type.
     fn identifier_paths(&self) -> &BTreeSet<String>;
 
@@ -57,6 +74,18 @@ pub trait DocumentTypeV0Getters {
 
     /// Returns the documents keep history flag of the document type.
     fn documents_keep_history(&self) -> bool;
+
+    /// Returns true if transfers of documents of this type are recorded in
+    /// the document history system contract.
+    fn documents_keep_transfer_history(&self) -> bool;
+
+    /// Returns true if purchases of documents of this type are recorded in
+    /// the document history system contract.
+    fn documents_keep_purchase_history(&self) -> bool;
+
+    /// Returns true if price updates on documents of this type are recorded
+    /// in the document history system contract.
+    fn documents_keep_pricing_history(&self) -> bool;
 
     /// Returns the documents mutable flag of the document type.
     fn documents_mutable(&self) -> bool;

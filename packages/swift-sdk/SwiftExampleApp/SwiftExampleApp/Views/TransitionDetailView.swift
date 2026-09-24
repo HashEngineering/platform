@@ -27,6 +27,11 @@ struct TransitionDetailView: View {
   @State private var showResult = false
   @State private var resultText = ""
   @State private var isError = false
+  /// Gates the resume-from-tracked-lock confirmation. A tracked asset lock
+  /// isn't bound to an identity — resume directs it at whatever identity is
+  /// selected, and a stray lock landing on the wrong (self-owned) identity
+  /// is not undoable — so this flow requires an explicit confirm.
+  @State private var showResumeConfirm = false
 
   // Dynamic form inputs
   @State private var formInputs: [String: String] = [:]
@@ -34,6 +39,12 @@ struct TransitionDetailView: View {
   @State private var selectedContractId: String = ""
   @State private var selectedDocumentType: String = ""
   @State private var documentFieldValues: [String: Any] = [:]
+  /// Why the document fields could not be encoded (a typed array refused by
+  /// its client-side check, a malformed object field, a non-finite number).
+  /// While set, `formInputs["documentFields"]` is cleared, so the submit stays
+  /// disabled and cannot send stale fields, and the reason is shown below the
+  /// fields.
+  @State private var documentFieldsError: String?
   /// Guards the one-time form setup in `.onAppear`. Contract / document-type
   /// selection now pushes a child list onto the navigation stack; popping it
   /// re-fires this view's `.onAppear`, and re-running `clearForm()` there
@@ -200,6 +211,23 @@ struct TransitionDetailView: View {
     .foregroundColor(.white)
     .cornerRadius(10)
     .disabled(!enabled)
+    .confirmationDialog(
+      "Resume top-up?",
+      isPresented: $showResumeConfirm,
+      titleVisibility: .visible
+    ) {
+      Button("Top Up") {
+        Task { await performTransition() }
+      }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      let txid = (formInputs["outPointTxid"] ?? "").trimmingCharacters(in: .whitespaces)
+      let vout = (formInputs["outPointVout"] ?? "0").trimmingCharacters(in: .whitespaces)
+      Text(
+        "Consume asset lock \(txid.isEmpty ? "?" : txid):\(vout) into identity "
+          + "\(selectedIdentityId)? This credits the selected identity and cannot be undone."
+      )
+    }
   }
 
   private var resultView: some View {
@@ -266,20 +294,49 @@ struct TransitionDetailView: View {
       } else if let contract = dataContracts.first(where: { $0.idBase58 == contractId }),
                 let documentTypes = contract.documentTypes {
         if let documentType = documentTypes.first(where: { $0.name == documentTypeName }) {
+          // Only a replace can hit the protocol-version-14 freeze: a create
+          // writes every property for the first time. This builder types the
+          // replacement from scratch and never loads the stored document, so
+          // no property is known to have a stored value and a settable-once
+          // property stays editable (see `DocumentFieldsView`).
+          let immutability = transitionKey == "documentReplace"
+            ? documentType.immutability
+            : DocumentTypeImmutability.none
+
           DocumentFieldsView(
             documentType: documentType,
             fieldValues: Binding(
               get: { documentFieldValues },
               set: { newValues in
                 documentFieldValues = newValues
-                // Convert to JSON string for the form
-                if let jsonData = try? JSONSerialization.data(withJSONObject: newValues, options: [.prettyPrinted]),
-                   let jsonString = String(data: jsonData, encoding: .utf8) {
-                  formInputs["documentFields"] = jsonString
+                // The Create Document screen's encoding: `Data` as hex (which
+                // the Rust sanitizer decodes), object text as objects, and a
+                // refusal for a typed array that failed its check or a value
+                // JSON cannot carry. `JSONSerialization.data` raises an
+                // Objective-C exception on such a value, which `try?` cannot
+                // catch.
+                do {
+                  formInputs["documentFields"] = try CreateDocumentView.propertiesJSON(
+                    from: newValues, documentType: documentType)
+                  documentFieldsError = nil
+                } catch {
+                  formInputs["documentFields"] = nil
+                  documentFieldsError = error.localizedDescription
                 }
               }
-            )
+            ),
+            immutability: immutability
           )
+          // A new editor per document type, so switching type re-encodes the
+          // fields rather than keeping the previous type's
+          .id(documentType.id)
+
+          if let documentFieldsError {
+            Text("Could not encode document fields: \(documentFieldsError)")
+              .font(.caption)
+              .foregroundColor(.red)
+              .accessibilityIdentifier("transition.documentFields.error")
+          }
         } else {
           Text("Document type '\(documentTypeName)' not found in contract")
             .font(.caption)
@@ -456,6 +513,13 @@ struct TransitionDetailView: View {
   // MARK: - Transition Execution
 
   private func executeTransition() {
+    // Resume directs a tracked asset lock at whatever identity is selected;
+    // a stray lock landing on the wrong (self-owned) identity is not
+    // undoable, so require explicit confirmation before firing.
+    if transitionKey == "identityTopUpResume" {
+      showResumeConfirm = true
+      return
+    }
     Task {
       await performTransition()
     }
@@ -492,6 +556,9 @@ struct TransitionDetailView: View {
 
     case "identityTopUp":
       return try await executeIdentityTopUp(sdk: sdk)
+
+    case "identityTopUpResume":
+      return try await executeIdentityTopUpResume(sdk: sdk)
 
     case "identityUpdate":
       return try await executeIdentityUpdate(sdk: sdk)
@@ -608,13 +675,116 @@ struct TransitionDetailView: View {
     ]
   }
 
+  /// Minimum Core-side funding for a managed top-up, in duffs. Mirrors the
+  /// Rust `MIN_TOP_UP_DUFFS` guard so the UI blocks a sub-floor amount
+  /// *before* any asset lock is broadcast — a lock below Platform's minimum
+  /// required fee (active v1 calc: 500-duff base cost + 50_000-duff asset-lock
+  /// floor = 50_500 duffs) is accepted by Core but rejected by Platform,
+  /// stranding the funds in a lock that can't complete the top-up.
+  private static let minTopUpDuffs: UInt64 = 50_500
+
+  /// Top up the selected identity by building a new Core asset lock from
+  /// the owning wallet's balance (managed path — the credit-output key
+  /// stays behind the Keychain resolver and never crosses FFI as bytes).
+  /// Mirrors `executeIdentityUpdate`'s wallet resolution and
+  /// `executeIdentityCreditTransfer`'s local balance update.
+  @MainActor
   private func executeIdentityTopUp(sdk: SDK) async throws -> Any {
     guard !selectedIdentityId.isEmpty,
-          identities.contains(where: { $0.identityIdBase58 == selectedIdentityId }) else {
+          let ownerIdentity = identities.first(where: { $0.identityIdBase58 == selectedIdentityId }) else {
       throw SDKError.invalidParameter("No identity selected")
     }
+    guard let walletId = ownerIdentity.wallet?.walletId,
+          let wallet = walletManager.wallet(for: walletId) else {
+      throw SDKError.invalidParameter(
+        "Identity has no wallet linkage; cannot fund the top-up"
+      )
+    }
+    guard let amountString = formInputs["amount"],
+          let amountDuffs = UInt64(amountString.trimmingCharacters(in: .whitespaces)) else {
+      throw SDKError.invalidParameter("Invalid amount (duffs)")
+    }
+    guard amountDuffs >= Self.minTopUpDuffs else {
+      throw SDKError.invalidParameter(
+        "Amount must be at least \(Self.minTopUpDuffs) duffs; a smaller top-up would be rejected by Platform and strand the funds"
+      )
+    }
+    let accountIndex = UInt32(
+      formInputs["accountIndex"]?.trimmingCharacters(in: .whitespaces) ?? "0"
+    ) ?? 0
 
-    throw SDKError.notImplemented("Identity top-up requires proper Identity handle conversion")
+    let newBalance = try await wallet.topUpIdentityWithFunding(
+      identityId: ownerIdentity.identityId,
+      amountDuffs: amountDuffs,
+      accountIndex: accountIndex
+    )
+
+    PersistentIdentity.updateBalance(
+      in: modelContext, identityId: ownerIdentity.identityId, balance: newBalance
+    )
+    try? modelContext.save()
+
+    return [
+      "identityId": ownerIdentity.identityIdBase58,
+      "newBalance": newBalance,
+      "fundedDuffs": amountDuffs,
+      "accountIndex": accountIndex,
+      "message": "Identity topped up successfully",
+    ]
+  }
+
+  /// Recover a stuck top-up by consuming an already-tracked Core asset lock
+  /// by outpoint (crash-recovery path). Same managed signing as
+  /// `executeIdentityTopUp`. The txid is entered in display order and
+  /// reversed to raw wire order here, matching `OutPointFFI.txid` (same
+  /// convention as `CreateIdentityView.parseOutPointHex`).
+  @MainActor
+  private func executeIdentityTopUpResume(sdk: SDK) async throws -> Any {
+    guard !selectedIdentityId.isEmpty,
+          let ownerIdentity = identities.first(where: { $0.identityIdBase58 == selectedIdentityId }) else {
+      throw SDKError.invalidParameter("No identity selected")
+    }
+    guard let walletId = ownerIdentity.wallet?.walletId,
+          let wallet = walletManager.wallet(for: walletId) else {
+      throw SDKError.invalidParameter(
+        "Identity has no wallet linkage; cannot resume the top-up"
+      )
+    }
+    let txidHex = (formInputs["outPointTxid"] ?? "").trimmingCharacters(in: .whitespaces)
+    guard txidHex.count == 64, let txidForward = Data(hexString: txidHex) else {
+      throw SDKError.invalidParameter("Asset lock txid must be 64 hex characters (32 bytes)")
+    }
+    let txidRaw = Data(txidForward.reversed())
+    let vout = UInt32(
+      formInputs["outPointVout"]?.trimmingCharacters(in: .whitespaces) ?? "0"
+    ) ?? 0
+
+    do {
+      let newBalance = try await wallet.resumeTopUpWithAssetLock(
+        identityId: ownerIdentity.identityId,
+        outPointTxid: txidRaw,
+        outPointVout: vout
+      )
+      PersistentIdentity.updateBalance(
+        in: modelContext, identityId: ownerIdentity.identityId, balance: newBalance
+      )
+      try? modelContext.save()
+      return [
+        "identityId": ownerIdentity.identityIdBase58,
+        "newBalance": newBalance,
+        "message": "Stuck top-up recovered successfully",
+      ]
+    } catch {
+      // Classify the opaque "already consumed" consensus rejection into a
+      // friendly message (mirrors the DIP-15 reclaim classifier) rather
+      // than surfacing the raw SDK error.
+      let desc = String(describing: error).lowercased()
+      if (desc.contains("already") && desc.contains("consumed"))
+        || desc.contains("already completely used") {
+        throw SDKError.invalidParameter("Asset lock already consumed — nothing to resume")
+      }
+      throw error
+    }
   }
 
   /// Generic-builder IdentityUpdate handler.
@@ -847,7 +1017,7 @@ struct TransitionDetailView: View {
       from: dppIdentity,
       toIdentityId: normalizedToIdentityId,
       amount: amount,
-      signer: OpaquePointer(signer.handle)
+      signer: signer.handle
     )
     _ = signer  // keepalive
 
@@ -901,7 +1071,7 @@ struct TransitionDetailView: View {
       amount: amount,
       toAddress: toAddress,
       coreFeePerByte: coreFeePerByte,
-      signer: OpaquePointer(signer.handle)
+      signer: signer.handle
     )
     _ = signer  // keepalive
 
@@ -932,6 +1102,10 @@ struct TransitionDetailView: View {
 
     guard let documentType = formInputs["documentType"], !documentType.isEmpty else {
       throw SDKError.invalidParameter("Document type is required")
+    }
+
+    if let documentFieldsError {
+      throw SDKError.invalidParameter("Could not encode document fields: \(documentFieldsError)")
     }
 
     guard let propertiesJson = formInputs["documentFields"], !propertiesJson.isEmpty else {
@@ -998,7 +1172,7 @@ struct TransitionDetailView: View {
       documentType: documentType,
       ownerIdentity: dppIdentity,
       properties: properties,
-      signer: OpaquePointer(signer.handle)
+      signer: signer.handle
     )
     _ = signer  // keepalive
 
@@ -1042,7 +1216,7 @@ struct TransitionDetailView: View {
       documentType: documentType,
       documentId: documentId,
       ownerIdentity: dppIdentity,
-      signer: OpaquePointer(signer.handle)
+      signer: signer.handle
     )
     _ = signer  // keepalive across the await — see KeychainSigner lifetime contract
 
@@ -1098,7 +1272,7 @@ struct TransitionDetailView: View {
       documentId: documentId,
       fromIdentity: fromIdentity,
       toIdentityId: recipientId,
-      signer: OpaquePointer(signer.handle)
+      signer: signer.handle
     )
     _ = signer  // keepalive
 
@@ -1153,7 +1327,7 @@ struct TransitionDetailView: View {
       documentId: documentId,
       newPrice: newPrice,
       ownerIdentity: ownerDPPIdentity,
-      signer: OpaquePointer(signer.handle)
+      signer: signer.handle
     )
     _ = signer  // keepalive
 
@@ -1211,7 +1385,7 @@ struct TransitionDetailView: View {
       documentId: documentId,
       purchaserIdentity: fromIdentity,
       price: price,
-      signer: OpaquePointer(signer.handle)
+      signer: signer.handle
     )
     _ = signer  // keepalive
 
@@ -1234,6 +1408,10 @@ struct TransitionDetailView: View {
 
     guard let documentId = formInputs["documentId"], !documentId.isEmpty else {
       throw SDKError.invalidParameter("Document ID is required")
+    }
+
+    if let documentFieldsError {
+      throw SDKError.invalidParameter("Could not encode document fields: \(documentFieldsError)")
     }
 
     guard let propertiesJson = formInputs["documentFields"], !propertiesJson.isEmpty else {
@@ -1304,11 +1482,33 @@ struct TransitionDetailView: View {
       documentId: documentId,
       ownerIdentity: dppIdentity,
       properties: properties,
-      signer: OpaquePointer(signer.handle)
+      signer: signer.handle
     )
     _ = signer  // keepalive
 
     return result
+  }
+
+  /// Resolve the selected persisted token and apply its protocol decimal
+  /// scale. This keeps the generic transition forms aligned with the
+  /// dedicated token screens and avoids Double rounding / hard-coded 8s.
+  private func parseTransitionTokenAmount(
+    _ text: String,
+    selection: String
+  ) throws -> UInt64 {
+    let components = selection.split(separator: ":")
+    guard components.count == 2,
+          let position = Int(components[1]),
+          let token = dataContracts
+            .compactMap(\.tokens)
+            .flatMap({ $0 })
+            .first(where: {
+              $0.contractIdBase58 == String(components[0]) && $0.position == position
+            }),
+          let amount = parseTokenAmount(text, decimals: token.decimals) else {
+      throw SDKError.invalidParameter("Invalid token amount or token metadata")
+    }
+    return amount
   }
 
   private func executeTokenMint(sdk: SDK) async throws -> Any {
@@ -1336,22 +1536,7 @@ struct TransitionDetailView: View {
     // The issuedToIdentityId is optional - if not provided, tokens go to the contract owner
     let recipientIdString = formInputs["issuedToIdentityId"]?.isEmpty == false ? formInputs["issuedToIdentityId"] : nil
 
-    // Parse amount based on whether it contains a decimal
-    let amount: UInt64
-    if amountString.contains(".") {
-      // Handle decimal input (e.g., "1.5" tokens)
-      guard let doubleValue = Double(amountString) else {
-        throw SDKError.invalidParameter("Invalid amount format")
-      }
-      // Convert to smallest unit (assuming 8 decimal places like Dash)
-      amount = UInt64(doubleValue * 100_000_000)
-    } else {
-      // Handle integer input
-      guard let intValue = UInt64(amountString) else {
-        throw SDKError.invalidParameter("Invalid amount format")
-      }
-      amount = intValue
-    }
+    let amount = try parseTransitionTokenAmount(amountString, selection: tokenSelection)
 
     // Find the minting key - for tokens, we need a critical security level key
     // Use the DPPIdentity for minting
@@ -1401,7 +1586,7 @@ struct TransitionDetailView: View {
       amount: amount,
       ownerIdentity: dppIdentity,
       keyId: mintingKey.id,
-      signer: OpaquePointer(signer.handle),
+      signer: signer.handle,
       note: note
     )
     _ = signer  // keepalive
@@ -1431,22 +1616,7 @@ struct TransitionDetailView: View {
       throw SDKError.invalidParameter("Amount is required")
     }
 
-    // Parse amount based on whether it contains a decimal
-    let amount: UInt64
-    if amountString.contains(".") {
-      // Handle decimal input (e.g., "1.5" tokens)
-      guard let doubleValue = Double(amountString) else {
-        throw SDKError.invalidParameter("Invalid amount format")
-      }
-      // Convert to smallest unit (assuming 8 decimal places like Dash)
-      amount = UInt64(doubleValue * 100_000_000)
-    } else {
-      // Handle integer input
-      guard let intValue = UInt64(amountString) else {
-        throw SDKError.invalidParameter("Invalid amount format")
-      }
-      amount = intValue
-    }
+    let amount = try parseTransitionTokenAmount(amountString, selection: tokenSelection)
 
     // Use the DPPIdentity for burning
     let dppIdentity = DPPIdentity(
@@ -1489,7 +1659,7 @@ struct TransitionDetailView: View {
       amount: amount,
       ownerIdentity: dppIdentity,
       keyId: burningKey.id,
-      signer: OpaquePointer(signer.handle),
+      signer: signer.handle,
       note: note
     )
     _ = signer  // keepalive
@@ -1542,7 +1712,7 @@ struct TransitionDetailView: View {
       targetIdentityId: targetIdentityId,
       ownerIdentity: dppIdentity,
       keyId: freezingKey.id,
-      signer: OpaquePointer(signer.handle),
+      signer: signer.handle,
       note: note
     )
     _ = signer  // keepalive
@@ -1590,7 +1760,7 @@ struct TransitionDetailView: View {
       targetIdentityId: targetIdentityId,
       ownerIdentity: dppIdentity,
       keyId: unfreezingKey.id,
-      signer: OpaquePointer(signer.handle),
+      signer: signer.handle,
       note: formInputs["note"]
     )
     _ = signer  // keepalive
@@ -1638,7 +1808,7 @@ struct TransitionDetailView: View {
       frozenIdentityId: frozenIdentityId,
       ownerIdentity: dppIdentity,
       keyId: destroyKey.id,
-      signer: OpaquePointer(signer.handle),
+      signer: signer.handle,
       note: formInputs["note"]
     )
     _ = signer  // keepalive
@@ -1688,7 +1858,7 @@ struct TransitionDetailView: View {
       distributionType: distributionType,
       ownerIdentity: dppIdentity,
       keyId: claimingKey.id,
-      signer: OpaquePointer(signer.handle),
+      signer: signer.handle,
       note: note
     )
     _ = signer  // keepalive
@@ -1722,22 +1892,7 @@ struct TransitionDetailView: View {
       throw SDKError.invalidParameter("Amount is required")
     }
 
-    // Parse amount based on whether it contains a decimal
-    let amount: UInt64
-    if amountString.contains(".") {
-      // Handle decimal input (e.g., "1.5" tokens)
-      guard let doubleValue = Double(amountString) else {
-        throw SDKError.invalidParameter("Invalid amount format")
-      }
-      // Convert to smallest unit (assuming 8 decimal places like Dash)
-      amount = UInt64(doubleValue * 100_000_000)
-    } else {
-      // Handle integer input
-      guard let intValue = UInt64(amountString) else {
-        throw SDKError.invalidParameter("Invalid amount format")
-      }
-      amount = intValue
-    }
+    let amount = try parseTransitionTokenAmount(amountString, selection: tokenSelection)
 
     // Use the DPPIdentity for transfer
     let dppIdentity = DPPIdentity(
@@ -1760,7 +1915,7 @@ struct TransitionDetailView: View {
       amount: amount,
       ownerIdentity: dppIdentity,
       keyId: transferKey.id,
-      signer: OpaquePointer(signer.handle),
+      signer: signer.handle,
       note: note
     )
     _ = signer  // keepalive
@@ -1814,7 +1969,7 @@ struct TransitionDetailView: View {
       priceData: priceData,
       ownerIdentity: dppIdentity,
       keyId: pricingKey.id,
-      signer: OpaquePointer(signer.handle),
+      signer: signer.handle,
       note: note
     )
     _ = signer  // keepalive

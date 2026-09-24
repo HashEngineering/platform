@@ -1,10 +1,10 @@
 //! `VerifiedDocuments` proof-result wrapper.
 
-use super::helpers::js_obj;
-use crate::error::{WasmDppError, WasmDppResult};
+use super::helpers::{js_obj, read_map_property};
+use crate::error::WasmDppResult;
 use crate::impl_wasm_type_info;
+use crate::serialization::conversions::normalize_js_value_for_json;
 use js_sys::Map;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::prelude::*;
 
@@ -31,16 +31,13 @@ impl VerifiedDocumentsWasm {
     /// `JSON.stringify({documents: <Map>})` produces `{"documents":{}}`).
     #[wasm_bindgen(js_name = toJSON)]
     pub fn to_json(&self) -> WasmDppResult<JsValue> {
-        crate::serialization::conversions::normalize_js_value_for_json(&self.to_object())
+        normalize_js_value_for_json(&self.to_object())
     }
 
     #[wasm_bindgen(js_name = fromObject)]
     pub fn from_object(value: JsValue) -> WasmDppResult<VerifiedDocumentsWasm> {
-        let map_val = js_sys::Reflect::get(&value, &"documents".into())
-            .map_err(|_| WasmDppError::generic("Missing property: documents"))?;
-        Ok(VerifiedDocumentsWasm {
-            documents: map_val.unchecked_into(),
-        })
+        let documents = read_map_property(&value, "documents")?;
+        Ok(VerifiedDocumentsWasm { documents })
     }
 
     #[wasm_bindgen(js_name = fromJSON)]

@@ -1,18 +1,14 @@
-#[cfg(feature = "json-conversion")]
-mod json_conversion;
 mod proved;
 mod state_transition_like;
 mod types;
 pub(super) mod v0_methods;
-#[cfg(feature = "value-conversion")]
-mod value_conversion;
 mod version;
 
 #[cfg(feature = "json-conversion")]
 use crate::serialization::json_safe_fields;
 use std::convert::TryFrom;
 
-use bincode::{Decode, Encode};
+use bincode::{Decode, DecodeUntrusted, Encode};
 use platform_serialization_derive::PlatformSignable;
 
 use platform_value::BinaryData;
@@ -32,7 +28,7 @@ use crate::version::PlatformVersion;
 use crate::ProtocolError;
 
 #[cfg_attr(feature = "json-conversion", json_safe_fields)]
-#[derive(Debug, Clone, PartialEq, Encode, Decode, PlatformSignable)]
+#[derive(Debug, Clone, PartialEq, Encode, Decode, PlatformSignable, DecodeUntrusted)]
 #[cfg_attr(
     feature = "serde-conversion",
     derive(Serialize, Deserialize),
@@ -224,30 +220,10 @@ mod test {
         assert!(t.public_keys().is_empty());
     }
 
-    #[test]
-    fn test_to_object_produces_value() {
-        use crate::state_transition::StateTransitionValueConvert;
-        let t = make_create_v0();
-        let obj = t.to_object(false).expect("to_object should work");
-        assert!(obj.is_map());
-    }
-
-    #[test]
-    fn test_value_conversion_skip_signature() {
-        use crate::state_transition::StateTransitionValueConvert;
-        let t = make_create_v0();
-        let obj = t.to_object(true).expect("to_object should work");
-        let map = obj.into_btree_string_map().expect("should be a map");
-        assert!(!map.contains_key("signature"));
-    }
-
-    #[test]
-    fn test_to_cleaned_object() {
-        use crate::state_transition::StateTransitionValueConvert;
-        let t = make_create_v0();
-        let obj = t.to_cleaned_object(false).expect("should work");
-        assert!(obj.is_map());
-    }
+    // Legacy `StateTransitionValueConvert` round-trip tests deleted in
+    // Phase D step 9. The canonical `JsonConvertible` / `ValueConvertible`
+    // round-trip is exercised via the outer enum derive — these tested
+    // methods that no longer exist.
 
     fn chain_proof() -> AssetLockProof {
         use crate::identity::state_transition::asset_lock_proof::chain::ChainAssetLockProof;

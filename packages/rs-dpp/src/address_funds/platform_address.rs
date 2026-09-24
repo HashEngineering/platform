@@ -3,7 +3,7 @@ use crate::address_funds::AddressWitnessVerificationOperations;
 use crate::prelude::AddressNonce;
 use crate::ProtocolError;
 use bech32::{Bech32m, Hrp};
-use bincode::{Decode, Encode};
+use bincode::{Decode, DecodeUntrusted, Encode};
 use dashcore::address::Payload;
 use dashcore::blockdata::script::ScriptBuf;
 use dashcore::hashes::{sha256d, Hash};
@@ -12,7 +12,9 @@ use dashcore::secp256k1::ecdsa::RecoverableSignature;
 use dashcore::secp256k1::Message;
 use dashcore::signer::CompactSignature;
 use dashcore::{Address, Network, PrivateKey, PubkeyHash, PublicKey, ScriptHash};
-use platform_serialization_derive::{PlatformDeserialize, PlatformSerialize};
+use platform_serialization_derive::{
+    PlatformDeserializeTrusted, PlatformDeserializeUntrusted, PlatformSerialize,
+};
 #[cfg(feature = "serde-conversion")]
 use serde::{Deserialize, Serialize};
 use std::convert::TryFrom;
@@ -33,7 +35,9 @@ pub const ADDRESS_HASH_SIZE: usize = 20;
     Encode,
     Decode,
     PlatformSerialize,
-    PlatformDeserialize,
+    PlatformDeserializeTrusted,
+    PlatformDeserializeUntrusted,
+    DecodeUntrusted,
 )]
 #[platform_serialize(unversioned)]
 pub enum PlatformAddress {
@@ -45,6 +49,77 @@ pub enum PlatformAddress {
     /// - bech32m encoding type byte: 0x80
     /// - storage key type byte: 0x01
     P2sh([u8; 20]),
+}
+
+#[cfg(all(feature = "json-conversion", feature = "serde-conversion"))]
+impl crate::serialization::JsonConvertible for PlatformAddress {}
+
+#[cfg(all(feature = "value-conversion", feature = "serde-conversion"))]
+impl crate::serialization::ValueConvertible for PlatformAddress {}
+
+#[cfg(all(
+    test,
+    feature = "json-conversion",
+    feature = "value-conversion",
+    feature = "serde-conversion"
+))]
+mod json_convertible_tests {
+    use super::*;
+    use platform_value::Value;
+    use serde_json::json;
+
+    // `PlatformAddress` has a manual `Serialize`/`Deserialize`: it serializes
+    // as a 21-byte payload (1 type byte + 20 hash bytes), shown as a hex
+    // string in HR formats and raw bytes in non-HR. Both variants share the
+    // same wire shape — only the leading type byte differs.
+
+    #[test]
+    fn json_round_trip_p2pkh() {
+        use crate::serialization::JsonConvertible;
+        let original = PlatformAddress::P2pkh([0xab; 20]);
+        let json = original.to_json().expect("to_json");
+        // Type byte 0x00 (storage variant index for P2pkh) || 20 × 0xab
+        assert_eq!(json, json!("00abababababababababababababababababababab"));
+        let recovered = PlatformAddress::from_json(json).expect("from_json");
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn json_round_trip_p2sh() {
+        use crate::serialization::JsonConvertible;
+        let original = PlatformAddress::P2sh([0xcd; 20]);
+        let json = original.to_json().expect("to_json");
+        // Type byte 0x01 (storage variant index for P2sh) || 20 × 0xcd
+        assert_eq!(json, json!("01cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"));
+        let recovered = PlatformAddress::from_json(json).expect("from_json");
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn value_round_trip_p2pkh() {
+        use crate::serialization::ValueConvertible;
+        let original = PlatformAddress::P2pkh([0xab; 20]);
+        let value = original.to_object().expect("to_object");
+        // `platform_value` is treated as non-HR by `is_human_readable()`, so
+        // the address serializes as raw bytes here.
+        let mut expected = vec![0x00];
+        expected.extend_from_slice(&[0xab; 20]);
+        assert_eq!(value, Value::Bytes(expected));
+        let recovered = PlatformAddress::from_object(value).expect("from_object");
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn value_round_trip_p2sh() {
+        use crate::serialization::ValueConvertible;
+        let original = PlatformAddress::P2sh([0xcd; 20]);
+        let value = original.to_object().expect("to_object");
+        let mut expected = vec![0x01];
+        expected.extend_from_slice(&[0xcd; 20]);
+        assert_eq!(value, Value::Bytes(expected));
+        let recovered = PlatformAddress::from_object(value).expect("from_object");
+        assert_eq!(original, recovered);
+    }
 }
 
 // Custom serde impls so JSON / `platform_value` output is the canonical 21-byte
@@ -357,9 +432,9 @@ impl PlatformAddress {
     /// Uses bincode deserialization which expects: 0x00 for P2pkh, 0x01 for P2sh.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ProtocolError> {
         let (address, _): (Self, usize) =
-            bincode::decode_from_slice(bytes, bincode::config::standard()).map_err(|e| {
-                ProtocolError::DecodingError(format!("cannot decode PlatformAddress: {}", e))
-            })?;
+            bincode::decode_from_slice_untrusted(bytes, bincode::config::standard()).map_err(
+                |e| ProtocolError::DecodingError(format!("cannot decode PlatformAddress: {}", e)),
+            )?;
         Ok(address)
     }
 

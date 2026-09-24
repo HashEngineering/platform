@@ -21,6 +21,8 @@ pub const DRIVE_DOCUMENT_METHOD_VERSIONS_V3: DriveDocumentMethodVersions =
     DriveDocumentMethodVersions {
         query: DriveDocumentQueryMethodVersions {
             query_documents: 0,
+            query_chained_documents: 0,
+            query_composite_documents: 0,
             query_contested_documents: 0,
             query_contested_documents_vote_state: 0,
             query_documents_with_flags: 0,
@@ -29,6 +31,12 @@ pub const DRIVE_DOCUMENT_METHOD_VERSIONS_V3: DriveDocumentMethodVersions =
             prove_document_history: 0,
             detect_count_mode: 0,
             detect_sum_mode: 0,
+            detect_ranked_mode: 0,
+            detect_having_mode: 0,
+            non_primary_key_path_query: 0,
+            non_primary_key_single_in_path_query: 0,
+            non_primary_key_multiple_in_path_query: 0,
+            where_clause_grouping: 0,
         },
         delete: DriveDocumentDeleteMethodVersions {
             add_estimation_costs_for_remove_document_to_primary_storage: 0,
@@ -47,9 +55,12 @@ pub const DRIVE_DOCUMENT_METHOD_VERSIONS_V3: DriveDocumentMethodVersions =
             delete_document_for_contract_id_with_named_type_operations: 0,
             delete_document_for_contract_with_named_type_operations: 0,
             delete_document_for_contract_operations: 0,
+            delete_index_only_document_for_contract_operations: 0,
+            delete_index_only_document_for_contract: 0,
         },
         insert: DriveDocumentInsertMethodVersions {
             add_document: 0,
+            add_history_operations: 0,
             add_document_for_contract: 0,
             add_document_for_contract_apply_and_add_to_operations: 0,
             add_document_for_contract_operations: 0,
@@ -71,6 +82,7 @@ pub const DRIVE_DOCUMENT_METHOD_VERSIONS_V3: DriveDocumentMethodVersions =
             add_contested_indices_for_contract_operations: 0,
             add_contested_reference_and_vote_subtree_to_document_operations: 0,
             add_contested_vote_subtree_for_non_identities_operations: 0,
+            fetch_charter_election_windows: None,
         },
         update: DriveDocumentUpdateMethodVersions {
             add_update_multiple_documents_operations: 0,
@@ -92,6 +104,7 @@ pub const DRIVE_DOCUMENT_METHOD_VERSIONS_V3: DriveDocumentMethodVersions =
             validate_document_transfer_transition_action_uniqueness: 1,
             validate_document_purchase_transition_action_uniqueness: 1,
             validate_document_update_price_transition_action_uniqueness: 1,
+            validate_restored_document_uniqueness: 0,
         },
         // Bumped to 1 vs V2's frozen 0: this is the v12-gated entry
         // point for the sum-tree feature. The v1 dispatch arm in

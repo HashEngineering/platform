@@ -1,27 +1,26 @@
 mod identity_signed;
-#[cfg(feature = "json-conversion")]
-mod json_conversion;
 mod state_transition_like;
 mod types;
 mod v0_methods;
 mod v1_methods;
-#[cfg(feature = "value-conversion")]
-mod value_conversion;
 mod version;
 
 use crate::identity::KeyID;
 
 use crate::state_transition::batch_transition::batched_transition::BatchedTransition;
 use crate::ProtocolError;
-use bincode::{Decode, Encode};
+use bincode::{Decode, DecodeUntrusted, Encode};
 use platform_serialization_derive::PlatformSignable;
 
 use crate::prelude::UserFeeIncrease;
+#[cfg(feature = "json-conversion")]
+use crate::serialization::json_safe_fields;
 use platform_value::{BinaryData, Identifier};
 #[cfg(feature = "serde-conversion")]
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Encode, Decode, PlatformSignable)]
+#[cfg_attr(feature = "json-conversion", json_safe_fields)]
+#[derive(Debug, Clone, PartialEq, Encode, Decode, PlatformSignable, DecodeUntrusted)]
 #[cfg_attr(
     feature = "serde-conversion",
     derive(Serialize, Deserialize),

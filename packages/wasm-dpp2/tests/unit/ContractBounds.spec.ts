@@ -46,13 +46,45 @@ describe('ContractBounds', () => {
     });
   });
 
+  describe('ContractGroup()', () => {
+    it('should create ContractGroup bounds via static method', () => {
+      const bounds = wasm.ContractBounds.ContractGroup(contractIdBase58);
+
+      expect(bounds.contractBoundsType).to.equal('contractGroup');
+      expect(bounds.contractBoundsTypeNumber).to.equal(2);
+      expect(bounds.identifier.toBase58()).to.equal(contractIdBase58);
+      expect(bounds.contractGroupId.toBase58()).to.equal(contractIdBase58);
+      expect(bounds.documentTypeName).to.be.undefined();
+    });
+
+    it('should round trip ContractGroup bounds through JSON', () => {
+      const bounds = wasm.ContractBounds.ContractGroup(contractIdBase58);
+
+      const json = bounds.toJSON();
+      expect(json).to.deep.equal({
+        $type: 'contractGroup',
+        id: contractIdBase58,
+      });
+
+      const restored = wasm.ContractBounds.fromJSON(json);
+      expect(restored.contractBoundsType).to.equal('contractGroup');
+      expect(restored.contractGroupId.toBase58()).to.equal(contractIdBase58);
+    });
+
+    it('should not expose a contract group id on contract bounds', () => {
+      const bounds = wasm.ContractBounds.SingleContract(contractIdBase58);
+
+      expect(bounds.contractGroupId).to.be.undefined();
+    });
+  });
+
   describe('toJSON()', () => {
     it('should convert SingleContract to JSON matching fixture', () => {
       const bounds = wasm.ContractBounds.SingleContract(contractIdBase58);
 
       const json = bounds.toJSON();
       expect(json).to.deep.equal({
-        type: 'singleContract',
+        $type: 'singleContract',
         id: contractIdBase58,
       });
     });
@@ -62,7 +94,7 @@ describe('ContractBounds', () => {
 
       const json = bounds.toJSON();
       expect(json).to.deep.equal({
-        type: 'documentType',
+        $type: 'documentType',
         id: contractIdBase58,
         documentTypeName: 'profile',
       });
@@ -72,7 +104,7 @@ describe('ContractBounds', () => {
   describe('fromJSON()', () => {
     it('should create SingleContract from JSON fixture and verify getters', () => {
       const fixture = {
-        type: 'singleContract',
+        $type: 'singleContract',
         id: contractIdBase58,
       };
 
@@ -85,7 +117,7 @@ describe('ContractBounds', () => {
 
     it('should create SingleContractDocumentType from JSON fixture and verify getters', () => {
       const fixture = {
-        type: 'documentType',
+        $type: 'documentType',
         id: contractIdBase58,
         documentTypeName: 'profile',
       };
@@ -103,7 +135,7 @@ describe('ContractBounds', () => {
       const bounds = wasm.ContractBounds.SingleContract(contractIdBase58);
 
       const obj = bounds.toObject();
-      expect(obj.type).to.equal('singleContract');
+      expect(obj.$type).to.equal('singleContract');
       expect(obj.id).to.be.instanceOf(Uint8Array);
       expect(wasm.Identifier.fromBytes(obj.id).toHex()).to.equal(contractIdHex);
     });
@@ -112,7 +144,7 @@ describe('ContractBounds', () => {
       const bounds = wasm.ContractBounds.SingleContractDocumentType(contractIdBase58, 'profile');
 
       const obj = bounds.toObject();
-      expect(obj.type).to.equal('documentType');
+      expect(obj.$type).to.equal('documentType');
       expect(obj.id).to.be.instanceOf(Uint8Array);
       expect(wasm.Identifier.fromBytes(obj.id).toHex()).to.equal(contractIdHex);
       expect(obj.documentTypeName).to.equal('profile');
@@ -122,7 +154,7 @@ describe('ContractBounds', () => {
   describe('fromObject()', () => {
     it('should create SingleContract from Object fixture and verify getters', () => {
       const obj = {
-        type: 'singleContract',
+        $type: 'singleContract',
         id: contractIdBase58,
       };
 
@@ -135,7 +167,7 @@ describe('ContractBounds', () => {
 
     it('should create SingleContractDocumentType from Object fixture and verify getters', () => {
       const obj = {
-        type: 'documentType',
+        $type: 'documentType',
         id: contractIdBase58,
         documentTypeName: 'profile',
       };

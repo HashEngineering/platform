@@ -2,17 +2,19 @@
 
 use std::collections::BTreeMap;
 
-use dpp::identity::accessors::IdentitySettersV0;
 use dpp::identity::signer::Signer;
 use dpp::prelude::Identifier;
 
 use dash_sdk::platform::transition::put_settings::PutSettings;
-use dash_sdk::platform::transition::top_up_identity_from_addresses::TopUpIdentityFromAddresses;
+use dash_sdk::platform::transition::top_up_identity_from_addresses::TopUpIdentityFromAddressesWithMetadata;
 
 use dpp::address_funds::PlatformAddress;
 use dpp::fee::Credits;
 
+use dash_sdk::query_types::AddressInfos;
+
 use crate::error::PlatformWalletError;
+use crate::BlockTime;
 
 use super::*;
 
@@ -25,6 +27,21 @@ impl IdentityWallet {
     ///
     /// Uses the `TopUpIdentityFromAddresses` SDK trait. Address nonces are
     /// looked up automatically.
+    ///
+    /// This method owns only the identity-side balance update and returns
+    /// the proof-attested post-spend `AddressInfos` alongside the new
+    /// identity balance. Prefer the composite
+    /// [`PlatformWallet::top_up_from_addresses`], which feeds the returned
+    /// `AddressInfos` through
+    /// [`PlatformAddressWallet::reconcile_address_infos`] — the
+    /// platform-address wallet holds the address provider needed to map a
+    /// spent address back to its derivation index (including addresses
+    /// restored from disk that are no longer in a live derived pool).
+    ///
+    /// [`PlatformWallet::top_up_from_addresses`]:
+    /// crate::wallet::PlatformWallet::top_up_from_addresses
+    /// [`PlatformAddressWallet::reconcile_address_infos`]:
+    /// crate::wallet::PlatformAddressWallet::reconcile_address_infos
     ///
     /// # Arguments
     ///
@@ -40,7 +57,7 @@ impl IdentityWallet {
         inputs: BTreeMap<PlatformAddress, Credits>,
         address_signer: &S,
         settings: Option<PutSettings>,
-    ) -> Result<Credits, PlatformWalletError> {
+    ) -> Result<(AddressInfos, Credits, u64), PlatformWalletError> {
         let identity = {
             let wm = self.wallet_manager.read().await;
             let info = wm.get_wallet_info(&self.wallet_id).ok_or_else(|| {
@@ -55,21 +72,21 @@ impl IdentityWallet {
                 .ok_or(PlatformWalletError::IdentityNotFound(*identity_id))?
         };
 
-        let (_address_infos, new_balance) = identity
-            .top_up_from_addresses(&self.sdk, inputs, address_signer, settings)
+        let (address_infos, mut new_balance, metadata) = identity
+            .top_up_from_addresses_with_metadata(&self.sdk, inputs, address_signer, settings)
             .await
             .map_err(|e| {
-                PlatformWalletError::InvalidIdentityData(format!(
-                    "Failed to top up identity from addresses: {}",
-                    e
-                ))
+                crate::error::promote_address_nonce_error(&e).unwrap_or_else(|| {
+                    PlatformWalletError::InvalidIdentityData(format!(
+                        "Failed to top up identity from addresses: {}",
+                        e
+                    ))
+                })
             })?;
 
-        // Update the identity's balance in the local manager and
-        // queue the snapshot so the new balance survives relaunch.
-        // See the comment on `top_up` for rationale on driving the
-        // persister directly from the call site instead of through
-        // a dedicated `ManagedIdentity::set_balance` method.
+        let proof_height = metadata.height;
+
+        // Reconcile the verified identity snapshot; failed cache writes remain pending.
         {
             let mut wm = self.wallet_manager.write().await;
             let info = wm.get_wallet_info_mut(&self.wallet_id).ok_or_else(|| {
@@ -78,17 +95,18 @@ impl IdentityWallet {
                 )
             })?;
             if let Some(managed) = info.identity_manager.managed_identity_mut(identity_id) {
-                managed.identity.set_balance(new_balance);
-                if let Err(e) = self.persister.store(managed.snapshot_changeset().into()) {
-                    tracing::error!(
-                        identity = %identity_id,
-                        error = %e,
-                        "Failed to persist identity balance update after top_up_from_addresses"
-                    );
-                }
+                new_balance = managed.persist_confirmed_balance(
+                    new_balance,
+                    BlockTime::from(metadata),
+                    &self.persister,
+                );
             }
         }
 
-        Ok(new_balance)
+        // The spent platform-address balances are reconciled by the
+        // composite `PlatformWallet::top_up_from_addresses`, which routes
+        // the returned `AddressInfos` through the platform-address wallet's
+        // shared reconciliation seam.
+        Ok((address_infos, new_balance, proof_height))
     }
 }

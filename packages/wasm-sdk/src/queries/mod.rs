@@ -1,6 +1,12 @@
 pub mod address;
+pub mod chained_document;
+pub mod composite_document;
+pub mod contract_fee_pots;
+pub mod contract_group;
+pub mod contract_moderation;
 pub mod data_contract;
 pub mod document;
+pub mod document_ranked;
 pub mod epoch;
 pub mod group;
 pub mod identity;
@@ -13,16 +19,17 @@ pub mod voting;
 
 // Re-export all query functions for easy access
 pub use address::PlatformAddressInfoWasm;
+pub use contract_group::ContractGroupInfoWasm;
 pub use group::*;
 
 use crate::impl_wasm_serde_conversions;
 use crate::WasmSdkError;
+use dash_sdk::dpp::serialization::serde_bytes_var as bytes_b64;
 use js_sys::Uint8Array;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsValue;
-use wasm_dpp2::serialization::bytes_b64;
 use wasm_dpp2::serialization::conversions as serialization;
 
 #[dpp_json_convertible_derive::json_safe_fields(crate = "dash_sdk::dpp")]

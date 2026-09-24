@@ -1,5 +1,8 @@
 mod address_funds;
 mod contract;
+mod contract_fee_pot;
+mod contract_group;
+mod contract_moderation;
 mod document;
 mod drive_methods;
 pub(crate) mod finalize_task;
@@ -17,9 +20,13 @@ use crate::drive::Drive;
 use crate::error::Error;
 use crate::fees::op::LowLevelDriveOperation;
 use dpp::block::block_info::BlockInfo;
+use dpp::fee::Credits;
 
 pub use address_funds::AddressFundsOperationType;
 pub use contract::DataContractOperationType;
+pub use contract_fee_pot::ContractFeePotOperationType;
+pub use contract_group::ContractGroupOperationType;
+pub use contract_moderation::ContractModerationOperationType;
 pub use document::DocumentOperation;
 pub use document::DocumentOperationType;
 pub use document::DocumentOperationsForContractDocumentType;
@@ -90,6 +97,12 @@ pub enum DriveOperation<'a> {
     SystemOperation(SystemOperationType),
     /// A group operation
     GroupOperation(GroupOperationType),
+    /// A contract group operation
+    ContractGroupOperation(ContractGroupOperationType),
+    /// A contract moderation operation: an entry of a banlist or a suspension list
+    ContractModerationOperation(ContractModerationOperationType),
+    /// A contract fee pot operation: credits of a contract's document action fees
+    ContractFeePotOperation(ContractFeePotOperationType),
     /// An address funds operation
     AddressFundsOperation(AddressFundsOperationType),
     /// A shielded pool operation
@@ -196,6 +209,33 @@ impl DriveLowLevelOperationConverter for DriveOperation<'_> {
                     transaction,
                     platform_version,
                 ),
+            DriveOperation::ContractGroupOperation(contract_group_operation_type) => {
+                contract_group_operation_type.into_low_level_drive_operations(
+                    drive,
+                    estimated_costs_only_with_layer_info,
+                    block_info,
+                    transaction,
+                    platform_version,
+                )
+            }
+            DriveOperation::ContractModerationOperation(contract_moderation_operation_type) => {
+                contract_moderation_operation_type.into_low_level_drive_operations(
+                    drive,
+                    estimated_costs_only_with_layer_info,
+                    block_info,
+                    transaction,
+                    platform_version,
+                )
+            }
+            DriveOperation::ContractFeePotOperation(contract_fee_pot_operation_type) => {
+                contract_fee_pot_operation_type.into_low_level_drive_operations(
+                    drive,
+                    estimated_costs_only_with_layer_info,
+                    block_info,
+                    transaction,
+                    platform_version,
+                )
+            }
             DriveOperation::AddressFundsOperation(address_funds_operation_type) => {
                 address_funds_operation_type.into_low_level_drive_operations(
                     drive,
@@ -207,6 +247,68 @@ impl DriveLowLevelOperationConverter for DriveOperation<'_> {
             }
             DriveOperation::FinalizeOperation(_) => Ok(vec![]),
         }
+    }
+}
+
+impl DriveOperation<'_> {
+    /// Whether the batch this operation is in refunds nobody for the storage it removes: see
+    /// [`ContractModerationOperationType::ForfeitStorageRefunds`].
+    pub fn forfeits_storage_refunds(&self) -> bool {
+        matches!(
+            self,
+            Self::ContractModerationOperation(
+                ContractModerationOperationType::ForfeitStorageRefunds
+            )
+        )
+    }
+
+    /// Convert a member of a batch whose document TTL cleanup is complete.
+    pub(crate) fn into_low_level_drive_operations_after_ttl_drain(
+        self,
+        drive: &Drive,
+        estimated_costs_only_with_layer_info: &mut Option<
+            HashMap<KeyInfoPath, EstimatedLayerInformation>,
+        >,
+        block_info: &BlockInfo,
+        transaction: TransactionArg,
+        platform_version: &PlatformVersion,
+    ) -> Result<Vec<LowLevelDriveOperation>, Error> {
+        match self {
+            Self::DocumentOperation(operation) => operation
+                .into_low_level_drive_operations_after_ttl_drain(
+                    drive,
+                    estimated_costs_only_with_layer_info,
+                    block_info,
+                    transaction,
+                    platform_version,
+                ),
+            operation => operation.into_low_level_drive_operations(
+                drive,
+                estimated_costs_only_with_layer_info,
+                block_info,
+                transaction,
+                platform_version,
+            ),
+        }
+    }
+}
+
+impl Drive {
+    /// Prepare every document before conversion starts. Repeated grids may
+    /// spend several per-write budgets, all against the same pre-batch state.
+    pub(crate) fn prepare_drive_operations_time_range_ttl(
+        &self,
+        operations: &[DriveOperation],
+        block_info: &BlockInfo,
+        transaction: TransactionArg,
+        platform_version: &PlatformVersion,
+    ) -> Result<(), Error> {
+        for operation in operations {
+            if let DriveOperation::DocumentOperation(document) = operation {
+                document.prepare_time_range_ttl(self, block_info, transaction, platform_version)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -242,6 +344,22 @@ impl DriveOperation<'_> {
             DriveOperation::FinalizeOperation(task) => Ok(Some(vec![task.clone()])),
             _ => Ok(None),
         }
+    }
+
+    /// Sums the credits the batch mints into Platform (its `AddToSystemCredits` operations,
+    /// saturating). This is the gross inflow of the batch — the net rule of the daily
+    /// withdrawal limit records it per block, and netting against removals here instead would
+    /// let a same-block deposit and withdrawal hide the inflow.
+    pub fn credit_mints(operations: &[DriveOperation]) -> Credits {
+        operations
+            .iter()
+            .filter_map(|operation| match operation {
+                DriveOperation::SystemOperation(SystemOperationType::AddToSystemCredits {
+                    amount,
+                }) => Some(*amount),
+                _ => None,
+            })
+            .fold(0u64, |total, amount| total.saturating_add(amount))
     }
 }
 

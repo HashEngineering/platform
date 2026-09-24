@@ -6,18 +6,24 @@ use crate::impl_try_from_options;
 use crate::impl_wasm_type_info;
 use crate::serialization;
 use crate::utils::{
-    ToSerdeJSONExt, try_from_options, try_from_options_optional, try_from_options_with,
-    try_vec_to_fixed_bytes,
+    ToSerdeJSONExt, try_from_options, try_from_options_optional, try_from_options_optional_with,
+    try_from_options_with, try_to_u64, try_vec_to_fixed_bytes,
 };
 use crate::version::{PlatformVersionLikeJs, PlatformVersionWasm};
 use dpp::document::serialization_traits::{
-    DocumentJsonMethodsV0, DocumentPlatformConversionMethodsV0, DocumentPlatformValueMethodsV0,
+    DocumentPlatformConversionMethodsV0, DocumentPlatformValueMethodsV0,
 };
+// `DocumentPlatformValueMethodsV0` is brought in for `to_map_value`
+// (the only method on it the wasm wrapper still uses, after Phase D
+// step 8 slice B). `DocumentPlatformConversionMethodsV0` is the binary
+// serialization trait. Canonical `JsonConvertible` / `ValueConvertible`
+// are imported inline at the call sites.
 use dpp::document::{Document, DocumentV0, DocumentV0Getters, DocumentV0Setters};
 use dpp::identifier::Identifier;
-use dpp::platform_value::string_encoding::Encoding::{Base64, Hex};
+use dpp::platform_value::string_encoding::Encoding::{Base58, Base64, Hex};
 use dpp::platform_value::string_encoding::encode;
 use dpp::platform_value::{Value, ValueMapHelper};
+use dpp::prelude::IdentityNonce;
 use dpp::util::entropy_generator;
 use dpp::util::entropy_generator::EntropyGenerator;
 use dpp::version::PlatformVersion;
@@ -42,10 +48,28 @@ export interface DocumentOptions {
   ownerId: IdentifierLike;
   /** Document revision (default: 1n) */
   revision?: bigint;
-  /** Document ID (auto-generated if not provided) */
+  /**
+   * Document ID. Derived when not provided (see `identityContractNonce`).
+   * Together with `identityContractNonce` it must equal the derived id, or
+   * the constructor throws: the nonce fixes the id, and a different explicit
+   * one could only be referenced, never created. Whatever is given here is
+   * replaced by `new DocumentCreateTransition(...)`, which can only carry the
+   * id consensus recomputes.
+   */
   id?: IdentifierLike;
   /** Entropy bytes (32 bytes, auto-generated if not provided) */
   entropy?: Uint8Array;
+  /**
+   * Identity contract nonce the create transition of this document is going
+   * to use. From protocol version 14 the id of a new document commits to
+   * that nonce, so without it the derived `id` is a placeholder that
+   * `new DocumentCreateTransition(...)` replaces (and mirrors back onto this
+   * document). Pass the nonce here, or call `setIdForCreation`, to have the
+   * final id from the start.
+   */
+  identityContractNonce?: bigint;
+  /** Platform version the id is derived for (default: latest) */
+  platformVersion?: PlatformVersionLike;
 }
 
 /**
@@ -105,7 +129,7 @@ pub struct DocumentWasm {
     pub(crate) document_type_name: String,
     #[serde(
         rename = "$entropy",
-        with = "serialization::bytes_b64::option",
+        with = "dpp::serialization::serde_bytes::option",
         skip_serializing_if = "Option::is_none",
         default
     )]
@@ -157,6 +181,38 @@ impl DocumentWasm {
     pub fn set_data_contract_id(&mut self, data_contract_id: &IdentifierWasm) {
         self.data_contract_id = *data_contract_id;
     }
+
+    /// Gives the document the id its create transition will carry: what
+    /// `DocumentCreateTransitionV0::from_document` does in dpp, for a
+    /// document that carries its entropy and knows its contract and type
+    /// itself.
+    ///
+    /// Errors when the document has no entropy, which is the case for one
+    /// deserialized from Platform: such a document already exists and can
+    /// not be created.
+    pub fn set_id_for_creation(
+        &mut self,
+        identity_contract_nonce: IdentityNonce,
+        platform_version: &PlatformVersion,
+    ) -> WasmDppResult<()> {
+        let entropy = self.entropy.ok_or_else(|| {
+            WasmDppError::invalid_argument(
+                "document has no entropy: only a document built with `new Document(...)` can be \
+                 created",
+            )
+        })?;
+
+        let id = Document::generate_document_id(
+            &self.data_contract_id.into(),
+            &self.document.owner_id(),
+            &self.document_type_name,
+            &entropy,
+            identity_contract_nonce,
+            platform_version,
+        )?;
+        self.document.set_id(id);
+        Ok(())
+    }
 }
 
 #[wasm_bindgen]
@@ -198,6 +254,16 @@ impl DocumentWasm {
 
         let id: Option<IdentifierWasm> = try_from_options_optional(&options, "id")?;
 
+        let identity_contract_nonce: Option<IdentityNonce> =
+            try_from_options_optional_with(&options, "identityContractNonce", |v| {
+                try_to_u64(v, "identityContractNonce")
+            })?;
+
+        let platform_version: PlatformVersion =
+            try_from_options_optional::<PlatformVersionWasm>(&options, "platformVersion")?
+                .unwrap_or_default()
+                .into();
+
         let properties = try_from_options_with(&options, "properties", |v| {
             v.with_serde_to_platform_value_map()
         })?;
@@ -218,19 +284,50 @@ impl DocumentWasm {
             Ok,
         )?;
 
-        let doc_id: Identifier = id.map_or_else(
-            || {
-                crate::utils::generate_document_id_v0(
+        let doc_id: Identifier = match (id, identity_contract_nonce) {
+            // The nonce fixes the id: it is the one the create transition
+            // will carry. An explicit id may only restate it; one that
+            // differs would let the caller reference (from another document
+            // in the batch, say) an id no transition ever creates.
+            (id, Some(identity_contract_nonce)) => {
+                let derived = Document::generate_document_id(
                     &data_contract_id,
                     &owner_id,
                     &document_type_name,
                     &entropy,
-                )
-            },
-            |id| Ok(id.into()),
-        )?;
+                    identity_contract_nonce,
+                    &platform_version,
+                )?;
+
+                if let Some(id) = id {
+                    let id: Identifier = id.into();
+                    if id != derived {
+                        return Err(WasmDppError::invalid_argument(format!(
+                            "id {} does not match the id {} derived from the document's entropy \
+                             and identityContractNonce {}: pass one or the other",
+                            id.to_string(Base58),
+                            derived.to_string(Base58),
+                            identity_contract_nonce,
+                        )));
+                    }
+                }
+
+                derived
+            }
+            (Some(id), None) => id.into(),
+            // Without the nonce of the create transition the id can only be
+            // the entropy-only one, which from protocol version 14 is a
+            // placeholder: `DocumentCreateTransition` replaces it.
+            (None, None) => Document::generate_document_id_v0(
+                &data_contract_id,
+                &owner_id,
+                &document_type_name,
+                &entropy,
+            ),
+        };
 
         let document = Document::V0(DocumentV0 {
+            contract_version: None,
             id: doc_id,
             owner_id,
             properties,
@@ -284,7 +381,12 @@ impl DocumentWasm {
                 .map(|(k, v)| (Value::Text(k.clone()), v.clone()))
                 .collect(),
         );
-        let js_value = serialization::platform_value_to_object(&properties_value)?;
+        // Identifier-typed properties surface as base58 strings — the
+        // form where-clauses accept back, so a proven join value can be
+        // used as a pagination cursor directly. Other binary properties
+        // stay Uint8Array.
+        let js_value =
+            serialization::platform_value_to_object_with_base58_identifiers(&properties_value)?;
         Ok(js_value.into())
     }
 
@@ -347,6 +449,34 @@ impl DocumentWasm {
     pub fn set_id(&mut self, id: IdentifierLikeJs) -> WasmDppResult<()> {
         self.document.set_id(id.try_into()?);
         Ok(())
+    }
+
+    /// Gives the document the id its create transition will carry, derived
+    /// from its entropy and the identity contract nonce that transition is
+    /// going to use.
+    ///
+    /// `new DocumentCreateTransition(...)` does this on its own; call it
+    /// yourself to know the id before the transition exists (a document that
+    /// another document in the same batch references). The transition must
+    /// then be built with the same nonce.
+    ///
+    /// Throws when the document carries no entropy (one read back from
+    /// Platform), since only a new document can be created.
+    #[wasm_bindgen(js_name = "setIdForCreation")]
+    pub fn set_id_for_creation_js(
+        &mut self,
+        #[wasm_bindgen(js_name = "identityContractNonce")] identity_contract_nonce: u64,
+        #[wasm_bindgen(js_name = "platformVersion")] platform_version: Option<
+            PlatformVersionLikeJs,
+        >,
+    ) -> WasmDppResult<()> {
+        let platform_version: PlatformVersion = platform_version
+            .map(PlatformVersionWasm::try_from)
+            .transpose()?
+            .unwrap_or_default()
+            .into();
+
+        self.set_id_for_creation(identity_contract_nonce, &platform_version)
     }
 
     #[wasm_bindgen(setter=entropy)]
@@ -485,10 +615,21 @@ impl DocumentWasm {
     }
 
     /// Convert to a JS object with binary fields as Uint8Array.
+    ///
+    /// Wire shape (Phase D step 8 slice B):
+    /// - `$formatVersion: "0"` — canonical Document version tag
+    /// - `$dataContractId`, `$type`, `$entropy` — wasm-side metadata
+    /// - V0 Document fields (`$id`, `$ownerId`, `$revision`, …) flat
+    ///   alongside user-defined properties
     #[wasm_bindgen(js_name = "toObject")]
     pub fn to_object(&self) -> WasmDppResult<DocumentObjectJs> {
         let mut map = self.document.to_map_value()?;
-        // Add metadata fields not in core Document
+        // Canonical Document version tag — matches `IdentityWasm.toObject`
+        // and every other rs-dpp type's canonical wire shape. Symmetric
+        // with `fromObject` which now uses canonical
+        // `Document::from_object` (requires the tag).
+        map.insert("$formatVersion".to_string(), Value::Text("0".to_string()));
+        // wasm-side metadata not in core Document
         let data_contract_id: Identifier = self.data_contract_id.into();
         map.insert(
             "$dataContractId".to_string(),
@@ -507,20 +648,20 @@ impl DocumentWasm {
         Ok(js_value.into())
     }
 
-    /// Create a Document from a JS object.
+    /// Create a Document from a JS object (canonical-tagged shape).
     #[wasm_bindgen(js_name = "fromObject")]
     pub fn from_object(
         value: DocumentObjectJs,
-        platform_version: PlatformVersionLikeJs,
+        _platform_version: PlatformVersionLikeJs,
     ) -> WasmDppResult<DocumentWasm> {
-        let platform_version: PlatformVersion = platform_version.try_into()?;
         let platform_value = serialization::js_value_to_platform_value(&value.into())?;
 
         let Value::Map(mut map) = platform_value else {
             return Err(WasmDppError::invalid_argument("Expected an object"));
         };
 
-        // Extract metadata fields using ValueMapHelper trait methods
+        // Extract wasm-side metadata fields before passing to canonical
+        // `Document::from_object`.
         let data_contract_id = map
             .remove_optional_key("$dataContractId")
             .ok_or_else(|| WasmDppError::invalid_argument("Missing $dataContractId"))?
@@ -545,8 +686,12 @@ impl DocumentWasm {
             })
         });
 
-        // Create Document from remaining fields
-        let document = Document::from_platform_value(Value::Map(map), &platform_version)?;
+        // Canonical `ValueConvertible::from_object` after Phase D step 8
+        // slice B. The legacy `from_platform_value` accepted un-tagged
+        // shapes; with `toObject` now emitting `$formatVersion: "0"`,
+        // canonical handles round-trip cleanly.
+        use dpp::serialization::ValueConvertible;
+        let document = Document::from_object(Value::Map(map))?;
 
         Ok(DocumentWasm::new(
             document,
@@ -560,11 +705,14 @@ impl DocumentWasm {
     #[wasm_bindgen(js_name = "toJSON")]
     pub fn to_json(
         &self,
-        platform_version: PlatformVersionLikeJs,
+        _platform_version: PlatformVersionLikeJs,
     ) -> WasmDppResult<DocumentJSONJs> {
-        let platform_version: PlatformVersion = platform_version.try_into()?;
-        // Get document fields as JSON
-        let mut json_value = self.document.to_json(&platform_version)?;
+        // Canonical `JsonConvertible::to_json` after Phase D step 8 slice A.
+        // The legacy `to_json(&self, &PlatformVersion)` was a 1:1 canonical
+        // equivalent. `platform_version` stays in the JS API for SDK
+        // consistency.
+        use dpp::serialization::JsonConvertible;
+        let mut json_value = self.document.to_json()?;
 
         // Serialize wrapper fields using serde and merge into document JSON
         let wrapper_json =
@@ -584,29 +732,32 @@ impl DocumentWasm {
         Ok(js_value.into())
     }
 
-    /// Create a Document from a JSON object.
+    /// Create a Document from a JSON object (canonical-tagged shape).
     /// JSON format has identifiers as base58 strings.
     #[wasm_bindgen(js_name = "fromJSON")]
     pub fn from_json(
         value: DocumentJSONJs,
-        platform_version: PlatformVersionLikeJs,
+        _platform_version: PlatformVersionLikeJs,
     ) -> WasmDppResult<DocumentWasm> {
-        let platform_version: PlatformVersion = platform_version.try_into()?;
         let mut json_value = serialization::js_value_to_json(&value.into())?;
 
         // Deserialize wrapper fields using serde
         let mut wrapper: DocumentWasm = serde_json::from_value(json_value.clone())
             .map_err(|e| WasmDppError::serialization(e.to_string()))?;
 
-        // Remove wrapper fields from JSON before passing to Document::from_json_value
+        // Remove wrapper fields from JSON before passing to Document::from_json
         if let serde_json::Value::Object(ref mut obj) = json_value {
             obj.remove("$dataContractId");
             obj.remove("$type");
             obj.remove("$entropy");
         }
 
-        // Create Document from remaining fields
-        wrapper.document = Document::from_json_value::<String, _>(json_value, &platform_version)?;
+        // Canonical `JsonConvertible::from_json` after Phase D step 8
+        // slice B. The wasm-dpp2 `toJSON` already emits canonical-tagged
+        // JSON (it routes through `Document::to_json` which carries
+        // `$formatVersion`), so the round-trip works through canonical.
+        use dpp::serialization::JsonConvertible;
+        wrapper.document = Document::from_json(json_value)?;
 
         Ok(wrapper)
     }
@@ -690,12 +841,23 @@ impl DocumentWasm {
         )
     }
 
+    /// Derives the id of a document that is about to be created, the way
+    /// consensus recomputes it for the create transition.
+    ///
+    /// From protocol version 14 the id commits to the identity contract
+    /// nonce of the create transition, so `identityContractNonce` is
+    /// required at that version (and ignored before it). The platform
+    /// version defaults to the latest.
     #[wasm_bindgen(js_name = "generateId")]
     pub fn generate_id(
         #[wasm_bindgen(js_name = "documentTypeName")] document_type_name: &str,
         #[wasm_bindgen(js_name = "ownerId")] owner_id: IdentifierLikeJs,
         #[wasm_bindgen(js_name = "dataContractId")] data_contract_id: IdentifierLikeJs,
         entropy: Option<Vec<u8>>,
+        #[wasm_bindgen(js_name = "identityContractNonce")] identity_contract_nonce: Option<u64>,
+        #[wasm_bindgen(js_name = "platformVersion")] platform_version: Option<
+            PlatformVersionLikeJs,
+        >,
     ) -> WasmDppResult<Vec<u8>> {
         let owner_id: Identifier = owner_id.try_into()?;
         let data_contract_id: Identifier = data_contract_id.try_into()?;
@@ -707,11 +869,30 @@ impl DocumentWasm {
                 .map_err(|err| WasmDppError::serialization(err.to_string()))?,
         };
 
-        let identifier = crate::utils::generate_document_id_v0(
+        let platform_version: PlatformVersion = platform_version
+            .map(PlatformVersionWasm::try_from)
+            .transpose()?
+            .unwrap_or_default()
+            .into();
+
+        let identity_contract_nonce = match identity_contract_nonce {
+            Some(identity_contract_nonce) => identity_contract_nonce,
+            None if Document::document_id_depends_on_nonce(&platform_version)? => {
+                return Err(WasmDppError::invalid_argument(
+                    "'identityContractNonce' is required: from protocol version 14 the id of a \
+                     new document commits to the identity contract nonce of its create transition",
+                ));
+            }
+            None => 0,
+        };
+
+        let identifier = Document::generate_document_id(
             &data_contract_id,
             &owner_id,
             document_type_name,
             &entropy_bytes,
+            identity_contract_nonce,
+            &platform_version,
         )?;
 
         Ok(identifier.to_vec())
@@ -767,5 +948,77 @@ impl DocumentWasm {
 }
 
 impl_try_from_js_value!(DocumentWasm, "Document");
+
 impl_try_from_options!(DocumentWasm);
 impl_wasm_type_info!(DocumentWasm, Document);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dpp::platform_value::string_encoding::Encoding;
+    use std::collections::BTreeMap;
+
+    fn note(entropy: Option<[u8; 32]>) -> DocumentWasm {
+        let document = Document::V0(DocumentV0 {
+            id: Identifier::from([9u8; 32]),
+            owner_id: Identifier::from([2u8; 32]),
+            properties: BTreeMap::new(),
+            revision: Some(1),
+            ..Default::default()
+        });
+        DocumentWasm::new(
+            document,
+            Identifier::from([1u8; 32]),
+            "note".to_string(),
+            entropy,
+        )
+    }
+
+    #[test]
+    fn set_id_for_creation_derives_the_id_dpp_pins() {
+        // The vector `Document::generate_document_id_v1` pins in rs-dpp; the
+        // wasm wrapper must feed its own contract id, type name and entropy
+        // into the same derivation.
+        let mut document = note(Some([7u8; 32]));
+
+        document
+            .set_id_for_creation(1, PlatformVersion::latest())
+            .expect("expected an id");
+
+        assert_eq!(
+            document.document.id().to_string(Encoding::Hex),
+            "e574ae73396611a517691d1f89275b6e99642cb9c176ce8cf879b1665c50f15f"
+        );
+    }
+
+    #[test]
+    fn set_id_for_creation_keeps_the_entropy_only_id_before_protocol_version_14() {
+        let mut document = note(Some([7u8; 32]));
+        let version_13 = PlatformVersion::get(13).expect("expected version 13");
+
+        document
+            .set_id_for_creation(1, version_13)
+            .expect("expected an id");
+
+        assert_eq!(
+            document.document.id(),
+            Document::generate_document_id_v0(
+                &Identifier::from([1u8; 32]),
+                &Identifier::from([2u8; 32]),
+                "note",
+                &[7u8; 32],
+            )
+        );
+    }
+
+    #[test]
+    fn set_id_for_creation_refuses_a_document_without_entropy() {
+        let mut document = note(None);
+
+        let error = document
+            .set_id_for_creation(1, PlatformVersion::latest())
+            .expect_err("expected an error");
+
+        assert!(error.to_string().contains("entropy"), "{error}");
+    }
+}

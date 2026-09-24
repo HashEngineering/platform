@@ -1,17 +1,13 @@
-#[cfg(feature = "json-conversion")]
-mod json_conversion;
 mod proved;
 mod state_transition_like;
 mod state_transition_validation;
 mod types;
 pub(super) mod v0_methods;
-#[cfg(feature = "value-conversion")]
-mod value_conversion;
 mod version;
 
 use std::collections::BTreeMap;
 
-use bincode::{Decode, Encode};
+use bincode::{Decode, DecodeUntrusted, Encode};
 use platform_serialization_derive::PlatformSignable;
 
 use crate::ProtocolError;
@@ -20,6 +16,8 @@ use crate::address_funds::{AddressFundsFeeStrategy, AddressWitness, PlatformAddr
 use crate::fee::Credits;
 use crate::identity::state_transition::asset_lock_proof::AssetLockProof;
 use crate::prelude::{AddressNonce, UserFeeIncrease};
+#[cfg(feature = "json-conversion")]
+use crate::serialization::json_safe_fields;
 use platform_value::BinaryData;
 #[cfg(feature = "serde-conversion")]
 use serde::{Deserialize, Serialize};
@@ -34,7 +32,8 @@ mod property_names {
     pub const TRANSITION_TYPE: &str = "type";
 }
 
-#[derive(Debug, Clone, PartialEq, Encode, Decode, PlatformSignable)]
+#[cfg_attr(feature = "json-conversion", json_safe_fields)]
+#[derive(Debug, Clone, PartialEq, Encode, Decode, PlatformSignable, DecodeUntrusted)]
 #[cfg_attr(
     feature = "serde-conversion",
     derive(Serialize, Deserialize),

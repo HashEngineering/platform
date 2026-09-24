@@ -4,9 +4,11 @@ use crate::serialization::JsonConvertible;
 use crate::serialization::ValueConvertible;
 use crate::voting::vote_polls::contested_document_resource_vote_poll::ContestedDocumentResourceVotePoll;
 use crate::ProtocolError;
-use bincode::{Decode, Encode};
+use bincode::{Decode, DecodeUntrusted, Encode};
 use derive_more::From;
-use platform_serialization_derive::{PlatformDeserialize, PlatformSerialize};
+use platform_serialization_derive::{
+    PlatformDeserializeTrusted, PlatformDeserializeUntrusted, PlatformSerialize,
+};
 use platform_value::Identifier;
 #[cfg(feature = "serde-conversion")]
 use serde::{Deserialize, Serialize};
@@ -18,11 +20,24 @@ pub mod contested_document_resource_vote_poll;
     all(feature = "json-conversion", feature = "serde-conversion"),
     derive(JsonConvertible)
 )]
-#[derive(Debug, Clone, Encode, Decode, PlatformSerialize, PlatformDeserialize, PartialEq, From)]
+#[derive(
+    Debug,
+    Clone,
+    Encode,
+    Decode,
+    PlatformSerialize,
+    PlatformDeserializeTrusted,
+    PlatformDeserializeUntrusted,
+    PartialEq,
+    From,
+    DecodeUntrusted,
+)]
 #[cfg_attr(
     feature = "serde-conversion",
     derive(Serialize, Deserialize),
-    serde(tag = "type", content = "data", rename_all = "camelCase")
+    // Internally tagged with a `$type` discriminator; inner
+    // `ContestedDocumentResourceVotePoll` fields flatten at the same level.
+    serde(tag = "$type", rename_all = "camelCase")
 )]
 #[cfg_attr(feature = "value-conversion", derive(ValueConvertible))]
 #[platform_serialize(unversioned)]
@@ -65,5 +80,33 @@ impl VotePoll {
                 contested_document_resource_vote_poll.unique_id()
             }
         }
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "json-conversion",
+    feature = "value-conversion",
+    feature = "serde-conversion"
+))]
+mod json_convertible_tests_votepoll {
+    use super::*;
+
+    #[test]
+    fn json_round_trip_votepoll() {
+        use crate::serialization::JsonConvertible;
+        let original = VotePoll::default();
+        let json = original.to_json().expect("to_json");
+        let recovered = VotePoll::from_json(json).expect("from_json");
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn value_round_trip_votepoll() {
+        use crate::serialization::ValueConvertible;
+        let original = VotePoll::default();
+        let value = original.to_object().expect("to_object");
+        let recovered = VotePoll::from_object(value).expect("from_object");
+        assert_eq!(original, recovered);
     }
 }

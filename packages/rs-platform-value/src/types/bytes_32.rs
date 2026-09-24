@@ -3,14 +3,27 @@ use crate::types::encoding_string_to_encoding;
 use crate::{string_encoding, Error, Value};
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
-use bincode::{Decode, Encode};
+use bincode::{Decode, DecodeUntrusted, Encode};
 use rand::rngs::StdRng;
 use rand::Rng;
 use serde::de::Visitor;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Default, Debug, Clone, PartialEq, Eq, Ord, PartialOrd, Hash, Copy, Encode, Decode)]
+#[derive(
+    Default,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Ord,
+    PartialOrd,
+    Hash,
+    Copy,
+    Encode,
+    Decode,
+    DecodeUntrusted,
+)]
 pub struct Bytes32(pub [u8; 32]);
 
 impl AsRef<[u8]> for Bytes32 {
@@ -91,6 +104,12 @@ impl<'de> Deserialize<'de> for Bytes32 {
     where
         D: serde::Deserializer<'de>,
     {
+        // Both visitors accept strings AND bytes because serde's ContentDeserializer
+        // (used for internally tagged enums like `#[serde(tag = "$version")]`) defaults
+        // `is_human_readable` to `true` regardless of the parent deserializer's setting.
+        // This means bytes can arrive through the string path and vice versa. Mirrors
+        // the pattern used by `BinaryData` and `Identifier`.
+
         if deserializer.is_human_readable() {
             struct StringVisitor;
 
@@ -98,7 +117,7 @@ impl<'de> Deserialize<'de> for Bytes32 {
                 type Value = Bytes32;
 
                 fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                    formatter.write_str("a base64-encoded string with length 44")
+                    formatter.write_str("a base64-encoded string with length 44 or 32-byte array")
                 }
 
                 fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
@@ -115,6 +134,18 @@ impl<'de> Deserialize<'de> for Bytes32 {
                     array.copy_from_slice(&bytes);
                     Ok(Bytes32(array))
                 }
+
+                fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+                where
+                    E: serde::de::Error,
+                {
+                    if v.len() != 32 {
+                        return Err(E::invalid_length(v.len(), &self));
+                    }
+                    let mut array = [0u8; 32];
+                    array.copy_from_slice(v);
+                    Ok(Bytes32(array))
+                }
             }
 
             deserializer.deserialize_string(StringVisitor)
@@ -125,19 +156,34 @@ impl<'de> Deserialize<'de> for Bytes32 {
                 type Value = Bytes32;
 
                 fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                    formatter.write_str("a byte array with length 32")
+                    formatter.write_str("a 32-byte array or base64-encoded string")
                 }
 
                 fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
                 where
                     E: serde::de::Error,
                 {
-                    let mut bytes = [0u8; 32];
                     if v.len() != 32 {
                         return Err(E::invalid_length(v.len(), &self));
                     }
+                    let mut bytes = [0u8; 32];
                     bytes.copy_from_slice(v);
                     Ok(Bytes32(bytes))
+                }
+
+                fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+                where
+                    E: serde::de::Error,
+                {
+                    let bytes = BASE64_STANDARD
+                        .decode(v)
+                        .map_err(|e| E::custom(format!("expected base 64 for bytes32: {}", e)))?;
+                    if bytes.len() != 32 {
+                        return Err(E::invalid_length(bytes.len(), &self));
+                    }
+                    let mut array = [0u8; 32];
+                    array.copy_from_slice(&bytes);
+                    Ok(Bytes32(array))
                 }
             }
 

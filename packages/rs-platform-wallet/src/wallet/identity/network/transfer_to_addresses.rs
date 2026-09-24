@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use dpp::address_funds::AddressWitness;
-use dpp::identity::accessors::IdentitySettersV0;
 use dpp::identity::signer::Signer;
 use dpp::identity::IdentityPublicKey;
 use dpp::platform_value::BinaryData;
@@ -12,12 +11,13 @@ use dpp::prelude::Identifier;
 use dpp::ProtocolError;
 
 use dash_sdk::platform::transition::put_settings::PutSettings;
-use dash_sdk::platform::transition::transfer_to_addresses::TransferToAddresses;
+use dash_sdk::platform::transition::transfer_to_addresses::TransferToAddressesWithMetadata;
 
 use dpp::address_funds::PlatformAddress;
 use dpp::fee::Credits;
 
 use crate::error::PlatformWalletError;
+use crate::BlockTime;
 
 use super::*;
 
@@ -63,13 +63,26 @@ impl IdentityWallet {
     ///
     /// Signing is routed through the supplied `&S: Signer<IdentityPublicKey>`.
     /// Required for external-signable wallets.
+    ///
+    /// Returns the proof-attested post-transfer `AddressInfos` for the
+    /// recipient addresses alongside the sender's new balance. Prefer the
+    /// composite [`PlatformWallet::transfer_credits_to_addresses_with_external_signer`],
+    /// which feeds the returned `AddressInfos` through
+    /// [`PlatformAddressWallet::reconcile_address_infos`] so recipients
+    /// owned by this wallet see their new balance immediately instead of
+    /// waiting for the next BLAST sync round.
+    ///
+    /// [`PlatformWallet::transfer_credits_to_addresses_with_external_signer`]:
+    /// crate::wallet::PlatformWallet::transfer_credits_to_addresses_with_external_signer
+    /// [`PlatformAddressWallet::reconcile_address_infos`]:
+    /// crate::wallet::PlatformAddressWallet::reconcile_address_infos
     pub async fn transfer_credits_to_addresses_with_external_signer<S>(
         &self,
         identity_id: &Identifier,
         recipient_addresses: BTreeMap<PlatformAddress, Credits>,
         signer: &S,
         settings: Option<PutSettings>,
-    ) -> Result<Credits, PlatformWalletError>
+    ) -> Result<(dash_sdk::query_types::AddressInfos, Credits, u64), PlatformWalletError>
     where
         S: Signer<IdentityPublicKey> + Send + Sync,
     {
@@ -87,8 +100,8 @@ impl IdentityWallet {
                 .ok_or(PlatformWalletError::IdentityNotFound(*identity_id))?
         };
 
-        let (_address_infos, new_balance) = identity
-            .transfer_credits_to_addresses(
+        let (address_infos, mut new_balance, metadata) = identity
+            .transfer_credits_to_addresses_with_metadata(
                 &self.sdk,
                 recipient_addresses,
                 None, // signing_transfer_key_to_use
@@ -97,11 +110,18 @@ impl IdentityWallet {
             )
             .await
             .map_err(|e| {
-                PlatformWalletError::InvalidIdentityData(format!(
-                    "Failed to transfer credits to addresses: {}",
-                    e
-                ))
+                // Preserve a structured key-unavailable signer failure so the
+                // FFI boundary can still restore code 31; only genuine
+                // operation failures get stringified into `InvalidIdentityData`.
+                crate::error::preserve_signer_key_unavailable_or(e, |e| {
+                    PlatformWalletError::InvalidIdentityData(format!(
+                        "Failed to transfer credits to addresses: {}",
+                        e
+                    ))
+                })
             })?;
+
+        let proof_height = metadata.height;
 
         {
             let mut wm = self.wallet_manager.write().await;
@@ -114,18 +134,18 @@ impl IdentityWallet {
                 .identity_manager
                 .managed_identity_mut(identity_id)
             {
-                managed.identity.set_balance(new_balance);
-                if let Err(e) = self.persister.store(managed.snapshot_changeset().into()) {
-                    tracing::error!(
-                        identity = %identity_id,
-                        error = %e,
-                        "Failed to persist identity balance update after \
-                         transfer_to_addresses (external signer)"
-                    );
-                }
+                new_balance = managed.persist_confirmed_balance(
+                    new_balance,
+                    BlockTime::from(metadata),
+                    &self.persister,
+                );
             }
         }
 
-        Ok(new_balance)
+        // Recipient platform-address balances are reconciled by the
+        // composite `PlatformWallet::transfer_credits_to_addresses_with_external_signer`,
+        // which routes the returned `AddressInfos` through the
+        // platform-address wallet's shared reconciliation seam.
+        Ok((address_infos, new_balance, proof_height))
     }
 }

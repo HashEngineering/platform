@@ -40,6 +40,41 @@ public final class ManagedPlatformAddressWallet: @unchecked Sendable {
         return credits
     }
 
+    /// The per-input minimum credit amount (`min_input_amount`) the chain
+    /// enforces for address-funds transitions, read from the wallet's
+    /// current platform version on the Rust side.
+    ///
+    /// This is the same floor the Rust transfer/withdraw auto-selectors use
+    /// to drop sub-minimum "dust" inputs (DPP rejects any address-funds
+    /// input below it, so an address whose balance is under this can't be
+    /// spent on its own). UI that gates a transfer/withdraw should sum only
+    /// balances `>= this` so the enabled/disabled decision matches what
+    /// Rust will actually consume — rather than mirroring the `100_000`
+    /// protocol constant in Swift, which would drift if the version
+    /// changed it.
+    public func minInputAmount() throws -> UInt64 {
+        var amount: UInt64 = 0
+        try platform_address_wallet_min_input_amount(handle, &amount).check()
+        return amount
+    }
+
+    /// The per-output minimum credit amount (`min_output_amount`) the chain
+    /// enforces for address-funds transitions, read from the wallet's
+    /// current platform version on the Rust side.
+    ///
+    /// DPP rejects any address-funds output below this floor, so a transfer
+    /// that sends a single output under it fails structure validation after
+    /// submit. UI that gates a transfer should require the requested amount
+    /// to reach this (and explain why when it doesn't) so the
+    /// enabled/disabled decision matches what DPP will accept — rather than
+    /// mirroring the protocol constant in Swift, which would drift if the
+    /// version changed it. Companion to `minInputAmount()`.
+    public func minOutputAmount() throws -> UInt64 {
+        var amount: UInt64 = 0
+        try platform_address_wallet_min_output_amount(handle, &amount).check()
+        return amount
+    }
+
     /// Get all platform addresses with their cached balances.
     public func addressesWithBalances() throws -> [AddressBalance] {
         var entriesPtr: UnsafeMutablePointer<AddressBalanceEntryFFI>?
@@ -69,7 +104,13 @@ public final class ManagedPlatformAddressWallet: @unchecked Sendable {
 
     /// One recipient row for `transfer(...)`.
     public struct TransferOutput: Sendable {
-        /// `0 = P2PKH`, `1 = P2SH`. Mirrors the Rust-side `PlatformAddress` discriminant.
+        /// Must be `0` (P2PKH). The platform-address transfer surface
+        /// supports P2PKH only: the Rust `TryFrom<PlatformAddressFFI>`
+        /// backing `parse_outputs`/`parse_explicit_inputs*` rejects
+        /// `address_type = 1` (P2SH) because inputs are signed by a
+        /// P2PKH-only `Signer<PlatformAddress>` and recipients on this
+        /// surface are always P2PKH. The field stays `UInt8` to mirror the
+        /// Rust discriminant layout, but `1` will be rejected by the FFI.
         public let addressType: UInt8
         /// 20-byte address hash.
         public let hash: Data
@@ -80,21 +121,6 @@ public final class ManagedPlatformAddressWallet: @unchecked Sendable {
             self.addressType = addressType
             self.hash = hash
             self.credits = credits
-        }
-    }
-
-    /// Destination address for the change output the wrapper appends to
-    /// every transfer. Carries no `credits` field — the wrapper computes
-    /// the change amount itself as `sum(inputs) - sum(outputs)`.
-    public struct ChangeAddress: Sendable {
-        /// `0 = P2PKH`, `1 = P2SH`. Mirrors the Rust-side `PlatformAddress` discriminant.
-        public let addressType: UInt8
-        /// 20-byte address hash.
-        public let hash: Data
-
-        public init(addressType: UInt8, hash: Data) {
-            self.addressType = addressType
-            self.hash = hash
         }
     }
 
@@ -110,53 +136,48 @@ public final class ManagedPlatformAddressWallet: @unchecked Sendable {
 
     /// Transfer credits between platform addresses.
     ///
-    /// The `AddressFundsTransferTransition` protocol requires
-    /// `sum(inputs) == sum(outputs)` and forbids any output address from
-    /// also appearing as an input. This wrapper handles both invariants:
-    /// - Picks the smallest set of inputs (largest-balance first) that
-    ///   covers `sum(outputs) + feeBuffer`.
-    /// - Routes the change to `changeAddress` if supplied — typically a
-    ///   fresh, unused HD address pulled from the SwiftData address
-    ///   pool (lowest `addressIndex` with `isUsed == false`, the same
-    ///   selection rule the Receive screen uses). When `changeAddress`
-    ///   is `nil` the wrapper falls back to reserving the smallest
-    ///   non-recipient balance-bearing address — workable but it
-    ///   accumulates change onto an existing address.
+    /// Input selection, the `Σ inputs == Σ outputs` balancing, fee strategy,
+    /// and nonce resolution all happen inside the Rust `platform-wallet` crate.
+    /// This wrapper marshals the recipient outputs and drives
+    /// `platform_address_wallet_transfer` with `INPUT_SELECTION_TYPE_AUTO`:
     ///
-    /// Fee strategy is `ReduceOutput(change_index)` so each recipient
-    /// gets exactly its requested amount and the change output absorbs
-    /// the on-chain fee.
+    /// - The Rust auto-selector resolves the requested `accountIndex` (key
+    ///   class 0), picks the smallest balance-descending covering prefix of its
+    ///   funded addresses (skipping sub-`min_input_amount` dust and any address
+    ///   that is also a recipient — DPP forbids the same address as both input
+    ///   and output), and **partially consumes** the last selected input so the
+    ///   surplus stays on the source address. There is no separate change
+    ///   output and no change address: the credit-balance model leaves residual
+    ///   credits in place on the source addresses.
+    /// - The fee strategy is left empty (`nil, 0`); the FFI maps that to
+    ///   `[DeductFromInput(0)]`, which the Auto path supports — each recipient
+    ///   gets exactly its requested amount and the on-chain fee is deducted from
+    ///   the lex-smallest selected input's remaining balance (the selector
+    ///   reserves the fee headroom on that input).
     ///
-    /// The signer must be able to sign for the selected inputs — i.e.
-    /// the `KeychainSigner` resolves their derivation paths via
-    /// SwiftData + the wallet mnemonic (the `0xFF` branch in
-    /// `KeychainSigner.swift`).
-    /// Cushion held back so the change output stays positive after the on-chain
-    /// fee is deducted (the transfer uses `ReduceOutput(change_index)`).
-    /// Observed fee for a 1-input/2-output transition is ~6.5M credits;
-    /// this is intentionally an order of magnitude larger so estimation
-    /// drift doesn't force an "insufficient" failure in normal use.
-    private static let feeBuffer: UInt64 = 100_000_000
-
+    /// The wrapper still rejects empty/duplicate recipients and a recipient sum
+    /// that overflows `UInt64` before the Task detach, so callers get a
+    /// synchronous error; the Rust side enforces the same invariants plus typed
+    /// diagnostics for insufficient / dust-only / output-collision balances.
+    ///
+    /// The signer must be able to sign for the auto-selected inputs — i.e.
+    /// the `KeychainSigner` resolves their derivation paths via SwiftData + the
+    /// wallet mnemonic (the `0xFF` branch in `KeychainSigner.swift`).
     @discardableResult
     public func transfer(
         accountIndex: UInt32,
         outputs: [TransferOutput],
-        changeAddress: ChangeAddress? = nil,
         signer: KeychainSigner
     ) async throws -> [UpdatedBalance] {
         guard !outputs.isEmpty else {
             throw PlatformWalletError.invalidParameter("outputs is empty")
         }
 
-        // Reject duplicate recipient addresses. Rust's parse_outputs
-        // (platform_address_types.rs:189-204) inserts into a
-        // `BTreeMap<PlatformAddress, Credits>` keyed by address, so a
-        // duplicate would silently overwrite earlier entries — Swift
-        // would still sum every output toward the change calculation,
-        // leaving the transition misbalanced. We key on `hash` only:
-        // P2PKH/P2SH share the same 20-byte hash space, so the same
-        // hash with different `addressType` is still ambiguous.
+        // Reject duplicate recipient addresses. Rust's parse_outputs inserts
+        // into a `BTreeMap<PlatformAddress, Credits>` keyed by address, so a
+        // duplicate would silently overwrite earlier entries. We key on `hash`
+        // only: P2PKH/P2SH share the same 20-byte hash space, so the same hash
+        // with different `addressType` is still ambiguous.
         let outputHashes = Set(outputs.map { $0.hash })
         guard outputHashes.count == outputs.count else {
             throw PlatformWalletError.invalidParameter(
@@ -164,9 +185,9 @@ public final class ManagedPlatformAddressWallet: @unchecked Sendable {
             )
         }
 
-        // Sum recipient amounts. Reject overflow rather than silently
-        // wrapping (would let a caller smuggle bogus amounts past the
-        // protocol's sum check).
+        // Validate hashes + reject a recipient sum that overflows UInt64
+        // before the Task detach (the protocol's sum check would otherwise
+        // reject it Rust-side after the detach + signer pin).
         var totalRecipientCredits: UInt64 = 0
         for out in outputs {
             guard out.hash.count == 20 else {
@@ -183,189 +204,67 @@ public final class ManagedPlatformAddressWallet: @unchecked Sendable {
             totalRecipientCredits = sum.partialValue
         }
 
-        // Read available balances. We pick inputs from balance-bearing
-        // addresses; the change destination must differ from both the
-        // recipient set and the chosen inputs.
-        let recipientHashes = Set(outputs.map { $0.hash })
-
-        // Validate explicit change-address up front if the caller supplied one.
-        if let cc = changeAddress {
-            guard cc.hash.count == 20 else {
-                throw PlatformWalletError.walletOperation(
-                    "changeAddress.hash must be exactly 20 bytes (got \(cc.hash.count))"
-                )
-            }
-            guard !recipientHashes.contains(cc.hash) else {
-                throw PlatformWalletError.walletOperation(
-                    "changeAddress collides with a recipient address."
-                )
-            }
-        }
-
-        let balanced = try addressesWithBalances()
-            .filter { $0.balance > 0 }
-            .filter { !recipientHashes.contains($0.hash) }
-            .sorted { $0.balance > $1.balance }
-
-        // Pick the smallest set of inputs (largest-first) that covers
-        // recipients + fee buffer. When the caller hasn't supplied a
-        // dedicated change address, leave the last balance-bearing
-        // candidate aside so we can use it as change.
-        let reserveOneForChange = (changeAddress == nil)
-        var selectedInputs: [AddressBalance] = []
-        var totalInputs: UInt64 = 0
-        for b in balanced {
-            if reserveOneForChange && selectedInputs.count == balanced.count - 1 { break }
-            // Skip if this address is the explicit change destination.
-            if let cc = changeAddress, b.hash == cc.hash { continue }
-            selectedInputs.append(b)
-            totalInputs += b.balance
-            if totalInputs >= totalRecipientCredits + Self.feeBuffer { break }
-        }
-        guard totalInputs >= totalRecipientCredits + Self.feeBuffer else {
-            throw PlatformWalletError.walletOperation(
-                "Insufficient platform balance: have \(totalInputs) credits across \(selectedInputs.count) input(s), need at least \(totalRecipientCredits + Self.feeBuffer)"
+        // Marshal the recipient outputs. Rust canonicalises to a
+        // `BTreeMap<PlatformAddress, Credits>`, so insertion order here is
+        // irrelevant — the Auto path resolves its own fee index against the
+        // lex-sorted map.
+        let ffiOutputs: [AddressBalanceEntryFFI] = outputs.map { out in
+            AddressBalanceEntryFFI(
+                address: PlatformAddressFFI(
+                    address_type: out.addressType,
+                    hash: Self.hashTuple(from: out.hash)
+                ),
+                balance: out.credits,
+                nonce: 0,
+                account_index: 0,
+                address_index: 0,
+                // Request path: names an output amount, carries no
+                // persisted balance — the height pin is meaningless here.
+                as_of_height: 0
             )
         }
-        let selectedHashes = Set(selectedInputs.map { $0.hash })
-
-        // Resolve the change destination: caller-supplied address wins
-        // (fresh HD address from the unused pool); otherwise reserve a
-        // balance-bearing address that's neither input nor recipient.
-        let resolvedChange: (addressType: UInt8, hash: Data)
-        if let cc = changeAddress {
-            guard !selectedHashes.contains(cc.hash) else {
-                throw PlatformWalletError.walletOperation(
-                    "changeAddress collides with a selected input address."
-                )
-            }
-            resolvedChange = (cc.addressType, cc.hash)
-        } else {
-            guard let fallback = balanced.first(where: { !selectedHashes.contains($0.hash) }) else {
-                throw PlatformWalletError.walletOperation(
-                    "Could not find a wallet address distinct from inputs to use as the change destination — pass a fresh HD address via `changeAddress`."
-                )
-            }
-            resolvedChange = (fallback.addressType, fallback.hash)
-        }
-
-        // Marshal explicit inputs.
-        var ffiInputs: [ExplicitInputFFI] = []
-        ffiInputs.reserveCapacity(selectedInputs.count)
-        for inp in selectedInputs {
-            let inputTuple = Self.hashTuple(from: inp.hash)
-            ffiInputs.append(
-                ExplicitInputFFI(
-                    address: PlatformAddressFFI(address_type: inp.addressType, hash: inputTuple),
-                    balance: inp.balance
-                )
-            )
-        }
-
-        // Build the FFI output list in the same lexicographic order Rust's
-        // BTreeMap<PlatformAddress, _> canonicalizes to, so the fee-reduction
-        // index we hand it lines up with the row Rust will actually decrement.
-        let changeAmount = totalInputs - totalRecipientCredits
-        let (ffiOutputs, changeIndex) = Self.buildSortedFFIOutputs(
-            recipients: outputs,
-            change: (resolvedChange.addressType, resolvedChange.hash, changeAmount)
-        )
-
-        let feeStrategy: [FeeStrategyStepFFI] = [
-            FeeStrategyStepFFI(step_type: 1, index: changeIndex)  // 1 = ReduceOutput
-        ]
 
         let handle = self.handle
         let signerHandle = signer.handle
-        let inRows = ffiInputs
         let outRows = ffiOutputs
-        let feeRows = feeStrategy
 
         return try await Task.detached(priority: .userInitiated) { () -> [UpdatedBalance] in
-            _ = signer
             var changeset = PlatformAddressChangeSetFFI(updated: nil, updated_count: 0)
-            let result = inRows.withUnsafeBufferPointer {
-                inBp -> PlatformWalletFFIResult in
-                outRows.withUnsafeBufferPointer { outBp in
-                    feeRows.withUnsafeBufferPointer { feeBp in
-                        platform_address_wallet_transfer(
-                            handle,
-                            accountIndex,
-                            INPUT_SELECTION_TYPE_EXPLICIT,
-                            inBp.baseAddress,
-                            UInt(inBp.count),
-                            nil,
-                            0,
-                            outBp.baseAddress,
-                            UInt(outBp.count),
-                            feeBp.baseAddress,
-                            UInt(feeBp.count),
-                            signerHandle,
-                            &changeset
-                        )
-                    }
+            // `withExtendedLifetime(signer)` pins the resolver-backed signer for
+            // the entire FFI call. `KeychainSigner` registers its vtable ctx via
+            // `Unmanaged.passUnretained(self)`, so a bare `_ = signer` can be
+            // elided by the -O optimizer and drop the signer mid-call, causing a
+            // use-after-free in the synchronous Rust vtable callback. Mirrors the
+            // `withdraw` / `fundFromAssetLock` wrappers.
+            //
+            // The AUTO path owns input selection and its own fee strategy
+            // (`[DeductFromInput(0)]`), so inputs are `nil, 0` (auto-select) and
+            // the fee strategy is `nil, 0` (FFI defaults it to
+            // `[DeductFromInput(0)]`); mirrors the `withdraw` wrapper.
+            let result = withExtendedLifetime(signer) {
+                outRows.withUnsafeBufferPointer { outBp -> PlatformWalletFFIResult in
+                    platform_address_wallet_transfer(
+                        handle,
+                        accountIndex,
+                        INPUT_SELECTION_TYPE_AUTO,
+                        nil,
+                        0,
+                        nil,
+                        0,
+                        outBp.baseAddress,
+                        UInt(outBp.count),
+                        nil,
+                        0,
+                        signerHandle,
+                        &changeset
+                    )
                 }
             }
             try result.check()
 
             defer { platform_address_wallet_free_changeset(&changeset) }
-
-            guard let updatedPtr = changeset.updated, changeset.updated_count > 0 else {
-                return []
-            }
-            return (0..<Int(changeset.updated_count)).map { i in
-                let entry = updatedPtr[i]
-                let hashData = withUnsafeBytes(of: entry.address.hash) { Data($0) }
-                return UpdatedBalance(
-                    addressType: entry.address.address_type,
-                    hash: hashData,
-                    balance: entry.balance,
-                    nonce: entry.nonce,
-                    accountIndex: entry.account_index,
-                    addressIndex: entry.address_index
-                )
-            }
+            return Self.decodeChangeset(&changeset)
         }.value
-    }
-
-    /// Build the FFI output array (recipients + change) in the same
-    /// lexicographic order Rust's `BTreeMap<PlatformAddress, _>` uses, and
-    /// return the change row's index in that sorted list.
-    ///
-    /// Mirrors `derive(Ord)` on
-    /// `enum PlatformAddress { P2pkh([u8;20]), P2sh([u8;20]) }`: variant
-    /// discriminant first (`P2pkh = 0 < P2sh = 1`), then 20-byte hash
-    /// compared lexicographically. Load-bearing because
-    /// `FeeStrategyStep::ReduceOutput(N)` on the Rust side indexes the
-    /// post-canonicalization output list — not Swift's insertion order.
-    /// See https://github.com/dashpay/platform/issues/3738.
-    internal static func buildSortedFFIOutputs(
-        recipients: [TransferOutput],
-        change: (addressType: UInt8, hash: Data, balance: UInt64)
-    ) -> (rows: [AddressBalanceEntryFFI], changeIndex: UInt16) {
-        var rows: [(addressType: UInt8, hash: Data, balance: UInt64)] =
-            recipients.map { (addressType: $0.addressType, hash: $0.hash, balance: $0.credits) }
-        rows.append(change)
-        rows.sort { a, b in
-            if a.addressType != b.addressType { return a.addressType < b.addressType }
-            return a.hash.lexicographicallyPrecedes(b.hash)
-        }
-        let changeIdx = UInt16(rows.firstIndex {
-            $0.addressType == change.addressType && $0.hash == change.hash
-        }!)
-        let ffiRows = rows.map { row in
-            AddressBalanceEntryFFI(
-                address: PlatformAddressFFI(
-                    address_type: row.addressType,
-                    hash: hashTuple(from: row.hash)
-                ),
-                balance: row.balance,
-                nonce: 0,
-                account_index: 0,
-                address_index: 0
-            )
-        }
-        return (ffiRows, changeIdx)
     }
 
     /// Copy a 20-byte `Data` into the fixed-size tuple shape the FFI expects.
@@ -385,16 +284,366 @@ public final class ManagedPlatformAddressWallet: @unchecked Sendable {
         )
     }
 
+    // MARK: - Withdraw
+
+    /// Result of `preflightWithdrawal(accountIndex:coreFeePerByte:)`: whether an
+    /// AUTO withdrawal of the account can succeed, and — when it can — the net
+    /// credits paid out and the reserved transition fee.
+    public struct WithdrawalPreflight: Sendable {
+        /// `true` when the account can fund an AUTO withdrawal at the current
+        /// platform version; `false` for any "can't fund" case (dust-only,
+        /// largest input can't cover the fee, net below the minimum
+        /// withdrawal, too many inputs, or net above the maximum withdrawal).
+        /// The numeric fields are `0` when `false`.
+        public let canWithdraw: Bool
+        /// Net credits the chain would pay out (`Σ withdrawable inputs −
+        /// estimatedFee`). `0` when `canWithdraw == false`.
+        public let netWithdrawable: UInt64
+        /// The address-credit-withdrawal transition fee reserved on the
+        /// fee-source input. `0` when `canWithdraw == false`.
+        public let estimatedFee: UInt64
+        /// The Rust side's user-presentable explanation of *why*
+        /// `canWithdraw == false`, surfaced verbatim from the FFI result
+        /// message (`PlatformWalletError`'s `Display`). Covers both the
+        /// permanent "can't fund" cases (dust-only, fee/minimum headroom, too
+        /// many inputs, above the maximum) AND the transient "can't confirm
+        /// right now" case (the on-chain balance query failed to reach a node
+        /// or verify — retryable). `nil` when `canWithdraw == true`. This is the
+        /// single source of the reason — the UI must show it rather than
+        /// re-deriving a classification in Swift (which would mean mirroring
+        /// protocol decisions on the wrong side of the FFI boundary).
+        public let reason: String?
+    }
+
+    /// Preflight an AUTO withdrawal of a platform-payment account WITHOUT
+    /// signing, broadcasting, or consuming a Core receive address.
+    ///
+    /// This runs the **same** Rust planning phase the real `withdraw(...)` path
+    /// executes (`PlatformAddressWallet::preflight_withdrawal`): it drops
+    /// sub-`min_input_amount` dust, estimates the transition fee from the
+    /// selected input count, reserves it on the largest-balance input, and
+    /// verifies the net clears the minimum withdrawal amount. Gating a UI
+    /// submit button on `canWithdraw` keeps it in lockstep with what the spend
+    /// path will accept — a small-but-non-dust account that can't cover the fee
+    /// reports `canWithdraw == false` here instead of failing after sign.
+    ///
+    /// The fee estimate depends only on the input/output **counts**, not on any
+    /// destination script, so this needs no Core address and touches no receive
+    /// pool. It does, however, issue **one DAPI proof query**
+    /// (`AddressInfo::fetch_many`) to read the account's authoritative on-chain
+    /// balances — the SAME balances the spend path re-fetches and hard-checks —
+    /// so the gate can never approve what the spend then rejects, even when the
+    /// wallet's cached balance is stale or doubled. Because it makes a network
+    /// round trip and verifies a GroveDB proof, it **must not run on the main
+    /// actor**; this method is `async` and dispatches the FFI call onto a
+    /// detached task. Callers driving it from input changes (account/fee
+    /// selection) should cancel-and-replace any in-flight call so a slow
+    /// response for the previous input can't clobber a newer one.
+    ///
+    /// A genuine "can't fund" is a normal result (`canWithdraw == false`), NOT
+    /// a thrown error. A **transient** network / proof-verification failure is
+    /// likewise reported as `canWithdraw == false` (with the SDK error's
+    /// message as `reason`) rather than a thrown error — from the UI's
+    /// perspective it's "can't confirm right now, retry," not a broken handle.
+    /// Only a structural failure — a bad handle or a missing account at
+    /// `accountIndex` — throws.
+    ///
+    /// `coreFeePerByte` must match the rate passed to `withdraw(...)`: from
+    /// protocol version 14 the Core fee is carved out of the withdrawn amount,
+    /// so the minimum net the preflight enforces is the protocol floor plus
+    /// the Core fee at that rate. The platform-side transition fee the
+    /// preflight reserves does not depend on it.
+    public func preflightWithdrawal(
+        accountIndex: UInt32,
+        coreFeePerByte: UInt32 = 1
+    ) async throws -> WithdrawalPreflight {
+        // Pin the handle so the detached task's capture is a plain scalar
+        // (`Handle` is a raw pointer/int); the caller guarantees this
+        // `ManagedPlatformAddressWallet` outlives the awaited call.
+        let handle = self.handle
+        return try await Task.detached(priority: .userInitiated) {
+            () -> WithdrawalPreflight in
+            var out = WithdrawalPreflightFFI(
+                can_withdraw: false,
+                net_withdrawable: 0,
+                estimated_fee: 0
+            )
+            // The can-withdraw, can't-fund, and can't-confirm-right-now (transient
+            // network/proof) outcomes all return a Success-coded result; only a
+            // structural failure (bad handle / missing account) is an error code.
+            // The non-withdrawable results carry the Rust reason in `message`,
+            // which we surface verbatim as `reason`. We construct the result
+            // wrapper explicitly (rather than `.check()`) so we can read `.message`
+            // BEFORE the wrapper deinits and frees the underlying C string;
+            // `throwIfError()` still throws on the structural-failure codes.
+            let result = PlatformWalletResult(
+                platform_address_wallet_preflight_withdrawal(
+                    handle,
+                    accountIndex,
+                    coreFeePerByte,
+                    &out
+                )
+            )
+            try result.throwIfError()
+            // Read the message while the wrapper is still alive; only attach it as
+            // the reason (a `canWithdraw == true` result has no reason).
+            let reason = out.can_withdraw ? nil : result.message
+            return WithdrawalPreflight(
+                canWithdraw: out.can_withdraw,
+                netWithdrawable: out.net_withdrawable,
+                estimatedFee: out.estimated_fee,
+                reason: reason
+            )
+        }.value
+    }
+
+    /// Withdraw this platform-payment account's withdrawable credit
+    /// balance to a Core L1 address (less the transition fee).
+    ///
+    /// `AddressCreditWithdrawalTransition` has no change output, so the
+    /// on-chain fee is deducted from the inputs. We drive the Rust side
+    /// with `INPUT_SELECTION_TYPE_AUTO`, which on `accountIndex` selects
+    /// every funded address whose balance clears the per-input minimum
+    /// (sub-minimum "dust" addresses are skipped so they can't sink the
+    /// whole transition) and **owns its own fee strategy**: it picks the
+    /// largest-balance selected input as the fee source and emits the
+    /// matching `DeductFromInput(<that input's index>)`, ignoring whatever
+    /// fee strategy the caller passes. We therefore pass an empty strategy
+    /// here — anything we passed would be discarded. The auto-selector
+    /// withdraws `balance − estimated_fee` from the fee-source input and
+    /// the full balance from every other input; without that reservation a
+    /// full-balance withdraw would leave zero remaining on the fee-source
+    /// input and the chain would reject the transition with
+    /// `fee_fully_covered = false`.
+    ///
+    /// `coreAddress` is a base58 Core address (e.g. `yXV…` on testnet,
+    /// `X…` on mainnet). It is parsed **and network-checked on the
+    /// Rust side** against the wallet's own network by
+    /// `platform_address_wallet_withdraw_to_address` — a wrong-network
+    /// address fails fast with a typed error before any signing.
+    ///
+    /// `coreFeePerByte` is the Core L1 fee rate (duffs/byte) used to
+    /// size the eventual L1 payout transaction; `1` is the usual
+    /// default.
+    ///
+    /// The signer must be able to sign for the selected inputs — i.e.
+    /// the `KeychainSigner` resolves their derivation paths via
+    /// SwiftData + the wallet mnemonic (the `0xFF` branch in
+    /// `KeychainSigner.swift`). Pass `KeychainSigner(modelContainer:)`.
+    ///
+    /// Returns the per-address `UpdatedBalance`s the Rust changeset
+    /// reports (drained inputs read `0`; the fee-source input retains the
+    /// reserved-fee remainder until the chain books the fee).
+    @discardableResult
+    public func withdraw(
+        accountIndex: UInt32,
+        coreAddress: String,
+        coreFeePerByte: UInt32 = 1,
+        signer: KeychainSigner
+    ) async throws -> [UpdatedBalance] {
+        let trimmed = coreAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw PlatformWalletError.invalidParameter("coreAddress is empty")
+        }
+        // A Swift String can carry an embedded NUL that survives into the
+        // `withCString` buffer; Rust's `CStr::from_ptr(...).to_str()` stops
+        // at the first NUL, so `valid\0suffix` would withdraw to `valid`
+        // while the Swift value differs. Reject it before it can diverge.
+        guard !trimmed.utf8.contains(0) else {
+            throw PlatformWalletError.invalidParameter(
+                "coreAddress contains an embedded NUL byte"
+            )
+        }
+
+        let handle = self.handle
+        let signerHandle = signer.handle
+        let address = trimmed
+        let feePerByte = coreFeePerByte
+
+        return try await Task.detached(priority: .userInitiated) {
+            () -> [UpdatedBalance] in
+            // The AUTO path owns its own fee strategy (largest-balance
+            // input as the fee source) and ignores the caller's, so we
+            // pass an empty strategy (`nil, 0`); see this wrapper's doc
+            // comment.
+            var changeset = PlatformAddressChangeSetFFI(updated: nil, updated_count: 0)
+            // `withExtendedLifetime(signer)` pins the resolver-backed
+            // signer for the entire FFI call. Mirrors the
+            // `fundFromAssetLock` wrapper: a bare `_ = signer` can be
+            // elided by the -O optimizer and drop the signer mid-call,
+            // causing a use-after-free in the vtable callback.
+            let result = withExtendedLifetime(signer) {
+                address.withCString { addrCStr in
+                    platform_address_wallet_withdraw_to_address(
+                        handle,
+                        accountIndex,
+                        INPUT_SELECTION_TYPE_AUTO,
+                        nil,
+                        0,
+                        nil,
+                        0,
+                        addrCStr,
+                        feePerByte,
+                        nil,
+                        0,
+                        signerHandle,
+                        &changeset
+                    )
+                }
+            }
+            try result.check()
+
+            defer { platform_address_wallet_free_changeset(&changeset) }
+            return Self.decodeChangeset(&changeset)
+        }.value
+    }
+
+    /// Explicit withdrawal input for the partial-amount `withdraw` overload:
+    /// withdraw exactly `credits` from this address. The transition fee is
+    /// deducted by the chain from the address's REMAINING on-chain balance
+    /// (`balance − credits`), so the fee-source input (index 0 under the
+    /// default `DeductFromInput(0)` strategy) must keep at least the fee
+    /// after the withdrawal — an exact-balance input is rejected with
+    /// `fee_fully_covered = false`.
+    public struct WithdrawalInput: Sendable {
+        /// Must be `0` (P2PKH) — same Rust `TryFrom<PlatformAddressFFI>`
+        /// constraint as transfer inputs.
+        public let addressType: UInt8
+        /// 20-byte address hash.
+        public let hash: Data
+        /// Credits to withdraw from this address (its payout contribution).
+        public let credits: UInt64
+
+        public init(addressType: UInt8, hash: Data, credits: UInt64) {
+            self.addressType = addressType
+            self.hash = hash
+            self.credits = credits
+        }
+    }
+
+    /// Partial-amount withdrawal: pay out exactly `Σ inputs.credits` to
+    /// `coreAddress`, drawing the listed amounts from the listed addresses
+    /// (`INPUT_SELECTION_TYPE_EXPLICIT`). Unlike the AUTO overload above,
+    /// the payout equals the requested amount — the transition fee comes out
+    /// of the fee-source input's remaining balance, not the payout. The Rust
+    /// side re-fetches and hard-checks every input's on-chain balance before
+    /// signing, so a stale caller-side balance fails with a typed error
+    /// rather than a wrong-amount withdrawal.
+    ///
+    /// Same `coreAddress` parsing/network rules and signer requirements as
+    /// the AUTO overload.
+    @discardableResult
+    public func withdraw(
+        accountIndex: UInt32,
+        coreAddress: String,
+        inputs: [WithdrawalInput],
+        coreFeePerByte: UInt32 = 1,
+        signer: KeychainSigner
+    ) async throws -> [UpdatedBalance] {
+        let trimmed = coreAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw PlatformWalletError.invalidParameter("coreAddress is empty")
+        }
+        // Same embedded-NUL guard as the AUTO overload: Rust's
+        // `CStr::from_ptr(...).to_str()` stops at the first NUL, so a
+        // `valid\0suffix` value would silently withdraw to `valid`.
+        guard !trimmed.utf8.contains(0) else {
+            throw PlatformWalletError.invalidParameter(
+                "coreAddress contains an embedded NUL byte"
+            )
+        }
+        guard !inputs.isEmpty else {
+            throw PlatformWalletError.invalidParameter("inputs is empty")
+        }
+        for input in inputs {
+            guard input.addressType == 0 else {
+                throw PlatformWalletError.invalidParameter(
+                    "only P2PKH (addressType 0) withdrawal inputs are supported"
+                )
+            }
+            guard input.hash.count == 20 else {
+                throw PlatformWalletError.invalidParameter(
+                    "withdrawal input hash must be 20 bytes, got \(input.hash.count)"
+                )
+            }
+            guard input.credits > 0 else {
+                throw PlatformWalletError.invalidParameter(
+                    "withdrawal input credits must be > 0"
+                )
+            }
+        }
+
+        let handle = self.handle
+        let signerHandle = signer.handle
+        let address = trimmed
+        let feePerByte = coreFeePerByte
+        let inputRows = inputs
+
+        return try await Task.detached(priority: .userInitiated) {
+            () -> [UpdatedBalance] in
+            let ffiInputs = inputRows.map { input -> ExplicitInputFFI in
+                ExplicitInputFFI(
+                    address: PlatformAddressFFI(
+                        address_type: input.addressType,
+                        hash: Self.hashTuple(from: input.hash)
+                    ),
+                    balance: input.credits
+                )
+            }
+            var changeset = PlatformAddressChangeSetFFI(updated: nil, updated_count: 0)
+            // Fee strategy nil/0 → the Rust default `DeductFromInput(0)`:
+            // the first input is the fee source. Callers order inputs so
+            // index 0 carries the fee headroom.
+            let result = withExtendedLifetime(signer) {
+                address.withCString { addrCStr in
+                    ffiInputs.withUnsafeBufferPointer { inputBp in
+                        platform_address_wallet_withdraw_to_address(
+                            handle,
+                            accountIndex,
+                            INPUT_SELECTION_TYPE_EXPLICIT,
+                            inputBp.baseAddress,
+                            UInt(inputBp.count),
+                            nil,
+                            0,
+                            addrCStr,
+                            feePerByte,
+                            nil,
+                            0,
+                            signerHandle,
+                            &changeset
+                        )
+                    }
+                }
+            }
+            try result.check()
+
+            defer { platform_address_wallet_free_changeset(&changeset) }
+            return Self.decodeChangeset(&changeset)
+        }.value
+    }
+
     // MARK: - Fund from Core asset lock
 
-    /// Recipient entry for `fundFromAssetLock(...)`.
+    /// Recipient entry for `fundFromAssetLock(...)` and
+    /// `fundFromAssetLockExternal(...)`.
     ///
     /// Exactly one entry per call must have `credits = nil` — that
     /// address receives the remainder after explicit outputs and fees
     /// (the asset lock is consumed in full, so a remainder bucket is
     /// mandatory).
+    ///
+    /// There is deliberately no `isExternal` flag here: whether a
+    /// recipient may be a third party is decided by WHICH entry point
+    /// you call, not per row. The same convention as the shielded
+    /// funding surface, and it keeps "am I allowed to pay a stranger?"
+    /// a single, auditable decision at the call site rather than a
+    /// property buried in one element of an array.
     public struct FundFromAssetLockRecipient: Sendable {
-        /// `0 = P2PKH`, `1 = P2SH`. Mirrors the Rust-side `PlatformAddress` discriminant.
+        /// Must be `0` (P2PKH). Funding recipients flow through the same
+        /// P2PKH-only Rust `TryFrom<PlatformAddressFFI>` as transfer
+        /// inputs/outputs, so `1` (P2SH) is rejected (also enforced
+        /// up-front by `fundFromAssetLockPreflight`). The field stays
+        /// `UInt8` to mirror the Rust discriminant layout.
         public let addressType: UInt8
         /// 20-byte address hash.
         public let hash: Data
@@ -418,17 +667,22 @@ public final class ManagedPlatformAddressWallet: @unchecked Sendable {
     ///
     /// - Parameters:
     ///   - amountDuffs: Amount to lock in Core duffs.
-    ///   - fundingAccountIndex: BIP44 standard Core account whose UTXOs
-    ///     fund the asset lock. Today only BIP44 standard accounts are
-    ///     supported (CoinJoin / BIP32 not yet wired through the
-    ///     asset-lock builder).
+    ///   - fundingAccountIndex: standard-family source index — the asset
+    ///     lock POOLS the BIP44 and BIP32 accounts at that index together
+    ///     with every DashPay receiving account (change returns to BIP44);
+    ///     the index does not restrict which DashPay receiving accounts
+    ///     contribute. CoinJoin remains drain-only and separate.
     ///   - platformAccountIndex: Platform-payment account containing
     ///     `recipients`. Used for the membership pre-flight on the Rust
     ///     side and the post-success balance write.
-    ///   - recipients: Destination addresses. Exactly one must carry
+    ///   - recipients: Destination addresses, ALL of which must belong
+    ///     to `platformAccountIndex`. Exactly one must carry
     ///     `credits = nil` (remainder recipient). The Rust side
     ///     enforces both invariants and returns a typed error if
-    ///     either is violated.
+    ///     either is violated. To pay an address this wallet does not
+    ///     own, use [`fundFromAssetLockExternal`] instead — this entry
+    ///     point deliberately keeps rejecting unknown addresses so a
+    ///     typo cannot become an irreversible payment to a stranger.
     ///   - signer: `KeychainSigner` used for any input-witness
     ///     signatures on the address-funding transition. The same
     ///     wallet's `MnemonicResolver` (constructed internally) signs
@@ -444,7 +698,7 @@ public final class ManagedPlatformAddressWallet: @unchecked Sendable {
         recipients: [FundFromAssetLockRecipient],
         signer: KeychainSigner
     ) async throws -> [UpdatedBalance] {
-        try fundFromAssetLockPreflight(recipients: recipients)
+        try Self.fundFromAssetLockPreflight(recipients: recipients)
         let handle = self.handle
         let signerHandle = signer.handle
         let recipientRows = recipients
@@ -458,44 +712,25 @@ public final class ManagedPlatformAddressWallet: @unchecked Sendable {
 
         return try await Task.detached(priority: .userInitiated) {
             () -> [UpdatedBalance] in
-            let ffiAddresses = recipientRows.map { r -> FundingAddressEntryFFI in
-                FundingAddressEntryFFI(
-                    address: PlatformAddressFFI(
-                        address_type: r.addressType,
-                        hash: Self.hashTuple(from: r.hash)
-                    ),
-                    has_balance: r.credits != nil,
-                    balance: r.credits ?? 0
-                )
-            }
-            // Take the fee out of the remainder output. Today the
-            // `None` recipient is structurally the same as the
-            // "change" output on a transfer — it absorbs whatever's
-            // left after explicit outputs + fees.
-            let remainderIndex = UInt16(
-                ffiAddresses.firstIndex(where: { !$0.has_balance }) ?? 0
-            )
-            let feeRows: [FeeStrategyStepFFI] = [
-                FeeStrategyStepFFI(step_type: 1, index: remainderIndex)  // 1 = ReduceOutput
-            ]
+            let ffiAddresses = Self.marshalRecipients(recipientRows)
             var changeset = PlatformAddressChangeSetFFI(updated: nil, updated_count: 0)
             let result = withExtendedLifetime((signer, coreSigner)) {
                 ffiAddresses.withUnsafeBufferPointer { addrBp in
-                    feeRows.withUnsafeBufferPointer { feeBp in
-                        platform_address_wallet_fund_from_asset_lock_signer(
-                            handle,
-                            amountDuffs,
-                            fundingAccountIndex,
-                            platformAccountIndex,
-                            addrBp.baseAddress,
-                            UInt(addrBp.count),
-                            feeBp.baseAddress,
-                            UInt(feeBp.count),
-                            signerHandle,
-                            coreSigner.handle,
-                            &changeset
-                        )
-                    }
+                    platform_address_wallet_fund_from_asset_lock_signer(
+                        handle,
+                        amountDuffs,
+                        fundingAccountIndex,
+                        platformAccountIndex,
+                        addrBp.baseAddress,
+                        UInt(addrBp.count),
+                        // Fee strategy is derived Rust-side from the
+                        // recipient map; these parameters are ignored.
+                        nil,
+                        0,
+                        signerHandle,
+                        coreSigner.handle,
+                        &changeset
+                    )
                 }
             }
             try result.check()
@@ -537,7 +772,7 @@ public final class ManagedPlatformAddressWallet: @unchecked Sendable {
                 "outPointTxid must be exactly 32 bytes (was \(outPointTxid.count))"
             )
         }
-        try fundFromAssetLockPreflight(recipients: recipients)
+        try Self.fundFromAssetLockPreflight(recipients: recipients)
         let handle = self.handle
         let signerHandle = signer.handle
         let recipientRows = recipients
@@ -545,54 +780,28 @@ public final class ManagedPlatformAddressWallet: @unchecked Sendable {
 
         return try await Task.detached(priority: .userInitiated) {
             () -> [UpdatedBalance] in
-            var txidTuple: (
-                UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
-                UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
-                UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
-                UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8
-            ) = (
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+            var outPoint = OutPointFFI(
+                txid: Self.txidTuple(from: outPointTxid),
+                vout: outPointVout
             )
-            outPointTxid.withUnsafeBytes { src in
-                Swift.withUnsafeMutableBytes(of: &txidTuple) { dst in
-                    dst.copyMemory(from: src)
-                }
-            }
-            var outPoint = OutPointFFI(txid: txidTuple, vout: outPointVout)
-            let ffiAddresses = recipientRows.map { r -> FundingAddressEntryFFI in
-                FundingAddressEntryFFI(
-                    address: PlatformAddressFFI(
-                        address_type: r.addressType,
-                        hash: Self.hashTuple(from: r.hash)
-                    ),
-                    has_balance: r.credits != nil,
-                    balance: r.credits ?? 0
-                )
-            }
-            let remainderIndex = UInt16(
-                ffiAddresses.firstIndex(where: { !$0.has_balance }) ?? 0
-            )
-            let feeRows: [FeeStrategyStepFFI] = [
-                FeeStrategyStepFFI(step_type: 1, index: remainderIndex)  // 1 = ReduceOutput
-            ]
+            let ffiAddresses = Self.marshalRecipients(recipientRows)
             var changeset = PlatformAddressChangeSetFFI(updated: nil, updated_count: 0)
             let result = withExtendedLifetime((signer, coreSigner)) {
                 ffiAddresses.withUnsafeBufferPointer { addrBp in
-                    feeRows.withUnsafeBufferPointer { feeBp in
-                        platform_address_wallet_resume_fund_from_asset_lock_signer(
-                            handle,
-                            &outPoint,
-                            platformAccountIndex,
-                            addrBp.baseAddress,
-                            UInt(addrBp.count),
-                            feeBp.baseAddress,
-                            UInt(feeBp.count),
-                            signerHandle,
-                            coreSigner.handle,
-                            &changeset
-                        )
-                    }
+                    platform_address_wallet_resume_fund_from_asset_lock_signer(
+                        handle,
+                        &outPoint,
+                        platformAccountIndex,
+                        addrBp.baseAddress,
+                        UInt(addrBp.count),
+                        // Fee strategy is derived Rust-side from the
+                        // recipient map; these parameters are ignored.
+                        nil,
+                        0,
+                        signerHandle,
+                        coreSigner.handle,
+                        &changeset
+                    )
                 }
             }
             try result.check()
@@ -602,11 +811,253 @@ public final class ManagedPlatformAddressWallet: @unchecked Sendable {
         }.value
     }
 
+    // MARK: - Fund an external recipient from a Core asset lock
+
+    /// Pay a THIRD PARTY's platform address from a Core L1 asset lock,
+    /// keeping the remainder (change) on one of this wallet's own
+    /// addresses.
+    ///
+    /// Sibling to [`fundFromAssetLock`]: same orchestration, same
+    /// parameters, same return value. The only delta is on the Rust
+    /// side's recipient pre-flight — explicit-amount recipients may be
+    /// ANY valid P2PKH platform address, not just members of
+    /// `platformAccountIndex`.
+    ///
+    /// Externality is a property of WHICH function you call, not a flag
+    /// on `FundFromAssetLockRecipient` — the same shape the shielded
+    /// funding surface uses. Keep using [`fundFromAssetLock`] for
+    /// self-funding: there a mistyped address is rejected before
+    /// anything is broadcast, while here it is a valid and irreversible
+    /// payment to a stranger.
+    ///
+    /// - Parameters:
+    ///   - amountDuffs: Amount to lock in Core duffs.
+    ///   - fundingAccountIndex: standard-family source index — see
+    ///     [`fundFromAssetLock`].
+    ///   - platformAccountIndex: Platform-payment account that owns the
+    ///     REMAINDER recipient. Explicit-amount recipients are not
+    ///     required to belong to it.
+    ///   - recipients: Exactly one entry must carry `credits = nil` (the
+    ///     remainder, which must be an address of this wallet); at least
+    ///     one entry must carry an explicit amount, otherwise there is
+    ///     no external payment to make and [`fundFromAssetLock`] is the
+    ///     right call.
+    ///   - signer: `KeychainSigner` — see [`fundFromAssetLock`].
+    ///
+    /// Returns `[UpdatedBalance]` for the recipients that resolved to
+    /// this wallet — in practice just the remainder/change address. The
+    /// third party's output is proven and credited on Platform but has
+    /// no local row, so it does not appear here; query its balance to
+    /// observe it.
+    @discardableResult
+    public func fundFromAssetLockExternal(
+        amountDuffs: UInt64,
+        fundingAccountIndex: UInt32,
+        platformAccountIndex: UInt32,
+        recipients: [FundFromAssetLockRecipient],
+        signer: KeychainSigner
+    ) async throws -> [UpdatedBalance] {
+        try Self.fundFromAssetLockExternalPreflight(recipients: recipients)
+        let handle = self.handle
+        let signerHandle = signer.handle
+        let recipientRows = recipients
+        // Constructed on the calling actor so it lives for the entire
+        // detached Task — see `fundFromAssetLock` for why `_ = signer`
+        // is not a substitute.
+        let coreSigner = MnemonicResolver()
+
+        return try await Task.detached(priority: .userInitiated) {
+            () -> [UpdatedBalance] in
+            let ffiAddresses = Self.marshalRecipients(recipientRows)
+            var changeset = PlatformAddressChangeSetFFI(updated: nil, updated_count: 0)
+            let result = withExtendedLifetime((signer, coreSigner)) {
+                ffiAddresses.withUnsafeBufferPointer { addrBp in
+                    platform_address_wallet_fund_from_asset_lock_external_signer(
+                        handle,
+                        amountDuffs,
+                        fundingAccountIndex,
+                        platformAccountIndex,
+                        addrBp.baseAddress,
+                        UInt(addrBp.count),
+                        // Fee strategy is derived Rust-side from the
+                        // recipient map; these parameters are ignored.
+                        nil,
+                        0,
+                        signerHandle,
+                        coreSigner.handle,
+                        &changeset
+                    )
+                }
+            }
+            try result.check()
+
+            defer { platform_address_wallet_free_changeset(&changeset) }
+            return Self.decodeChangeset(&changeset)
+        }.value
+    }
+
+    /// Resume a stuck external-recipient funding flow from an
+    /// already-tracked asset lock by outpoint.
+    ///
+    /// Sibling to [`resumeFundFromAssetLock`] (same resume-by-outpoint
+    /// shape) and to [`fundFromAssetLockExternal`] (same relaxed
+    /// recipient rules).
+    ///
+    /// The recipients are a PARAMETER, not something recovered from the
+    /// tracked lock: Rust never learns the destination of an
+    /// address-funding asset lock — it only tracks the L1 outpoint, its
+    /// status and its proof. The host is responsible for round-tripping
+    /// the intended recipient, which is what
+    /// `PersistentAssetLock.recipientPlatformAddressHash` /
+    /// `.recipientIsExternal` record. Resuming with a different
+    /// recipient set pays the new set; the asset lock is a bearer input,
+    /// not a commitment to a destination.
+    ///
+    /// - Parameters:
+    ///   - outPointTxid: 32-byte raw txid (little-endian wire order) —
+    ///     see [`resumeFundFromAssetLock`].
+    ///   - outPointVout: Funding output index.
+    @discardableResult
+    public func resumeFundFromAssetLockExternal(
+        outPointTxid: Data,
+        outPointVout: UInt32,
+        platformAccountIndex: UInt32,
+        recipients: [FundFromAssetLockRecipient],
+        signer: KeychainSigner
+    ) async throws -> [UpdatedBalance] {
+        guard outPointTxid.count == 32 else {
+            throw PlatformWalletError.invalidParameter(
+                "outPointTxid must be exactly 32 bytes (was \(outPointTxid.count))"
+            )
+        }
+        try Self.fundFromAssetLockExternalPreflight(recipients: recipients)
+        let handle = self.handle
+        let signerHandle = signer.handle
+        let recipientRows = recipients
+        let coreSigner = MnemonicResolver()
+
+        return try await Task.detached(priority: .userInitiated) {
+            () -> [UpdatedBalance] in
+            var outPoint = OutPointFFI(
+                txid: Self.txidTuple(from: outPointTxid),
+                vout: outPointVout
+            )
+            let ffiAddresses = Self.marshalRecipients(recipientRows)
+            var changeset = PlatformAddressChangeSetFFI(updated: nil, updated_count: 0)
+            let result = withExtendedLifetime((signer, coreSigner)) {
+                ffiAddresses.withUnsafeBufferPointer { addrBp in
+                    platform_address_wallet_resume_fund_from_asset_lock_external_signer(
+                        handle,
+                        &outPoint,
+                        platformAccountIndex,
+                        addrBp.baseAddress,
+                        UInt(addrBp.count),
+                        // Fee strategy is derived Rust-side from the
+                        // recipient map; these parameters are ignored.
+                        nil,
+                        0,
+                        signerHandle,
+                        coreSigner.handle,
+                        &changeset
+                    )
+                }
+            }
+            try result.check()
+
+            defer { platform_address_wallet_free_changeset(&changeset) }
+            return Self.decodeChangeset(&changeset)
+        }.value
+    }
+
+    /// Marshal recipients into the FFI address array.
+    ///
+    /// Pure marshalling: one `FundingAddressEntryFFI` per recipient, in
+    /// whatever order the caller supplied. The Rust side collects them
+    /// into a `BTreeMap<PlatformAddress, Option<Credits>>`, so the
+    /// caller's ordering carries no meaning — it is a set.
+    ///
+    /// In particular, Swift does NOT compute the fee strategy. The
+    /// `ReduceOutput(index)` step that names the fee-paying output is
+    /// positional against that map's lexicographic key order, which is
+    /// a consensus rule
+    /// (`deduct_fee_from_outputs_or_remaining_balance_of_inputs`); it is
+    /// derived in `platform-wallet` (`remainder_fee_strategy`) so that
+    /// every binding gets the same answer without reimplementing
+    /// `PlatformAddress`'s `Ord`.
+    static func marshalRecipients(
+        _ recipients: [FundFromAssetLockRecipient]
+    ) -> [FundingAddressEntryFFI] {
+        recipients.map { r -> FundingAddressEntryFFI in
+            FundingAddressEntryFFI(
+                address: PlatformAddressFFI(
+                    address_type: r.addressType,
+                    hash: Self.hashTuple(from: r.hash)
+                ),
+                has_balance: r.credits != nil,
+                balance: r.credits ?? 0
+            )
+        }
+    }
+
+    /// Copy a 32-byte txid `Data` into the C tuple `OutPointFFI` wants.
+    private static func txidTuple(
+        from data: Data
+    ) -> (
+        UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
+        UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
+        UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
+        UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8
+    ) {
+        var tuple: (
+            UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
+            UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
+            UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
+            UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8
+        ) = (
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+        )
+        data.withUnsafeBytes { src in
+            Swift.withUnsafeMutableBytes(of: &tuple) { dst in
+                dst.copyMemory(from: src)
+            }
+        }
+        return tuple
+    }
+
+    /// Pre-flight for the external-recipient entry points.
+    ///
+    /// Sibling to [`fundFromAssetLockPreflight`]: every rule there still
+    /// applies verbatim — exactly one remainder, P2PKH only (address
+    /// type `0`), 20-byte hashes. Third-party explicit-amount
+    /// recipients were already permitted by those rules, because
+    /// ownership is not something Swift can check: only the Rust side
+    /// knows which addresses belong to `platformAccountIndex`, and it
+    /// enforces the remaining rule (the remainder must be ours) in
+    /// `fund_from_asset_lock_external`.
+    ///
+    /// The one rule this ADDS: at least one explicit-amount recipient.
+    /// A call with nothing but a remainder makes no external payment at
+    /// all, so it is a caller mistake — [`fundFromAssetLock`] is the
+    /// entry point for pure self-funding, and it validates the
+    /// destination properly.
+    static func fundFromAssetLockExternalPreflight(
+        recipients: [FundFromAssetLockRecipient]
+    ) throws {
+        try Self.fundFromAssetLockPreflight(recipients: recipients)
+        guard recipients.contains(where: { $0.credits != nil }) else {
+            throw PlatformWalletError.invalidParameter(
+                "fundFromAssetLockExternal requires at least one explicit-amount recipient; "
+                    + "a remainder-only request funds nothing externally — use fundFromAssetLock"
+            )
+        }
+    }
+
     /// Validate the recipient list before the FFI sees it. The Rust
     /// side enforces the same invariants — we duplicate them here so
     /// the user gets a synchronous error before paying for the Task
     /// detach + handle marshaling.
-    private func fundFromAssetLockPreflight(
+    static func fundFromAssetLockPreflight(
         recipients: [FundFromAssetLockRecipient]
     ) throws {
         guard !recipients.isEmpty else {
@@ -621,11 +1072,11 @@ public final class ManagedPlatformAddressWallet: @unchecked Sendable {
         for r in recipients {
             // The Rust FFI accepts only addressType == 0 (P2PKH) — see
             // `impl TryFrom<PlatformAddressFFI> for PlatformAddress` in
-            // packages/rs-platform-wallet-ffi/src/platform_address_types.rs.
-            // Catch the P2SH discriminant the type signature still
-            // documents so the caller gets a synchronous, type-specific
+            // packages/rs-platform-wallet-ffi/src/platform_address_types.rs,
+            // which rejects P2SH with a type-specific message. Catch the
+            // P2SH discriminant here too so the caller gets a synchronous
             // error instead of paying for the Task detach + signer pin
-            // and then receiving a generic FFI failure.
+            // and then receiving the same rejection from Rust.
             guard r.addressType == 0 else {
                 throw PlatformWalletError.invalidParameter(
                     "FundFromAssetLockRecipient.addressType must be 0 (P2PKH) for platform-address funding (got \(r.addressType))"

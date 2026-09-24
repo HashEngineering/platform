@@ -28,11 +28,7 @@ pub fn create_channel(
         .with_webpki_roots()
         .assume_http2(true);
 
-
-
-    // Try to add native roots - this may fail on iOS/Android, which is fine since we have
-    // webpki roots. Android has no native trust store where tonic/rustls looks, so calling
-    // with_native_roots() there yields NativeCertsNotFound and panics in tls_config() below.
+    // Try to add native roots - this may fail on iOS/Android, which is fine since we have webpki roots
     #[cfg(not(any(
         target_os = "ios",
         target_os = "tvos",

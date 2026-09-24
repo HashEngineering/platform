@@ -1,7 +1,10 @@
 use crate::error::Error;
 use crate::execution::types::execution_event::ExecutionEvent;
-use crate::execution::validation::state_transition::transformer::StateTransitionActionTransformer;
+use crate::execution::validation::state_transition::transformer::StateTransitionSignerAwareActionTransformer;
+use crate::execution::validation::state_transition::shield_from_asset_lock::StateTransitionShieldFromAssetLockTransitionActionTransformer;
+use crate::execution::validation::state_transition::shield_from_identity::StateTransitionShieldFromIdentityTransitionActionTransformer;
 use crate::platform_types::platform::PlatformRef;
+use crate::platform_types::check_tx_proof_verifier::CheckTxProofVerifier;
 use crate::platform_types::platform_state::PlatformStateV0Methods;
 use crate::rpc::core::CoreRPCLike;
 use dpp::identity::state_transition::OptionallyAssetLockProved;
@@ -16,7 +19,10 @@ use crate::execution::check_tx::CheckTxLevel;
 use crate::execution::types::state_transition_execution_context::StateTransitionExecutionContext;
 use crate::execution::validation::state_transition::common::asset_lock::proof::verify_is_not_spent::AssetLockProofVerifyIsNotSpent;
 use crate::execution::validation::state_transition::processor::address_witnesses::{StateTransitionAddressWitnessValidationV0, StateTransitionHasAddressWitnessValidationV0};
-use crate::execution::validation::state_transition::processor::traits::shielded_proof::{StateTransitionHasShieldedProofValidationV0, StateTransitionShieldedMinimumFeeValidationV0, StateTransitionShieldedProofValidationV0};
+use crate::execution::validation::state_transition::processor::traits::shielded_proof::{
+    StateTransitionHasShieldedProofValidationV0,
+    StateTransitionShieldedMinimumFeeValidationV0, StateTransitionShieldedProofValidationV0,
+};
 use crate::execution::validation::state_transition::processor::addresses_minimum_balance::StateTransitionAddressesMinimumBalanceValidationV0;
 use crate::execution::validation::state_transition::processor::advanced_structure_with_state::StateTransitionStructureKnownInStateValidationV0;
 use crate::execution::validation::state_transition::processor::basic_structure::StateTransitionBasicStructureValidationV0;
@@ -27,14 +33,78 @@ use crate::execution::validation::state_transition::processor::is_allowed::State
 use crate::execution::validation::state_transition::processor::state::StateTransitionStateValidation;
 use crate::execution::validation::state_transition::ValidationMode;
 use crate::execution::validation::state_transition::processor::traits::address_balances_and_nonces::StateTransitionAddressBalancesAndNoncesValidation;
+use crate::execution::validation::state_transition::batch::BatchTransitionCheckTxStateValidatingTransformer;
+use drive::state_transition_action::StateTransitionAction;
+use std::collections::BTreeMap;
+use dpp::address_funds::PlatformAddress;
+use dpp::fee::Credits;
+use dpp::identity::PartialIdentity;
+use dpp::prelude::AddressNonce;
+
+#[allow(clippy::too_many_arguments)]
+fn transform_into_action_for_check_tx<C: CoreRPCLike>(
+    state_transition: &StateTransition,
+    platform: &PlatformRef<C>,
+    remaining_address_balances: &Option<BTreeMap<PlatformAddress, (AddressNonce, Credits)>>,
+    signer_identity: Option<&PartialIdentity>,
+    validation_mode: ValidationMode,
+    // Whether a batch is validated against the state as a block would, which the validation
+    // mode of check tx leaves to the block (see `relies_on_gas_sponsor_to_pay`)
+    validate_batch_against_state: bool,
+    execution_context: &mut StateTransitionExecutionContext,
+    proof_verifier: &CheckTxProofVerifier,
+) -> Result<ConsensusValidationResult<StateTransitionAction>, Error> {
+    match state_transition {
+        StateTransition::Batch(transition) if validate_batch_against_state => transition
+            .transform_into_action_validating_against_state_for_check_tx(
+                platform,
+                platform.state.last_block_info(),
+                signer_identity,
+                validation_mode,
+                execution_context,
+                None,
+            ),
+        StateTransition::ShieldFromAssetLock(transition) => transition
+            .transform_into_action_for_shield_from_asset_lock_transition(
+                platform,
+                state_transition.signable_bytes()?,
+                validation_mode,
+                platform.state.last_block_info(),
+                execution_context,
+                Some(proof_verifier),
+                None,
+            ),
+        // Same shape as ShieldFromAssetLock: the proof is verified inside the transform so
+        // block processing can turn a failure into a paid penalty; CheckTx passes its
+        // admission budget and rejects on failure.
+        StateTransition::ShieldFromIdentity(transition) => transition
+            .transform_into_action_for_shield_from_identity_transition(
+                platform,
+                platform.state.last_block_info(),
+                execution_context,
+                Some(proof_verifier),
+                None,
+            ),
+        _ => state_transition.transform_into_action_for_signer(
+            platform,
+            platform.state.last_block_info(),
+            remaining_address_balances,
+            signer_identity,
+            validation_mode,
+            execution_context,
+            None,
+        ),
+    }
+}
 
 /// Changes the state transition to the execution event.
 /// As this is for check tx it normally does not need to be versioned.
 /// We keep the version here just in case for a future radical change.
 pub(super) fn state_transition_to_execution_event_for_check_tx_v0<'a, C: CoreRPCLike>(
     platform: &'a PlatformRef<C>,
-    state_transition: StateTransition,
+    state_transition: &StateTransition,
     check_tx_level: CheckTxLevel,
+    proof_verifier: &CheckTxProofVerifier,
     platform_version: &PlatformVersion,
 ) -> Result<ConsensusValidationResult<Option<ExecutionEvent<'a>>>, Error> {
     // we need to validate the structure, the fees, and the signature
@@ -148,19 +218,6 @@ pub(super) fn state_transition_to_execution_event_for_check_tx_v0<'a, C: CoreRPC
                 }
             }
 
-            // Verify ZK proof for shielded transitions (stateless, like signature verification).
-            // This happens before any state reads to reject invalid proofs cheaply.
-            if state_transition.has_shielded_proof_validation() {
-                let result = state_transition.validate_shielded_proof(platform_version)?;
-                if !result.is_valid() {
-                    return Ok(
-                        ConsensusValidationResult::<Option<ExecutionEvent>>::new_with_errors(
-                            result.errors,
-                        ),
-                    );
-                }
-            }
-
             // Only identity create does not use identity in state validation, because it doesn't yet have the identity in state
             let mut maybe_identity = if state_transition.uses_identity_in_state() {
                 // Validating signature for identity based state transitions (all those except identity create and identity top up)
@@ -224,6 +281,18 @@ pub(super) fn state_transition_to_execution_event_for_check_tx_v0<'a, C: CoreRPC
                 }
             }
 
+            // A signer who got through the pre-check on a request for gas sponsorship alone
+            // could not pay for a failed batch, and a failed batch is never sponsored. Such a
+            // batch is validated like a block would, state included, so that what a proposer
+            // would execute for free never reaches the mempool. The validation mode stays
+            // `CheckTx`: it names where validation runs, not how deep it goes.
+            let relies_on_gas_sponsor_to_pay = match maybe_identity.as_ref() {
+                Some(identity) => {
+                    state_transition.relies_on_gas_sponsor_to_pay(identity, platform_version)?
+                }
+                None => false,
+            };
+
             // For address-based state transitions that transfer or withdraw, we have a balance pre-check
             // that validates addresses have enough remaining balance after the input amounts to cover fees.
             if state_transition.has_addresses_minimum_balance_pre_check_validation() {
@@ -253,13 +322,15 @@ pub(super) fn state_transition_to_execution_event_for_check_tx_v0<'a, C: CoreRPC
             let action = if state_transition
                 .requires_advanced_structure_validation_with_state_on_check_tx()
             {
-                let state_transition_action_result = state_transition.transform_into_action(
+                let state_transition_action_result = transform_into_action_for_check_tx(
+                    state_transition,
                     platform,
-                    platform.state.last_block_info(),
                     &remaining_address_balances,
+                    maybe_identity.as_ref(),
                     ValidationMode::CheckTx,
+                    relies_on_gas_sponsor_to_pay,
                     &mut state_transition_execution_context,
-                    None,
+                    proof_verifier,
                 )?;
                 if !state_transition_action_result.is_valid_with_data() {
                     return Ok(
@@ -292,7 +363,9 @@ pub(super) fn state_transition_to_execution_event_for_check_tx_v0<'a, C: CoreRPC
                 None
             };
 
-            let action = if state_transition.validates_full_state_on_check_tx() {
+            let action = if state_transition.validates_full_state_on_check_tx()
+                || relies_on_gas_sponsor_to_pay
+            {
                 // Validating structure
                 let result = state_transition.validate_state(
                     action,
@@ -318,13 +391,15 @@ pub(super) fn state_transition_to_execution_event_for_check_tx_v0<'a, C: CoreRPC
             let action = if let Some(action) = action {
                 action
             } else {
-                let state_transition_action_result = state_transition.transform_into_action(
+                let state_transition_action_result = transform_into_action_for_check_tx(
+                    state_transition,
                     platform,
-                    platform.state.last_block_info(),
                     &remaining_address_balances,
+                    maybe_identity.as_ref(),
                     ValidationMode::CheckTx,
+                    relies_on_gas_sponsor_to_pay,
                     &mut state_transition_execution_context,
-                    None,
+                    proof_verifier,
                 )?;
                 if !state_transition_action_result.is_valid_with_data() {
                     return Ok(
@@ -335,6 +410,29 @@ pub(super) fn state_transition_to_execution_event_for_check_tx_v0<'a, C: CoreRPC
                 }
                 state_transition_action_result.into_data()?
             };
+
+            // ShieldFromIdentity is deferred until the caller has performed
+            // authoritative execution-event fee admission. Other shielded
+            // transitions retain their existing proof-validation order.
+            if state_transition.has_shielded_proof_validation()
+                && state_transition
+                    .shielded_proof_identity_nonce_admission_key()
+                    .is_none()
+            {
+                let _permit = proof_verifier
+                    .try_acquire(state_transition.shielded_proof_action_count())
+                    .ok_or(Error::Execution(
+                        ExecutionError::CheckTxProofVerificationBusy,
+                    ))?;
+                let result = state_transition.validate_shielded_proof(platform_version)?;
+                if !result.is_valid() {
+                    return Ok(
+                        ConsensusValidationResult::<Option<ExecutionEvent>>::new_with_errors(
+                            result.errors,
+                        ),
+                    );
+                }
+            }
 
             let execution_event = ExecutionEvent::create_from_state_transition_action(
                 action,
@@ -418,24 +516,6 @@ pub(super) fn state_transition_to_execution_event_for_check_tx_v0<'a, C: CoreRPC
                     }
                 }
 
-                let state_transition_action_result = state_transition.transform_into_action(
-                    platform,
-                    platform.state.last_block_info(),
-                    &remaining_address_balances,
-                    ValidationMode::RecheckTx,
-                    &mut state_transition_execution_context,
-                    None,
-                )?;
-
-                if !state_transition_action_result.is_valid_with_data() {
-                    return Ok(
-                        ConsensusValidationResult::<Option<ExecutionEvent>>::new_with_errors(
-                            state_transition_action_result.errors,
-                        ),
-                    );
-                }
-                let action = state_transition_action_result.into_data()?;
-
                 let maybe_identity = if state_transition.uses_identity_in_state() {
                     if let Some(owner_id) = state_transition.owner_id() {
                         platform.drive.fetch_identity_with_balance(
@@ -449,6 +529,75 @@ pub(super) fn state_transition_to_execution_event_for_check_tx_v0<'a, C: CoreRPC
                 } else {
                     None
                 };
+
+                // What the first time check decided for a signer who relies on a gas sponsor
+                // holds on every recheck: the tokens or the state the batch depends on may have
+                // been spent since it was admitted, and nobody could be charged for its failure,
+                // so its state is validated in full again.
+                let relies_on_gas_sponsor_to_pay = match maybe_identity.as_ref() {
+                    Some(identity) => {
+                        state_transition.relies_on_gas_sponsor_to_pay(identity, platform_version)?
+                    }
+                    None => false,
+                };
+                let state_transition_action_result = transform_into_action_for_check_tx(
+                    state_transition,
+                    platform,
+                    &remaining_address_balances,
+                    // A recheck does not run advanced structure validation, the only consumer
+                    // of what the transformer resolves for the signer, and loads no signer keys.
+                    None,
+                    ValidationMode::RecheckTx,
+                    relies_on_gas_sponsor_to_pay,
+                    &mut state_transition_execution_context,
+                    proof_verifier,
+                )?;
+
+                if !state_transition_action_result.is_valid_with_data() {
+                    return Ok(
+                        ConsensusValidationResult::<Option<ExecutionEvent>>::new_with_errors(
+                            state_transition_action_result.errors,
+                        ),
+                    );
+                }
+                let action = state_transition_action_result.into_data()?;
+
+                let action = if relies_on_gas_sponsor_to_pay {
+                    let result = state_transition.validate_state(
+                        Some(action),
+                        platform,
+                        ValidationMode::RecheckTx,
+                        platform.state.last_block_info(),
+                        &mut state_transition_execution_context,
+                        None,
+                    )?;
+
+                    if !result.is_valid() {
+                        return Ok(
+                            ConsensusValidationResult::<Option<ExecutionEvent>>::new_with_errors(
+                                result.errors,
+                            ),
+                        );
+                    }
+                    result.into_data()?
+                } else {
+                    action
+                };
+
+                // Advanced structure validation judged the action fee agreements of a batch on
+                // the first check only. The amounts its contracts declare and the epoch's fee
+                // multiplier can move while it waits, and a block would refuse it; the
+                // transformer read both again, so the agreements are judged again off the
+                // action, and a batch that no longer covers them leaves the mempool.
+                if let StateTransitionAction::BatchAction(batch_action) = &action {
+                    if let Err(error) = batch_action.validate_action_fee_agreements()? {
+                        return Ok(
+                            ConsensusValidationResult::<Option<ExecutionEvent>>::new_with_errors(
+                                vec![error],
+                            ),
+                        );
+                    }
+                }
 
                 let execution_event = ExecutionEvent::create_from_state_transition_action(
                     action,
@@ -475,6 +624,10 @@ pub(super) fn state_transition_to_execution_event_for_check_tx_v0<'a, C: CoreRPC
 mod tests {
     use super::*;
     use crate::execution::check_tx::CheckTxLevel;
+    use crate::execution::validation::state_transition::state_transitions::test_helpers::{
+        create_dummy_serialized_action, insert_anchor_into_state, set_pool_total_balance,
+        setup_platform,
+    };
     use crate::execution::validation::state_transition::state_transitions::tests::setup_identity;
     use crate::platform_types::platform::PlatformRef;
     use crate::platform_types::platform_state::PlatformStateV0Methods;
@@ -491,6 +644,8 @@ mod tests {
     use dpp::serialization::PlatformSerializable;
     use dpp::state_transition::data_contract_create_transition::methods::DataContractCreateTransitionMethodsV0;
     use dpp::state_transition::data_contract_create_transition::DataContractCreateTransition;
+    use dpp::state_transition::shielded_transfer_transition::v0::ShieldedTransferTransitionV0;
+    use dpp::state_transition::shielded_transfer_transition::ShieldedTransferTransition;
     use dpp::tests::json_document::json_document_to_contract_with_ids;
     use dpp::version::DefaultForPlatformVersion;
     use platform_version::version::PlatformVersion;
@@ -543,6 +698,71 @@ mod tests {
     mod first_time_check {
         use super::*;
 
+        fn shielded_transfer_with_dummy_proof(anchor: [u8; 32]) -> StateTransition {
+            let fee = dpp::shielded::compute_minimum_shielded_fee(1, PlatformVersion::latest())
+                .expect("minimum shielded fee");
+
+            StateTransition::ShieldedTransfer(ShieldedTransferTransition::V0(
+                ShieldedTransferTransitionV0 {
+                    actions: vec![create_dummy_serialized_action()],
+                    value_balance: fee,
+                    anchor,
+                    proof: vec![0; 100],
+                    binding_signature: [0; 64],
+                },
+            ))
+        }
+
+        #[test]
+        fn shielded_state_admission_precedes_proof_capacity() {
+            let platform_version = PlatformVersion::latest();
+            let platform = setup_platform();
+            set_pool_total_balance(&platform, 1_000_000_000);
+
+            let verifier = CheckTxProofVerifier::new(1);
+            let _held_permit = verifier.try_acquire(1).expect("held test permit");
+
+            let platform_state = platform.state.load();
+            let platform_ref = PlatformRef {
+                drive: &platform.drive,
+                state: &platform_state,
+                config: &platform.config,
+                core_rpc: &platform.core_rpc,
+            };
+
+            let missing_anchor = [42; 32];
+            let result = state_transition_to_execution_event_for_check_tx_v0(
+                &platform_ref,
+                &shielded_transfer_with_dummy_proof(missing_anchor),
+                CheckTxLevel::FirstTimeCheck,
+                &verifier,
+                platform_version,
+            )
+            .expect("state rejection must occur before proof admission");
+
+            assert!(result.errors.iter().any(|error| matches!(
+                error,
+                ConsensusError::StateError(StateError::InvalidAnchorError(_))
+            )));
+
+            insert_anchor_into_state(&platform, &missing_anchor);
+            let error = match state_transition_to_execution_event_for_check_tx_v0(
+                &platform_ref,
+                &shielded_transfer_with_dummy_proof(missing_anchor),
+                CheckTxLevel::FirstTimeCheck,
+                &verifier,
+                platform_version,
+            ) {
+                Err(error) => error,
+                Ok(_) => panic!("admissible proof work must fail fast when capacity is occupied"),
+            };
+
+            assert!(matches!(
+                error,
+                Error::Execution(ExecutionError::CheckTxProofVerificationBusy)
+            ));
+        }
+
         #[tokio::test]
         async fn should_return_valid_result_for_data_contract_create() {
             let platform_version = PlatformVersion::latest();
@@ -559,8 +779,9 @@ mod tests {
 
             let result = state_transition_to_execution_event_for_check_tx_v0(
                 &platform_ref,
-                state_transition,
+                &state_transition,
                 CheckTxLevel::FirstTimeCheck,
+                &platform.check_tx_proof_verifier,
                 platform_version,
             );
 
@@ -593,8 +814,9 @@ mod tests {
 
             let result = state_transition_to_execution_event_for_check_tx_v0(
                 &platform_ref,
-                state_transition,
+                &state_transition,
                 CheckTxLevel::FirstTimeCheck,
+                &platform.check_tx_proof_verifier,
                 platform_version,
             );
 
@@ -659,8 +881,9 @@ mod tests {
 
             let result = state_transition_to_execution_event_for_check_tx_v0(
                 &platform_ref,
-                state_transition,
+                &state_transition,
                 CheckTxLevel::FirstTimeCheck,
+                &platform.check_tx_proof_verifier,
                 platform_version,
             );
 
@@ -726,8 +949,9 @@ mod tests {
 
             let result = state_transition_to_execution_event_for_check_tx_v0(
                 &platform_ref,
-                state_transition,
+                &state_transition,
                 CheckTxLevel::FirstTimeCheck,
+                &platform.check_tx_proof_verifier,
                 platform_version,
             );
 
@@ -794,8 +1018,9 @@ mod tests {
 
             let result = state_transition_to_execution_event_for_check_tx_v0(
                 &platform_ref,
-                state_transition,
+                &state_transition,
                 CheckTxLevel::FirstTimeCheck,
+                &platform.check_tx_proof_verifier,
                 platform_version,
             );
 
@@ -837,8 +1062,9 @@ mod tests {
             // goes through the non-asset-lock recheck path
             let result = state_transition_to_execution_event_for_check_tx_v0(
                 &platform_ref,
-                state_transition,
+                &state_transition,
                 CheckTxLevel::Recheck,
+                &platform.check_tx_proof_verifier,
                 platform_version,
             );
 
@@ -899,8 +1125,9 @@ mod tests {
 
             let result = state_transition_to_execution_event_for_check_tx_v0(
                 &platform_ref,
-                state_transition,
+                &state_transition,
                 CheckTxLevel::Recheck,
+                &platform.check_tx_proof_verifier,
                 platform_version,
             );
 

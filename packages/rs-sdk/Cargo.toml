@@ -18,13 +18,14 @@ drive = { path = "../rs-drive", default-features = false, features = [
 ] }
 
 drive-proof-verifier = { path = "../rs-drive-proof-verifier", default-features = false }
-grovedb-commitment-tree = { git = "https://github.com/dashpay/grovedb", tag = "v5.0.0", features = [
+grovedb-commitment-tree = { workspace = true, features = [
   "client",
   "sqlite",
 ], optional = true }
 dash-async = { path = "../rs-dash-async" }
 dash-context-provider = { path = "../rs-context-provider", default-features = false }
 dash-platform-macros = { path = "../rs-dash-platform-macros" }
+dash-platform-queries = { path = "../dash-platform-queries" }
 platform-encryption = { path = "../rs-platform-encryption" }
 http = { version = "1.1" }
 ciborium = { version = "0.2.2" }
@@ -61,7 +62,7 @@ drive-proof-verifier = { path = "../rs-drive-proof-verifier" }
 rs-sdk-trusted-context-provider = { path = "../rs-sdk-trusted-context-provider" }
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread"] }
 base64 = { version = "0.22.1" }
-tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "registry"] }
 dpp = { path = "../rs-dpp", default-features = false, features = [
   "client",
   "validation",
@@ -92,6 +93,7 @@ spv-client = [
 mocks = [
   "dep:serde",
   "dep:serde_json",
+  "dash-platform-queries/mocks",
   "rs-dapi-client/mocks",
   "rs-dapi-client/dump",
   "dpp/document-cbor-conversion",
@@ -143,6 +145,9 @@ dashpay-contract = ["dpp/dashpay-contract"]
 wallet-utils-contract = ["dpp/wallet-utils-contract"]
 token-history-contract = ["dpp/token-history-contract"]
 keywords-contract = ["dpp/keywords-contract"]
+document-history-contract = ["dpp/document-history-contract"]
+app-connect-contract = ["dpp/app-connect-contract"]
+moderation-charters-contract = ["dpp/moderation-charters-contract"]
 
 token_reward_explanations = ["dpp/token-reward-explanations"]
 

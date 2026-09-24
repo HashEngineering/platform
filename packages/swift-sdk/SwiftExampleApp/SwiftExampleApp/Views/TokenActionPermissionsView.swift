@@ -457,7 +457,8 @@ enum TokenActionResolver {
             ))
         }
 
-        // Claim — perpetual / pre-programmed distribution.
+        // Claim: perpetual / pre-programmed / once-per-identity
+        // distribution.
         // Visibility rule from the prompt:
         //   * If `mintingAllowChoosingDestination == false` AND identity is
         //     not the designated `newTokensDestinationIdentity` -> hide.
@@ -565,11 +566,131 @@ enum TokenActionResolver {
         return permission
     }
 
-    private static func resolveClaim(
+    /// Whether `identity` is the recipient the contract pinned for newly
+    /// minted tokens, which is what makes a perpetual payout land on it.
+    static func isPinnedDistributionRecipient(
+        token: PersistentToken,
+        identity: PersistentIdentity
+    ) -> Bool {
+        token.newTokensDestinationIdentity == identity.identityId
+    }
+
+    /// Whether `identity` is named in any of the token's pre-programmed
+    /// payout events.
+    static func isPreProgrammedRecipient(
+        token: PersistentToken,
+        identity: PersistentIdentity
+    ) -> Bool {
+        guard let schedule = token.preProgrammedDistribution?.distributionSchedule else {
+            return false
+        }
+        let identityBase58 = identity.identityIdBase58
+        return schedule.contains { $0.recipient == identityBase58 }
+    }
+
+    /// Whether the token has a once-per-identity distribution that
+    /// `identity` has not been seen to claim yet.
+    ///
+    /// Eligibility for the kind itself is universal: it pays a fixed amount
+    /// to every identity, so there is no recipient list to match and no
+    /// designated-recipient guard to apply. The single claim is the whole
+    /// limit, and once it is taken Drive rejects the next attempt with a
+    /// paid error, so `claims` subtracts the ones this app knows about.
+    static func canClaimOncePerIdentity(
+        token: PersistentToken,
+        identity: PersistentIdentity,
+        claims: OncePerIdentityClaimReading = OncePerIdentityClaimStore.shared
+    ) -> Bool {
+        guard token.oncePerIdentityDistribution != nil else { return false }
+        return !claims.hasClaimed(token: token, identity: identity)
+    }
+
+    /// The distribution kinds this identity could actually claim, in Drive's
+    /// claim order (perpetual, then pre-programmed, then once-per-identity).
+    ///
+    /// A kind the token declares is not a kind this identity can claim: a
+    /// perpetual payout goes to the contract's pinned recipient and a
+    /// pre-programmed one to the identities its schedule names, so offering
+    /// either to anyone else buys a rejection at the user's expense. The
+    /// list is therefore what the token declares narrowed by who is asking,
+    /// and it is empty when the answer is "nothing".
+    ///
+    /// Shares its eligibility rules with `resolveClaim` so what the claim row
+    /// allows and what the form offers cannot drift apart.
+    static func claimableDistributions(
+        token: PersistentToken,
+        identity: PersistentIdentity,
+        claims: OncePerIdentityClaimReading = OncePerIdentityClaimStore.shared
+    ) -> [TokenDistributionType] {
+        var claimable: [TokenDistributionType] = []
+        if token.perpetualDistribution != nil,
+           isPinnedDistributionRecipient(token: token, identity: identity) {
+            claimable.append(.perpetual)
+        }
+        if token.preProgrammedDistribution != nil,
+           isPreProgrammedRecipient(token: token, identity: identity) {
+            claimable.append(.preProgrammed)
+        }
+        if canClaimOncePerIdentity(token: token, identity: identity, claims: claims) {
+            claimable.append(.oncePerIdentity)
+        }
+        return claimable
+    }
+
+    /// Which distribution kind a claim form should start on for this
+    /// identity, or nil when there is nothing it could claim.
+    ///
+    /// The first kind in `claimableDistributions`, so the form starts on the
+    /// one Drive would settle first among those the identity is eligible
+    /// for. Preselecting a kind on eligibility the identity does not have
+    /// costs a real fee: a stranger to a token with an owner-paid perpetual
+    /// distribution plus a once-per-identity one would otherwise open the
+    /// form on Perpetual and have Drive reject the claim as the wrong
+    /// claimant.
+    static func preferredClaimDistribution(
+        token: PersistentToken,
+        identity: PersistentIdentity,
+        claims: OncePerIdentityClaimReading = OncePerIdentityClaimStore.shared
+    ) -> TokenDistributionType? {
+        claimableDistributions(token: token, identity: identity, claims: claims).first
+    }
+
+    static func resolveClaim(
+        token: PersistentToken,
+        identity: PersistentIdentity,
+        claims: OncePerIdentityClaimReading = OncePerIdentityClaimStore.shared
+    ) -> TokenActionPermission {
+        let hasOncePerIdentity = token.oncePerIdentityDistribution != nil
+        let columnBacked = resolveColumnBackedClaim(token: token, identity: identity)
+
+        // A kind the identity is eligible for through the token's own
+        // recipient rules wins: it stays claimable however many times the
+        // once-per-identity claim has been taken.
+        if case .allowed = columnBacked {
+            return .allowed
+        }
+
+        if canClaimOncePerIdentity(token: token, identity: identity, claims: claims) {
+            return .allowed
+        }
+        if hasOncePerIdentity {
+            // The once-per-identity kind was the only thing that would have
+            // let this identity claim, and it is spent. Say so instead of
+            // falling through to a perpetual/pre-programmed reason that
+            // describes a different kind.
+            return .denied(reason: "Already claimed the once-per-identity distribution")
+        }
+        return columnBacked
+    }
+
+    /// The claim rules for the two kinds stored on the token row. Split out
+    /// so `resolveClaim` can fold the derived once-per-identity kind around
+    /// them without restating them.
+    private static func resolveColumnBackedClaim(
         token: PersistentToken,
         identity: PersistentIdentity
     ) -> TokenActionPermission {
-        let isDesignated = token.newTokensDestinationIdentity == identity.identityId
+        let isDesignated = isPinnedDistributionRecipient(token: token, identity: identity)
         let allowsChoosing = token.mintingAllowChoosingDestination
         let hasPerpetual = token.perpetualDistribution != nil
         let hasPreProgrammed = token.preProgrammedDistribution != nil
@@ -589,6 +710,22 @@ enum TokenActionResolver {
             return .denied(reason: "Token has no distribution schedule")
         }
 
+        // Pre-programmed distributions pin their payouts to explicit
+        // recipient identities at each scheduled timestamp rather than
+        // to `newTokensDestinationIdentity` / `mintingAllowChoosingDestination`
+        // (both of which are minting-side concepts). Check recipient
+        // membership BEFORE the designated-recipient guards below, so a
+        // listed pre-programmed recipient isn't denied for not being the
+        // pinned mint destination. If this identity appears as a
+        // recipient in any scheduled event, let the Claim row open.
+        // We deliberately do NOT evaluate maturity or already-claimed
+        // status here — those are enforced on-chain by Drive when the
+        // claim state transition is submitted. Mirrors the Android fix
+        // in `TokenActionResolver.resolveClaim`.
+        if isPreProgrammedRecipient(token: token, identity: identity) {
+            return .allowed
+        }
+
         // The contract doesn't let identities choose where new
         // mints go AND this identity isn't the pinned recipient,
         // so they'd never receive anything to claim.
@@ -601,8 +738,9 @@ enum TokenActionResolver {
         }
 
         // Allowed-to-choose-destination but not yet computed who's
-        // next-in-line for a perpetual slot. Surface the limitation
-        // rather than blocking outright.
+        // next-in-line for a perpetual slot, and not a listed
+        // pre-programmed recipient. Surface the limitation rather than
+        // blocking outright.
         // TODO: query the next-in-line distribution slot for this identity.
         return .denied(reason: "Distribution eligibility not yet evaluated")
     }
@@ -620,18 +758,15 @@ enum TokenActionResolver {
         if token.isPaused {
             return .denied(reason: "Token is paused")
         }
-        // Wave 1: PersistentToken doesn't carry the configured purchase
-        // price. `TokenPurchaseActionView.priceKnown` is hard-coded
-        // `false` until that field lands, so the Buy button is *always*
-        // disabled — routing the user to a permanently-broken screen
-        // is dishonest. Deny here with the same reason the action view
-        // shows. When the price field lands on PersistentToken, this
-        // becomes a real conditional check; until then it short-circuits.
-        // TODO: surface direct-purchase price on PersistentToken and
-        // gate this row on it (and pre-fill the form's total cost).
+        // The token has direct-purchase pricing rules and isn't paused, so
+        // the row is tappable. `TokenPurchaseActionView` fetches the
+        // configured price on appear (`getTokenDirectPurchasePrices`) and
+        // computes the buyer's total cost client-side — including the
+        // "no price configured" case — so the price no longer needs to be
+        // pre-resolved here to keep the user off a broken screen.
         _ = identity
         _ = contract
-        return .denied(reason: "Direct-purchase price not available locally yet")
+        return .allowed
     }
 }
 

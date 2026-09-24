@@ -1,12 +1,18 @@
+use crate::identity::contract_bounds::ContractBounds;
 use crate::identity::IdentityPublicKey;
 #[cfg(feature = "json-conversion")]
 use crate::serialization::JsonConvertible;
 #[cfg(feature = "value-conversion")]
 use crate::serialization::ValueConvertible;
+use crate::state_transition::public_key_in_creation::accessors::{
+    IdentityPublicKeyInCreationV0Getters, IdentityPublicKeyInCreationV1Getters,
+};
 use crate::state_transition::public_key_in_creation::v0::IdentityPublicKeyInCreationV0;
 use crate::state_transition::public_key_in_creation::v0::IdentityPublicKeyInCreationV0Signable;
+use crate::state_transition::public_key_in_creation::v1::IdentityPublicKeyInCreationV1;
+use crate::state_transition::public_key_in_creation::v1::IdentityPublicKeyInCreationV1Signable;
 use crate::ProtocolError;
-use bincode::{Decode, Encode};
+use bincode::{Decode, DecodeUntrusted, Encode};
 use derive_more::From;
 use platform_serialization_derive::PlatformSignable;
 
@@ -16,20 +22,17 @@ use serde::{Deserialize, Serialize};
 
 pub mod accessors;
 mod fields;
-#[cfg(feature = "json-conversion")]
-mod json_conversion;
 mod methods;
 mod types;
 pub mod v0;
-#[cfg(feature = "value-conversion")]
-mod value_conversion;
+pub mod v1;
 mod version;
 
 #[cfg_attr(
     all(feature = "json-conversion", feature = "serde-conversion"),
     derive(JsonConvertible)
 )]
-#[derive(Debug, Encode, Decode, PlatformSignable, Clone, PartialEq, Eq, From)]
+#[derive(Debug, Encode, Decode, PlatformSignable, Clone, PartialEq, Eq, From, DecodeUntrusted)]
 //here we want to indicate that IdentityPublicKeyInCreation can be transformed into IdentityPublicKeyInCreationSignable
 #[platform_signable(derive_into)]
 #[cfg_attr(
@@ -41,6 +44,9 @@ mod version;
 pub enum IdentityPublicKeyInCreation {
     #[cfg_attr(feature = "serde-conversion", serde(rename = "0"))]
     V0(IdentityPublicKeyInCreationV0),
+    /// A key in creation that may carry a budget and an expiry, from protocol version 14
+    #[cfg_attr(feature = "serde-conversion", serde(rename = "1"))]
+    V1(IdentityPublicKeyInCreationV1),
 }
 
 impl IdentityPublicKeyInCreation {
@@ -58,12 +64,38 @@ impl IdentityPublicKeyInCreation {
             }),
         }
     }
+
+    /// The first of `keys` bound to a contract group, if any. A transition carrying such a key
+    /// is active from protocol version 14, and an identity created from the shielded pool
+    /// cannot register one.
+    pub fn first_bound_to_a_contract_group(keys: &[Self]) -> Option<&Self> {
+        keys.iter().find(|key| {
+            key.contract_bounds()
+                .and_then(ContractBounds::contract_group_id)
+                .is_some()
+        })
+    }
+
+    /// The first of `keys` in the version 1 format, the one that can carry a budget or an
+    /// expiry, if any. A transition carrying such a key is active from protocol version 14,
+    /// whether or not the key has limits: a binary from before cannot decode the format.
+    pub fn first_in_version_1_format(keys: &[Self]) -> Option<&Self> {
+        keys.iter()
+            .find(|key| matches!(key, IdentityPublicKeyInCreation::V1(_)))
+    }
+
+    /// The first of `keys` that carries a budget or an expiry, if any. An identity created from
+    /// the shielded pool cannot register one; a version 1 key without limits is fine there.
+    pub fn first_with_limits(keys: &[Self]) -> Option<&Self> {
+        keys.iter().find(|key| key.has_limits())
+    }
 }
 
 impl From<&IdentityPublicKeyInCreation> for IdentityPublicKey {
     fn from(val: &IdentityPublicKeyInCreation) -> Self {
         match val {
             IdentityPublicKeyInCreation::V0(v0) => v0.into(),
+            IdentityPublicKeyInCreation::V1(v1) => v1.into(),
         }
     }
 }
@@ -72,18 +104,14 @@ impl From<IdentityPublicKeyInCreation> for IdentityPublicKey {
     fn from(val: IdentityPublicKeyInCreation) -> Self {
         match val {
             IdentityPublicKeyInCreation::V0(v0) => v0.into(),
+            IdentityPublicKeyInCreation::V1(v1) => v1.into(),
         }
     }
 }
 
 impl From<IdentityPublicKey> for IdentityPublicKeyInCreation {
     fn from(val: IdentityPublicKey) -> Self {
-        match val {
-            IdentityPublicKey::V0(_) => {
-                let v0: IdentityPublicKeyInCreationV0 = val.into();
-                v0.into()
-            }
-        }
+        (&val).into()
     }
 }
 
@@ -94,6 +122,8 @@ impl From<&IdentityPublicKey> for IdentityPublicKeyInCreation {
                 let v0: IdentityPublicKeyInCreationV0 = val.into();
                 v0.into()
             }
+            // The limits are part of what the identity signs, so they follow the key.
+            IdentityPublicKey::V1(v1) => IdentityPublicKeyInCreationV1::from(v1).into(),
         }
     }
 }
@@ -103,7 +133,9 @@ mod test {
     use super::*;
     use crate::identity::identity_public_key::accessors::v0::IdentityPublicKeyGettersV0;
     use crate::identity::{KeyType, Purpose, SecurityLevel};
-    use crate::state_transition::public_key_in_creation::accessors::IdentityPublicKeyInCreationV0Getters;
+    use crate::state_transition::public_key_in_creation::accessors::{
+        IdentityPublicKeyInCreationV0Getters, IdentityPublicKeyInCreationV1Getters,
+    };
     use crate::state_transition::public_key_in_creation::methods::IdentityPublicKeyInCreationMethodsV0;
     use crate::version::LATEST_PLATFORM_VERSION;
     use platform_value::BinaryData;
@@ -151,9 +183,7 @@ mod test {
     fn test_default_versioned() {
         let key = IdentityPublicKeyInCreation::default_versioned(LATEST_PLATFORM_VERSION)
             .expect("should create default");
-        match key {
-            IdentityPublicKeyInCreation::V0(_) => {}
-        }
+        assert!(matches!(key, IdentityPublicKeyInCreation::V0(_)));
     }
 
     #[test]
@@ -178,6 +208,35 @@ mod test {
         let pk: IdentityPublicKey = key.clone().into();
         let back: IdentityPublicKeyInCreation = (&pk).into();
         assert_eq!(back.id(), key.id());
+    }
+
+    /// The limits are part of what the identity signs, so a V1 key (one carrying a budget or an
+    /// expiry) must become a V1 key in creation with the limits intact, and a V0 key must stay V0
+    /// so identities that do not use limits keep their historical bytes.
+    #[test]
+    fn test_from_identity_public_key_keeps_limits() {
+        let plain: IdentityPublicKey = make_high_key(5).into();
+        let plain_in_creation = IdentityPublicKeyInCreation::from(&plain);
+        assert!(matches!(
+            plain_in_creation,
+            IdentityPublicKeyInCreation::V0(_)
+        ));
+        assert!(!plain_in_creation.has_limits());
+
+        for (total_budget, expires_at) in [
+            (Some(10_000_000_000), None),
+            (None, Some(1_800_000_000_000)),
+            (Some(10_000_000_000), Some(1_800_000_000_000)),
+        ] {
+            let limited = plain.clone().with_limits(total_budget, expires_at);
+            assert!(matches!(limited, IdentityPublicKey::V1(_)));
+
+            let in_creation = IdentityPublicKeyInCreation::from(&limited);
+            assert!(matches!(in_creation, IdentityPublicKeyInCreation::V1(_)));
+            assert_eq!(in_creation.total_budget(), total_budget);
+            assert_eq!(in_creation.expires_at(), expires_at);
+            assert_eq!(IdentityPublicKey::from(in_creation), limited);
+        }
     }
 
     #[test]
@@ -380,78 +439,11 @@ mod test {
         assert_eq!(hash.len(), 20);
     }
 
-    #[test]
-    fn test_value_conversion_roundtrip() {
-        use crate::state_transition::StateTransitionValueConvert;
-        let key = make_master_key(0);
-        let v = StateTransitionValueConvert::to_object(&key, false).expect("to_object");
-        assert!(v.is_map());
-        let restored = <IdentityPublicKeyInCreation as StateTransitionValueConvert>::from_object(
-            v,
-            LATEST_PLATFORM_VERSION,
-        )
-        .expect("from_object");
-        assert_eq!(key, restored);
-    }
-
-    #[test]
-    fn test_value_conversion_unknown_version() {
-        use crate::state_transition::StateTransitionValueConvert;
-        use platform_value::Value;
-        let v = Value::from([("$version", Value::U16(255))]);
-        let result = <IdentityPublicKeyInCreation as StateTransitionValueConvert>::from_object(
-            v,
-            LATEST_PLATFORM_VERSION,
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_clean_value_unknown_version() {
-        use crate::state_transition::StateTransitionValueConvert;
-        use platform_value::Value;
-        let mut v = Value::from([("$version", Value::U8(255))]);
-        let result =
-            <IdentityPublicKeyInCreation as StateTransitionValueConvert>::clean_value(&mut v);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_to_canonical_object_inserts_version() {
-        use crate::state_transition::StateTransitionValueConvert;
-        let key = make_master_key(0);
-        let v = StateTransitionValueConvert::to_canonical_object(&key, false)
-            .expect("to_canonical_object");
-        let map = v
-            .into_btree_string_map()
-            .expect("canonical object should be a map");
-        assert!(map.contains_key("$version"));
-    }
-
-    #[test]
-    fn test_to_canonical_cleaned_object_inserts_version() {
-        use crate::state_transition::StateTransitionValueConvert;
-        let key = make_master_key(0);
-        let v = StateTransitionValueConvert::to_canonical_cleaned_object(&key, false)
-            .expect("to_canonical_cleaned_object");
-        let map = v.into_btree_string_map().expect("should be a map");
-        assert!(map.contains_key("$version"));
-    }
-
-    #[test]
-    fn test_from_value_map_roundtrip() {
-        use crate::state_transition::StateTransitionValueConvert;
-        let key = make_master_key(0);
-        let v = StateTransitionValueConvert::to_object(&key, false).expect("to_object");
-        let map = v.into_btree_string_map().expect("should be a map");
-        let restored =
-            <IdentityPublicKeyInCreation as StateTransitionValueConvert>::from_value_map(
-                map,
-                LATEST_PLATFORM_VERSION,
-            )
-            .expect("from_value_map");
-        assert_eq!(key, restored);
-    }
+    // Legacy `StateTransitionValueConvert` round-trip / canonical /
+    // unknown-version tests deleted in Phase D step 9. The canonical
+    // `JsonConvertible` / `ValueConvertible` round-trip is exercised on
+    // the outer enum derive (see `json_convertible_tests` below) — these
+    // tested methods that no longer exist.
 
     #[test]
     fn test_default_versioned_unknown() {
@@ -482,5 +474,85 @@ mod test {
             IdentityPublicKeyInCreation::duplicated_keys_witness(&keys, LATEST_PLATFORM_VERSION)
                 .expect("witness");
         assert_eq!(dup_ids.len(), 1, "one duplicate expected");
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "json-conversion",
+    feature = "value-conversion",
+    feature = "serde-conversion"
+))]
+mod json_convertible_tests {
+    use super::*;
+
+    use crate::identity::{KeyType, Purpose, SecurityLevel};
+    use platform_value::{platform_value, BinaryData};
+    use serde_json::json;
+
+    fn fixture() -> IdentityPublicKeyInCreation {
+        IdentityPublicKeyInCreation::V0(IdentityPublicKeyInCreationV0 {
+            id: 7,
+            key_type: KeyType::ECDSA_SECP256K1,
+            purpose: Purpose::AUTHENTICATION,
+            security_level: SecurityLevel::HIGH,
+            contract_bounds: None,
+            read_only: true,
+            data: BinaryData::new(vec![0x88; 33]),
+            signature: BinaryData::new(vec![0x99; 65]),
+        })
+    }
+
+    #[test]
+    fn json_round_trip_with_full_wire_shape() {
+        use crate::serialization::JsonConvertible;
+        let original = fixture();
+        let json = original.to_json().expect("to_json");
+        // Sized-int fields whose JSON wire encoding loses size info:
+        // `id` (u32 KeyID), `type`/`purpose`/`securityLevel` (u8 repr enums).
+        // The value-path assertion below uses explicit suffixes for size lock-in.
+        // Note `key_type` is renamed to `"type"` in the wire shape.
+        // `securityLevel` = 2 because `SecurityLevel::HIGH as u8 == 2`.
+        assert_eq!(
+            json,
+            json!({
+                "$formatVersion": "0",
+                "id": 7,
+                "type": 0,
+                "purpose": 0,
+                "securityLevel": 2,
+                "contractBounds": serde_json::Value::Null,
+                "readOnly": true,
+                "data": "iIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI",
+                "signature": "mZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZk=",
+            })
+        );
+        let recovered = IdentityPublicKeyInCreation::from_json(json).expect("from_json");
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn value_round_trip_with_full_wire_shape() {
+        use crate::serialization::ValueConvertible;
+        let original = fixture();
+        let value = original.to_object().expect("to_object");
+        // Explicit suffixes lock in sized variants: `id` u32 (KeyID),
+        // `type`/`purpose`/`securityLevel` u8 (#[repr(u8)] enums).
+        assert_eq!(
+            value,
+            platform_value!({
+                "$formatVersion": "0",
+                "id": 7u32,
+                "type": 0u8,
+                "purpose": 0u8,
+                "securityLevel": 2u8,
+                "contractBounds": platform_value::Value::Null,
+                "readOnly": true,
+                "data": BinaryData::new(vec![0x88; 33]),
+                "signature": BinaryData::new(vec![0x99; 65]),
+            })
+        );
+        let recovered = IdentityPublicKeyInCreation::from_object(value).expect("from_object");
+        assert_eq!(original, recovered);
     }
 }

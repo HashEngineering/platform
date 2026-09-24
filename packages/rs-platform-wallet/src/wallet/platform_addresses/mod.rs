@@ -45,7 +45,10 @@ where
 pub use provider::{
     PerAccountPlatformAddressState, PerWalletPlatformAddressState, PlatformAddressTag,
 };
+#[cfg(feature = "shielded")]
+pub(crate) use wallet::merge_platform_payment_candidate_addresses;
 pub use wallet::PlatformAddressWallet;
+pub use withdrawal::WithdrawalPlan;
 
 /// Specifies how input addresses are selected for a transaction.
 pub enum InputSelection {

@@ -1,4 +1,5 @@
 use dash_sdk::dpp::ProtocolError;
+use dash_sdk::platform::encrypted_for::EncryptedForError;
 use dash_sdk::{error::StateTransitionBroadcastError, Error as SdkError};
 use rs_dapi_client::CanRetry;
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -15,6 +16,7 @@ pub enum WasmSdkErrorKind {
     Protocol,
     Proof,
     InvalidProvedResponse,
+    ExecutionNotProved,
     DapiClientError,
     DapiMocksError,
     CoreError,
@@ -44,6 +46,13 @@ pub enum WasmSdkErrorKind {
     /// (vs `Generic`) to detect "the API exists but execution waits
     /// on a follow-up" without parsing the message.
     NotImplemented,
+    /// An `encryptedFor` property did not decrypt: the keys are not the ones it was encrypted
+    /// with, or the bytes are corrupt.
+    DecryptionFailed,
+    /// No key of an identity can serve as the recipient or sender key of an `encryptedFor`
+    /// property: none meets the schema's `keyRequirements`, or the private key given is not
+    /// one of the identity's keys.
+    EncryptionKeyNotFound,
 }
 
 /// Structured error surfaced to JS consumers
@@ -120,6 +129,15 @@ impl WasmSdkError {
     }
 }
 
+impl From<dash_sdk::dash_platform_queries::Error> for WasmSdkError {
+    fn from(err: dash_sdk::dash_platform_queries::Error) -> Self {
+        // Route through the SDK's own conversion so the transport-free query
+        // core's errors keep the exact mapping they had when they were
+        // `SdkError` variants.
+        SdkError::from(err).into()
+    }
+}
+
 impl From<SdkError> for WasmSdkError {
     fn from(err: SdkError) -> Self {
         use SdkError::*;
@@ -136,6 +154,11 @@ impl From<SdkError> for WasmSdkError {
             ),
             Protocol(e) => Self::new(WasmSdkErrorKind::Protocol, e.to_string(), None, retriable),
             Proof(e) => Self::new(WasmSdkErrorKind::Proof, e.to_string(), None, retriable),
+            // Deterministic for a given transition family: retrying another
+            // node cannot upgrade a snapshot into execution evidence.
+            ExecutionNotProved(msg) => {
+                Self::new(WasmSdkErrorKind::ExecutionNotProved, msg, None, false)
+            }
             InvalidProvedResponse(msg) => Self::new(
                 WasmSdkErrorKind::InvalidProvedResponse,
                 msg,
@@ -233,7 +256,19 @@ impl From<SdkError> for WasmSdkError {
                 None,
                 retriable,
             ),
+            EncryptedFor(e) => e.into(),
         }
+    }
+}
+
+impl From<EncryptedForError> for WasmSdkError {
+    fn from(err: EncryptedForError) -> Self {
+        let kind = match err {
+            EncryptedForError::DecryptionFailed => WasmSdkErrorKind::DecryptionFailed,
+            EncryptedForError::NoSuitableKey { .. } => WasmSdkErrorKind::EncryptionKeyNotFound,
+            _ => WasmSdkErrorKind::InvalidArgument,
+        };
+        Self::new(kind, err.to_string(), None, false)
     }
 }
 impl From<ProtocolError> for WasmSdkError {
@@ -287,6 +322,7 @@ impl WasmSdkError {
             K::Protocol => "Protocol",
             K::Proof => "Proof",
             K::InvalidProvedResponse => "InvalidProvedResponse",
+            K::ExecutionNotProved => "ExecutionNotProved",
             K::DapiClientError => "DapiClientError",
             K::DapiMocksError => "DapiMocksError",
             K::CoreError => "CoreError",
@@ -310,6 +346,8 @@ impl WasmSdkError {
             K::SerializationError => "SerializationError",
             K::NotFound => "NotFound",
             K::NotImplemented => "NotImplemented",
+            K::DecryptionFailed => "DecryptionFailed",
+            K::EncryptionKeyNotFound => "EncryptionKeyNotFound",
         }
         .to_string()
     }

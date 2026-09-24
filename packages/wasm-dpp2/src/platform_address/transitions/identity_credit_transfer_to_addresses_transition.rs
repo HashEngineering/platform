@@ -1,6 +1,6 @@
 use crate::error::{WasmDppError, WasmDppResult};
 use crate::identifier::{IdentifierLikeJs, IdentifierWasm};
-use crate::impl_wasm_conversions_serde;
+use crate::impl_wasm_conversions_inner;
 use crate::impl_wasm_type_info;
 use crate::platform_address::{
     PlatformAddressOutputWasm, outputs_from_js_options, outputs_to_btree_map,
@@ -11,7 +11,7 @@ use dpp::platform_value::BinaryData;
 use dpp::platform_value::string_encoding::Encoding::{Base64, Hex};
 use dpp::platform_value::string_encoding::{decode, encode};
 use dpp::prelude::UserFeeIncrease;
-use dpp::serialization::{PlatformDeserializable, PlatformSerializable};
+use dpp::serialization::{PlatformDeserializableUntrusted, PlatformSerializable};
 use dpp::state_transition::identity_credit_transfer_to_addresses_transition::IdentityCreditTransferToAddressesTransition;
 use dpp::state_transition::identity_credit_transfer_to_addresses_transition::accessors::IdentityCreditTransferToAddressesTransitionAccessorsV0;
 use dpp::state_transition::identity_credit_transfer_to_addresses_transition::v0::IdentityCreditTransferToAddressesTransitionV0;
@@ -133,7 +133,9 @@ impl IdentityCreditTransferToAddressesTransitionWasm {
         bytes: Vec<u8>,
     ) -> WasmDppResult<IdentityCreditTransferToAddressesTransitionWasm> {
         let rs_transition =
-            IdentityCreditTransferToAddressesTransition::deserialize_from_bytes(bytes.as_slice())?;
+            IdentityCreditTransferToAddressesTransition::deserialize_from_bytes_untrusted(
+                bytes.as_slice(),
+            )?;
 
         Ok(IdentityCreditTransferToAddressesTransitionWasm(
             rs_transition,
@@ -262,8 +264,9 @@ impl IdentityCreditTransferToAddressesTransitionWasm {
     }
 }
 
-impl_wasm_conversions_serde!(
+impl_wasm_conversions_inner!(
     IdentityCreditTransferToAddressesTransitionWasm,
+    IdentityCreditTransferToAddressesTransition,
     IdentityCreditTransferToAddresses,
     IdentityCreditTransferToAddressesObjectJs,
     IdentityCreditTransferToAddressesJSONJs

@@ -2,7 +2,7 @@ use derive_more::{Display, From};
 #[cfg(feature = "serde-conversion")]
 use serde::{Deserialize, Serialize};
 use platform_value::Identifier;
-use bincode::{Encode, Decode};
+use bincode::{Encode, Decode, DecodeUntrusted};
 use platform_version::version::PlatformVersion;
 use crate::balances::credits::TokenAmount;
 use crate::block::block_info::BlockInfo;
@@ -11,6 +11,7 @@ use crate::data_contract::associated_token::token_configuration::accessors::v0::
 use crate::data_contract::associated_token::token_configuration::TokenConfiguration;
 use crate::data_contract::associated_token::token_distribution_key::{TokenDistributionType, TokenDistributionTypeWithResolvedRecipient};
 use crate::data_contract::associated_token::token_distribution_rules::accessors::v0::TokenDistributionRulesV0Getters;
+use crate::data_contract::associated_token::token_distribution_rules::accessors::v1::TokenDistributionRulesV1Getters;
 use crate::data_contract::associated_token::token_perpetual_distribution::distribution_recipient::{TokenDistributionRecipient, TokenDistributionResolvedRecipient};
 use crate::data_contract::associated_token::token_perpetual_distribution::methods::v0::TokenPerpetualDistributionV0Accessors;
 use crate::data_contract::DataContract;
@@ -45,8 +46,17 @@ pub const TOKEN_HISTORY_ID_BYTES: [u8; 32] = [
     187, 110, 233, 128, 63, 48, 172, 29, 210, 108,
 ];
 
-#[derive(Debug, Clone, Encode, Decode, From, PartialEq, Display)]
-#[cfg_attr(feature = "serde-conversion", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, Encode, Decode, From, PartialEq, Display, DecodeUntrusted)]
+#[cfg_attr(
+    feature = "serde-conversion",
+    derive(Serialize, Deserialize),
+    // System-field discriminator `$action` — see note on `DocumentTransition`
+    // for why we don't use `$type` here. Token transitions don't actually
+    // collide on `$type` (their base struct has no `$type` field), but
+    // staying on `$action` keeps both umbrellas symmetric so consumers can
+    // discriminate inner shape with the same key regardless of `$transition`.
+    serde(tag = "$action", rename_all = "camelCase")
+)]
 pub enum TokenTransition {
     #[display("TokenBurnTransition({})", "_0")]
     Burn(TokenBurnTransition),
@@ -80,6 +90,159 @@ pub enum TokenTransition {
 
     #[display("TokenSetPriceForDirectPurchaseTransition({})", "_0")]
     SetPriceForDirectPurchase(TokenSetPriceForDirectPurchaseTransition),
+}
+
+#[cfg(all(feature = "json-conversion", feature = "serde-conversion"))]
+impl crate::serialization::JsonConvertible for TokenTransition {}
+
+#[cfg(all(feature = "value-conversion", feature = "serde-conversion"))]
+impl crate::serialization::ValueConvertible for TokenTransition {}
+
+#[cfg(all(
+    test,
+    feature = "json-conversion",
+    feature = "value-conversion",
+    feature = "serde-conversion"
+))]
+pub(crate) mod json_convertible_tests {
+    use super::*;
+    use crate::state_transition::batch_transition::batched_transition::{
+        token_burn_transition, token_claim_transition, token_config_update_transition,
+        token_destroy_frozen_funds_transition, token_direct_purchase_transition,
+        token_emergency_action_transition, token_freeze_transition, token_mint_transition,
+        token_set_price_for_direct_purchase_transition, token_transfer_transition,
+        token_unfreeze_transition,
+    };
+
+    /// Wrapping helper — drives a single `TokenTransition::*` variant through
+    /// JSON and Value round-trips and asserts the outer wire shape carries
+    /// `"$type": <variantName>` with the inner-leaf fields merged in (internally
+    /// tagged). Each leaf already has its own per-property assertion test.
+    fn assert_umbrella_round_trip(transition: TokenTransition, expected_type: &str) {
+        use crate::serialization::{JsonConvertible, ValueConvertible};
+
+        let json = transition.to_json().expect("to_json");
+        let json_obj = json.as_object().expect("json object");
+        assert_eq!(
+            json_obj.get("$action").and_then(|v| v.as_str()),
+            Some(expected_type),
+            "json `type` discriminator mismatch"
+        );
+        let recovered_json = TokenTransition::from_json(json).expect("from_json");
+        assert_eq!(transition, recovered_json);
+
+        let value = transition.to_object().expect("to_object");
+        let value_map = value.as_map().expect("value map");
+        let type_kv = value_map
+            .iter()
+            .find(|(k, _)| matches!(k, platform_value::Value::Text(s) if s == "$action"))
+            .expect("type key present");
+        assert_eq!(
+            type_kv.1,
+            platform_value::Value::Text(expected_type.to_string()),
+            "value `type` discriminator mismatch"
+        );
+        let recovered_value = TokenTransition::from_object(value).expect("from_object");
+        assert_eq!(transition, recovered_value);
+    }
+
+    #[test]
+    fn umbrella_burn() {
+        assert_umbrella_round_trip(
+            TokenTransition::Burn(token_burn_transition::json_convertible_tests::fixture()),
+            "burn",
+        );
+    }
+
+    #[test]
+    fn umbrella_mint() {
+        assert_umbrella_round_trip(
+            TokenTransition::Mint(token_mint_transition::json_convertible_tests::fixture()),
+            "mint",
+        );
+    }
+
+    #[test]
+    fn umbrella_transfer() {
+        assert_umbrella_round_trip(
+            TokenTransition::Transfer(token_transfer_transition::json_convertible_tests::fixture()),
+            "transfer",
+        );
+    }
+
+    #[test]
+    fn umbrella_freeze() {
+        assert_umbrella_round_trip(
+            TokenTransition::Freeze(token_freeze_transition::json_convertible_tests::fixture()),
+            "freeze",
+        );
+    }
+
+    #[test]
+    fn umbrella_unfreeze() {
+        assert_umbrella_round_trip(
+            TokenTransition::Unfreeze(token_unfreeze_transition::json_convertible_tests::fixture()),
+            "unfreeze",
+        );
+    }
+
+    #[test]
+    fn umbrella_destroy_frozen_funds() {
+        assert_umbrella_round_trip(
+            TokenTransition::DestroyFrozenFunds(
+                token_destroy_frozen_funds_transition::json_convertible_tests::fixture(),
+            ),
+            "destroyFrozenFunds",
+        );
+    }
+
+    #[test]
+    fn umbrella_claim() {
+        assert_umbrella_round_trip(
+            TokenTransition::Claim(token_claim_transition::json_convertible_tests::fixture()),
+            "claim",
+        );
+    }
+
+    #[test]
+    fn umbrella_emergency_action() {
+        assert_umbrella_round_trip(
+            TokenTransition::EmergencyAction(
+                token_emergency_action_transition::json_convertible_tests::fixture(),
+            ),
+            "emergencyAction",
+        );
+    }
+
+    #[test]
+    fn umbrella_config_update() {
+        assert_umbrella_round_trip(
+            TokenTransition::ConfigUpdate(
+                token_config_update_transition::json_convertible_tests::fixture(),
+            ),
+            "configUpdate",
+        );
+    }
+
+    #[test]
+    fn umbrella_direct_purchase() {
+        assert_umbrella_round_trip(
+            TokenTransition::DirectPurchase(
+                token_direct_purchase_transition::json_convertible_tests::fixture(),
+            ),
+            "directPurchase",
+        );
+    }
+
+    #[test]
+    fn umbrella_set_price_for_direct_purchase() {
+        assert_umbrella_round_trip(
+            TokenTransition::SetPriceForDirectPurchase(
+                token_set_price_for_direct_purchase_transition::json_convertible_tests::fixture(),
+            ),
+            "setPriceForDirectPurchase",
+        );
+    }
 }
 
 impl BatchTransitionResolversV0 for TokenTransition {
@@ -482,6 +645,15 @@ impl TokenTransitionV0Methods for TokenTransition {
                             }
                         };
                         TokenDistributionTypeWithResolvedRecipient::Perpetual(recipient)
+                    }
+                    TokenDistributionType::OncePerIdentity => {
+                        if distribution_rules
+                            .once_per_identity_distribution()
+                            .is_none()
+                        {
+                            return Err(ProtocolError::NotSupported("Token claiming of once per identity distribution is not supported on this token".to_string()));
+                        }
+                        TokenDistributionTypeWithResolvedRecipient::OncePerIdentity(owner_id)
                     }
                 };
 

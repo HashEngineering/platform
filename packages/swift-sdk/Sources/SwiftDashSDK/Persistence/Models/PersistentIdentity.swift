@@ -13,6 +13,27 @@ public final class PersistentIdentity {
     @Attribute(.unique) public var identityId: Data
     public var balance: Int64
     public var revision: Int64
+    /// `true` iff this identity is YOURS or deliberately tracked on
+    /// this device, two ways in:
+    /// - wallet-derived: identities of a wallet on this device are
+    ///   ALWAYS local — the persister promotes the flag when it
+    ///   attaches the `wallet` relationship, and the startup heal
+    ///   repairs rows persisted before that rule existed;
+    /// - manually added: the user loaded/watched the identity via a
+    ///   UI flow (LoadIdentityView by id/name), which marks its own
+    ///   row (the initializer default `true` matches — a directly
+    ///   constructed row is a manual add).
+    ///
+    /// `false` only for incidental rows — observed foreign
+    /// identities materialized by sync that nobody asked to track.
+    /// The flag is PROMOTE-ONLY: no sync path ever writes `false`
+    /// over a `true` (a manual mark must survive Platform data
+    /// flowing over the row, and losing a wallet link doesn't
+    /// un-track an identity).
+    ///
+    /// It makes no claim about signing capability — compute that
+    /// live where needed; wallet-owned filtering has
+    /// `walletOwnedIdentitiesPredicate`.
     public var isLocal: Bool
     public var alias: String?
     /// User's chosen primary display label (the one rendered on
@@ -84,14 +105,13 @@ public final class PersistentIdentity {
     @Relationship(deleteRule: .cascade, inverse: \PersistentDocument.ownerIdentity) public var documents: [PersistentDocument]
     @Relationship(deleteRule: .nullify) public var tokenBalances: [PersistentTokenBalance]
 
-    /// Confirmed DPNS labels owned by this identity. Cascade-deleted
-    /// from the parent — losing the identity row drops the label
-    /// cache too. Append-only on the write path: the changeset's
-    /// merge policy never removes labels (DPNS doesn't expose a
-    /// user-driven "delete name" today), so the persister callback
-    /// only inserts new rows, never removes them. Predicates filter
-    /// by the denormalized `PersistentDPNSName.identityId` column,
-    /// not through this collection — see
+    /// Confirmed DPNS labels observed for this identity. Cascade-deleted from
+    /// the parent — losing the identity row drops the label cache and retained
+    /// marketplace history too. A name that leaves this wallet remains related
+    /// to its departed identity for history with
+    /// `PersistentDPNSName.isOwned == false`. A transfer to another identity in
+    /// the same wallet instead rebinds the schema's single unique-name row to
+    /// the current owner. Owned-name surfaces use
     /// `PersistentDPNSName.predicate(identityId:)`.
     @Relationship(deleteRule: .cascade, inverse: \PersistentDPNSName.identity)
     public var dpnsNames: [PersistentDPNSName] = []
@@ -117,6 +137,37 @@ public final class PersistentIdentity {
     /// and tombstones (`removed_sent` / `removed_incoming`) directly.
     @Relationship(deleteRule: .cascade, inverse: \PersistentDashpayContactRequest.owner)
     public var contactRequests: [PersistentDashpayContactRequest] = []
+
+    /// DashPay payment-history rows owned by this identity.
+    /// Cascade-deleted from the parent. Same
+    /// query-by-denormalized-id pattern as `contactRequests`: filters
+    /// use `PersistentDashpayPayment.predicate(ownerIdentityId:)`
+    /// rather than walking this collection from a SwiftUI view.
+    /// Populated by `PlatformWalletManager.refreshDashPayPayments`
+    /// (FFI getter → upsert), not by the persister callback.
+    @Relationship(deleteRule: .cascade, inverse: \PersistentDashpayPayment.owner)
+    public var dashpayPayments: [PersistentDashpayPayment] = []
+
+    /// DashPay ignored senders (per-sender mute, = block, reversible,
+    /// local-only) owned by this identity. Cascade-deleted from the parent.
+    /// Persisted from the `ignored` changeset array by `persistContacts`
+    /// and read back at load to rebuild the Rust `ignored_senders` set —
+    /// without them an ignored sender resurfaces on relaunch. Filters use
+    /// `PersistentDashpayIgnoredSender.predicate(ownerIdentityId:)`.
+    @Relationship(deleteRule: .cascade, inverse: \PersistentDashpayIgnoredSender.owner)
+    public var dashpayIgnoredSenders: [PersistentDashpayIgnoredSender] = []
+
+    /// Cached DashPay **contact** profiles owned by this identity (one
+    /// per contact whose public profile has been fetched). Cascade-deleted
+    /// from the parent. Same query-by-denormalized-id pattern as
+    /// `contactRequests`: filters use
+    /// `PersistentDashpayContactProfile.predicate(ownerIdentityId:)` rather
+    /// than walking this collection from a SwiftUI view. Populated by the
+    /// persister callback (`IdentityEntryFFI.contact_profiles` rows) and
+    /// read back at load to rebuild the Rust `contact_profiles` map.
+    /// Distinct from the owner's own `dashpayProfile`.
+    @Relationship(deleteRule: .cascade, inverse: \PersistentDashpayContactProfile.owner)
+    public var contactProfiles: [PersistentDashpayContactProfile] = []
 
     // Contracts in the local store that name this identity as their
     // owner. `.nullify` so deleting the identity leaves the contract
@@ -163,6 +214,9 @@ public final class PersistentIdentity {
         self.dpnsNames = []
         self.dashpayProfile = nil
         self.contactRequests = []
+        self.dashpayPayments = []
+        self.dashpayIgnoredSenders = []
+        self.contactProfiles = []
         self.ownedDataContracts = []
         self.createdAt = Date()
         self.lastUpdated = Date()
@@ -259,12 +313,11 @@ extension PersistentIdentity {
     /// `wallet` relationship. Use this for views that should only
     /// surface identities the user can act as / sign for.
     ///
-    /// Distinct from the `isLocal` flag — that drives the
-    /// "Local Only" / "On Network" UI badge (Platform-confirmed vs
-    /// pending broadcast). Wallet ownership is orthogonal: an
-    /// identity can be wallet-owned and `isLocal` (just registered,
-    /// not yet confirmed), wallet-owned and on-network (confirmed),
-    /// or out-of-wallet (DashPay contact / payment recipient).
+    /// Distinct from the `isLocal` flag: wallet-owned identities are
+    /// a subset of local ones (`wallet != nil` ⟹ `isLocal`, and
+    /// manual adds are local without any wallet). Use this predicate
+    /// when the operation needs the wallet itself (signing, DIP-9
+    /// reload); use `isLocal` for "show as mine/tracked" UI.
     public static var walletOwnedIdentitiesPredicate: Predicate<PersistentIdentity> {
         #Predicate<PersistentIdentity> { identity in
             identity.wallet != nil

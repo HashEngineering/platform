@@ -1,3 +1,5 @@
+use crate::fee::Credits;
+use crate::moderation_charter::is_charter_election;
 #[cfg(feature = "json-conversion")]
 use crate::serialization::json_safe_fields;
 #[cfg(feature = "json-conversion")]
@@ -7,9 +9,12 @@ use crate::serialization::PlatformSerializable;
 use crate::serialization::ValueConvertible;
 use crate::util::hash::hash_double;
 use crate::ProtocolError;
-use bincode::{Decode, Encode};
-use platform_serialization_derive::{PlatformDeserialize, PlatformSerialize};
+use bincode::{Decode, DecodeUntrusted, Encode};
+use platform_serialization_derive::{
+    PlatformDeserializeTrusted, PlatformDeserializeUntrusted, PlatformSerialize,
+};
 use platform_value::{Identifier, Value};
+use platform_version::version::PlatformVersion;
 #[cfg(feature = "serde-conversion")]
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -19,7 +24,17 @@ use std::fmt;
     all(feature = "json-conversion", feature = "serde-conversion"),
     derive(JsonConvertible)
 )]
-#[derive(Debug, Clone, Encode, Decode, PlatformSerialize, PlatformDeserialize, PartialEq)]
+#[derive(
+    Debug,
+    Clone,
+    Encode,
+    Decode,
+    PlatformSerialize,
+    PlatformDeserializeTrusted,
+    PlatformDeserializeUntrusted,
+    PartialEq,
+    DecodeUntrusted,
+)]
 #[cfg_attr(
     feature = "serde-conversion",
     derive(Serialize, Deserialize),
@@ -75,5 +90,103 @@ impl ContestedDocumentResourceVotePoll {
 
     pub fn unique_id(&self) -> Result<Identifier, ProtocolError> {
         self.sha256_2_hash().map(Identifier::new)
+    }
+
+    /// The prefunded voting balance a contender pays into this contest, see
+    /// [`required_vote_resolution_fund`].
+    pub fn required_vote_resolution_fund(&self, platform_version: &PlatformVersion) -> Credits {
+        required_vote_resolution_fund(
+            &self.contract_id,
+            &self.document_type_name,
+            platform_version,
+        )
+    }
+}
+
+/// The prefunded voting balance a contender pays into a contest on the contested index of
+/// `document_type_name` in the contract `contract_id`: the moderation fund for a moderation
+/// election (an `electedCharter` of the moderation charters contract), the contested document
+/// fund for every other contest. Whatever the votes leave of it is released as processing fees
+/// when the contest is cleaned up.
+pub fn required_vote_resolution_fund(
+    contract_id: &Identifier,
+    document_type_name: &str,
+    platform_version: &PlatformVersion,
+) -> Credits {
+    let fund_fees = &platform_version.fee_version.vote_resolution_fund_fees;
+    if is_charter_election(contract_id, document_type_name) {
+        fund_fees.moderation_vote_resolution_fund_required_amount
+    } else {
+        fund_fees.contested_document_vote_resolution_fund_required_amount
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "json-conversion",
+    feature = "value-conversion",
+    feature = "serde-conversion"
+))]
+mod json_convertible_tests {
+    use super::*;
+    use platform_value::platform_value;
+    use serde_json::json;
+
+    /// Non-default values per field (real contract id, named type/index, two
+    /// index values) so the wire-shape assertion catches silent zero-out /
+    /// vec-truncate on round-trip.
+    fn fixture() -> ContestedDocumentResourceVotePoll {
+        ContestedDocumentResourceVotePoll {
+            contract_id: Identifier::new([0xc1; 32]),
+            document_type_name: "preorder".to_string(),
+            index_name: "parentNameAndLabel".to_string(),
+            index_values: vec![
+                Value::Text("dash".to_string()),
+                Value::Text("alice".to_string()),
+            ],
+        }
+    }
+
+    #[test]
+    fn json_round_trip_with_full_wire_shape() {
+        use crate::serialization::JsonConvertible;
+        let original = fixture();
+        let json = original.to_json().expect("to_json");
+        // This is a plain struct (no `#[serde(tag)]`), so there is no
+        // `$formatVersion` on the wire. `Identifier` -> base58 string.
+        // `Value::Text` inside the array -> JSON string.
+        assert_eq!(
+            json,
+            json!({
+                "contractId": "E3M3d7sy8ZKivUGxBexL9wxE7ebqzGWFqkdeFMedCJFS",
+                "documentTypeName": "preorder",
+                "indexName": "parentNameAndLabel",
+                "indexValues": ["dash", "alice"],
+            })
+        );
+        let recovered = ContestedDocumentResourceVotePoll::from_json(json).expect("from_json");
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn value_round_trip_with_full_wire_shape() {
+        use crate::serialization::ValueConvertible;
+        let original = fixture();
+        let value = original.to_object().expect("to_object");
+        // Interpolate the `Identifier` via `platform_value!` so Serialize emits
+        // `Value::Identifier` (NOT `Value::Bytes32`). `index_values` is a
+        // `Vec<Value>` round-tripped element-wise.
+        let id = Identifier::new([0xc1; 32]);
+        assert_eq!(
+            value,
+            platform_value!({
+                "contractId": id,
+                "documentTypeName": "preorder",
+                "indexName": "parentNameAndLabel",
+                "indexValues": ["dash", "alice"],
+            })
+        );
+        let recovered = ContestedDocumentResourceVotePoll::from_object(value).expect("from_object");
+        assert_eq!(original, recovered);
     }
 }

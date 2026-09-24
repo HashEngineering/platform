@@ -9,13 +9,24 @@ use crate::data_contract::document_type::index_level::IndexLevel;
 use crate::document::Document;
 use crate::document::INITIAL_REVISION;
 use crate::prelude::{BlockHeight, CoreBlockHeight, Revision};
+use crate::validation::SimpleConsensusValidationResult;
 use crate::version::PlatformVersion;
 use crate::ProtocolError;
 
-use crate::data_contract::document_type::accessors::DocumentTypeV0Getters;
+#[cfg(feature = "validation")]
+use crate::consensus::basic::document::{
+    DocumentPropertyMaxBytesExceededError, InvalidEncryptedPropertyShapeError,
+};
+use crate::data_contract::document_type::accessors::{
+    DocumentTypeV0Getters, DocumentTypeV2Getters,
+};
 use crate::data_contract::document_type::methods::versioned_methods::DocumentTypeV0MethodsVersioned;
+#[cfg(feature = "validation")]
+use crate::data_contract::document_type::{DocumentPropertyType, StringPropertySizes};
 use crate::fee::Credits;
 use crate::voting::vote_polls::VotePoll;
+#[cfg(feature = "validation")]
+use platform_value::btreemap_extensions::BTreeValueMapPathHelper;
 use platform_value::{Identifier, Value};
 
 pub trait DocumentTypeBasicMethods: DocumentTypeV0Getters {
@@ -47,6 +58,173 @@ pub trait DocumentTypeBasicMethods: DocumentTypeV0Getters {
             || self.trade_mode().seller_sets_price()
     }
 
+    /// Checks the shape of every `encryptedFor` property `properties` supplies
+    /// against the scheme its declaration names: at least the IV plus one
+    /// block, and a multiple of the block length. Nothing else about a
+    /// ciphertext is verifiable on chain. A declared property the document
+    /// leaves out is not checked; whether it may be left out is the schema's
+    /// `required` list's business.
+    ///
+    /// Meant to run after the JSON schema validation of `properties`, which
+    /// already established that every supplied value is a byte array. A value
+    /// that still is not one is reported as a zero-length ciphertext rather
+    /// than skipped, so the two nodes can never disagree on it.
+    ///
+    /// Versioned on `validate_encrypted_property_shapes` in the document type
+    /// method versions: `None` before protocol version 14 returns an empty
+    /// result, which keeps the shipped structure validations that call it inert.
+    #[cfg(feature = "validation")]
+    fn validate_encrypted_property_shapes(
+        &self,
+        properties: &BTreeMap<String, Value>,
+        platform_version: &PlatformVersion,
+    ) -> Result<SimpleConsensusValidationResult, ProtocolError> {
+        match platform_version
+            .dpp
+            .contract_versions
+            .document_type_versions
+            .methods
+            .validate_encrypted_property_shapes
+        {
+            None => Ok(SimpleConsensusValidationResult::default()),
+            Some(0) => Ok(self.validate_encrypted_property_shapes_v0(properties)),
+            Some(version) => Err(ProtocolError::UnknownVersionMismatch {
+                method: "validate_encrypted_property_shapes".to_string(),
+                known_versions: vec![0],
+                received: version,
+            }),
+        }
+    }
+
+    #[cfg(feature = "validation")]
+    fn validate_encrypted_property_shapes_v0(
+        &self,
+        properties: &BTreeMap<String, Value>,
+    ) -> SimpleConsensusValidationResult {
+        let declared = self
+            .flattened_properties()
+            .iter()
+            .filter_map(|(path, property)| Some((path, property.encrypted_for.as_ref()?)));
+        for (path, encrypted_for) in declared {
+            let Ok(Some(value)) = properties.get_optional_at_path(path) else {
+                continue;
+            };
+            let length = match value {
+                Value::Bytes(bytes) => bytes.len(),
+                Value::Bytes20(_) => 20,
+                Value::Bytes32(_) | Value::Identifier(_) => 32,
+                Value::Bytes36(_) => 36,
+                Value::Array(items) => items.len(),
+                other => other
+                    .to_binary_bytes()
+                    .map(|bytes| bytes.len())
+                    .unwrap_or(0),
+            };
+            let scheme = encrypted_for.scheme;
+            if !scheme.is_valid_ciphertext_length(length) {
+                return SimpleConsensusValidationResult::new_with_error(
+                    InvalidEncryptedPropertyShapeError::new(
+                        path.clone(),
+                        scheme.as_str().to_string(),
+                        u32::try_from(length).unwrap_or(u32::MAX),
+                        scheme.minimum_ciphertext_length() as u32,
+                        scheme.block_length() as u32,
+                    )
+                    .into(),
+                );
+            }
+        }
+        SimpleConsensusValidationResult::new()
+    }
+
+    /// Checks every string `properties` (the document's properties map) supplies for a
+    /// string declaring `maxBytes` against it, counting UTF-8 bytes: the property's value,
+    /// or every element of a typed array of strings, whose error names the element
+    /// (`tags[2]`). A declared property the document leaves out is not checked, and a value
+    /// that is not a string holds no bytes to count: the JSON schema validation that
+    /// `DataContract::validate_document_properties` runs alongside refuses it.
+    ///
+    /// Versioned on `validate_max_bytes` in the document type method versions: `None`
+    /// before protocol version 14 returns an empty result, which keeps the shipped document
+    /// validation that calls it inert.
+    #[cfg(feature = "validation")]
+    fn validate_max_bytes_properties(
+        &self,
+        properties: &Value,
+        platform_version: &PlatformVersion,
+    ) -> Result<SimpleConsensusValidationResult, ProtocolError> {
+        match platform_version
+            .dpp
+            .contract_versions
+            .document_type_versions
+            .methods
+            .validate_max_bytes
+        {
+            None => Ok(SimpleConsensusValidationResult::default()),
+            Some(0) => Ok(self.validate_max_bytes_properties_v0(properties)),
+            Some(version) => Err(ProtocolError::UnknownVersionMismatch {
+                method: "validate_max_bytes_properties".to_string(),
+                known_versions: vec![0],
+                received: version,
+            }),
+        }
+    }
+
+    #[cfg(feature = "validation")]
+    fn validate_max_bytes_properties_v0(
+        &self,
+        properties: &Value,
+    ) -> SimpleConsensusValidationResult {
+        let over = |path: String, value: &Value, max_bytes: u16| {
+            let length = value.as_text()?.len();
+            (length > max_bytes as usize).then(|| {
+                DocumentPropertyMaxBytesExceededError::new(
+                    path,
+                    u32::try_from(length).unwrap_or(u32::MAX),
+                    max_bytes,
+                )
+            })
+        };
+        for (path, property) in self.flattened_properties() {
+            // A lookup error (an intermediate that is not a map) reads as absent: the schema
+            // validation refuses that shape on its own
+            let error = match &property.property_type {
+                DocumentPropertyType::String(StringPropertySizes {
+                    max_bytes: Some(max_bytes),
+                    ..
+                }) => {
+                    let Ok(Some(value)) = properties.get_optional_value_at_path(path) else {
+                        continue;
+                    };
+                    over(path.clone(), value, *max_bytes)
+                }
+                // A typed array declares on its items: every element is bounded on its own
+                DocumentPropertyType::TypedArray(typed_array) => {
+                    let DocumentPropertyType::String(StringPropertySizes {
+                        max_bytes: Some(max_bytes),
+                        ..
+                    }) = typed_array.item_type.as_ref()
+                    else {
+                        continue;
+                    };
+                    let Ok(Some(Value::Array(elements))) =
+                        properties.get_optional_value_at_path(path)
+                    else {
+                        continue;
+                    };
+                    elements.iter().enumerate().find_map(|(index, element)| {
+                        over(format!("{path}[{index}]"), element, *max_bytes)
+                    })
+                }
+                _ => continue,
+            };
+            if let Some(error) = error {
+                return SimpleConsensusValidationResult::new_with_error(error.into());
+            }
+        }
+        SimpleConsensusValidationResult::new()
+    }
+
     fn top_level_indices(&self) -> Vec<&IndexProperty> {
         self.indexes()
             .values()
@@ -70,11 +248,43 @@ pub trait DocumentTypeBasicMethods: DocumentTypeV0Getters {
     }
 }
 
+/// The flat field list the v0 (protocol versions <= 13, frozen on chain)
+/// matchers run over, assembled the way `select_best_index` always has:
+/// equality fields first, then the range and `in` fields, then any
+/// order-by fields not already present. The v0 selection loops must keep
+/// receiving exactly this list for on-chain replay.
+fn flatten_query_fields<'a>(
+    equality_fields: &[&'a str],
+    range_field: Option<&'a str>,
+    in_field_name: Option<&'a str>,
+    order_by: &[&'a str],
+) -> Vec<&'a str> {
+    let mut fields = equality_fields.to_vec();
+    if let Some(range_field) = range_field {
+        fields.push(range_field);
+    }
+    if let Some(in_field_name) = in_field_name {
+        fields.push(in_field_name);
+    }
+    for field in order_by {
+        if !fields.contains(field) {
+            fields.push(field);
+        }
+    }
+    fields
+}
+
 // TODO: Some of those methods are only for tests. Hide under feature
 pub trait DocumentTypeV0Methods: DocumentTypeV0Getters + DocumentTypeV0MethodsVersioned {
+    /// Best index for a query's bound fields, given by role. Version 0
+    /// (protocol versions <= 13, frozen on chain) flattens the roles into
+    /// one positionless field set; version 1 (protocol version 14+)
+    /// additionally requires the fields to cover a contiguous prefix of
+    /// the index — the shape the positional path lowering depends on.
     fn index_for_types(
         &self,
-        index_names: &[&str],
+        equality_fields: &[&str],
+        range_field: Option<&str>,
         in_field_name: Option<&str>,
         order_by: &[&str],
         platform_version: &PlatformVersion,
@@ -86,10 +296,109 @@ pub trait DocumentTypeV0Methods: DocumentTypeV0Getters + DocumentTypeV0MethodsVe
             .methods
             .index_for_types
         {
-            0 => Ok(self.index_for_types_v0(index_names, in_field_name, order_by)),
+            0 => Ok(self.index_for_types_v0(
+                &flatten_query_fields(equality_fields, range_field, in_field_name, order_by),
+                in_field_name,
+                order_by,
+            )),
+            1 => Ok(self.index_for_types_v1(equality_fields, range_field, in_field_name, order_by)),
             version => Err(ProtocolError::UnknownVersionMismatch {
-                method: "store_ephemeral_state".to_string(),
-                known_versions: vec![0],
+                method: "index_for_types".to_string(),
+                known_versions: vec![0, 1],
+                received: version,
+            }),
+        }
+    }
+
+    /// [`Self::index_for_types`] restricted to the indexes `filter` admits.
+    ///
+    /// Candidates rejected by `filter` are skipped before they are scored, so
+    /// they can never be returned. This is the only correct way to require a
+    /// property of the selected index: because several indexes can cover the
+    /// same fields and ties are broken by the index map's name ordering,
+    /// checking the property after an unrestricted search can reject the
+    /// winner but cannot surface the index the caller actually needed.
+    ///
+    /// Shares the `index_for_types` feature-version gate — the filter narrows
+    /// the candidate set, it does not change how a candidate is scored.
+    fn index_for_types_matching(
+        &self,
+        equality_fields: &[&str],
+        range_field: Option<&str>,
+        in_field_name: Option<&str>,
+        order_by: &[&str],
+        filter: impl Fn(&Index) -> bool,
+        platform_version: &PlatformVersion,
+    ) -> Result<Option<(&Index, u16)>, ProtocolError> {
+        match platform_version
+            .dpp
+            .contract_versions
+            .document_type_versions
+            .methods
+            .index_for_types
+        {
+            0 => Ok(self.index_for_types_matching_v0(
+                &flatten_query_fields(equality_fields, range_field, in_field_name, order_by),
+                in_field_name,
+                order_by,
+                filter,
+            )),
+            1 => Ok(self.index_for_types_matching_v1(
+                equality_fields,
+                range_field,
+                in_field_name,
+                order_by,
+                filter,
+            )),
+            version => Err(ProtocolError::UnknownVersionMismatch {
+                method: "index_for_types_matching".to_string(),
+                known_versions: vec![0, 1],
+                received: version,
+            }),
+        }
+    }
+
+    /// [`Self::index_for_types_matching`] with terminals (an indexOnly
+    /// index's member-key property) as matchable deepest components. The
+    /// returned bool says whether the winning index consumed its terminal;
+    /// generic (non-terminal) matches always take precedence, so on any
+    /// document type without terminals this is exactly
+    /// [`Self::index_for_types_matching`]. Shares the `index_for_types`
+    /// feature-version gate: terminal participation only changes outcomes
+    /// on indexOnly document types, which cannot exist below protocol
+    /// version 14.
+    fn index_for_types_matching_including_terminal(
+        &self,
+        equality_fields: &[&str],
+        range_field: Option<&str>,
+        in_field_name: Option<&str>,
+        order_by: &[&str],
+        filter: impl Fn(&Index) -> bool,
+        platform_version: &PlatformVersion,
+    ) -> Result<Option<(&Index, u16, bool)>, ProtocolError> {
+        match platform_version
+            .dpp
+            .contract_versions
+            .document_type_versions
+            .methods
+            .index_for_types
+        {
+            0 => Ok(self.index_for_types_matching_including_terminal_v0(
+                &flatten_query_fields(equality_fields, range_field, in_field_name, order_by),
+                in_field_name,
+                order_by,
+                filter,
+            )),
+            1 => Ok(self.index_for_types_matching_including_terminal_v1(
+                equality_fields,
+                range_field,
+                in_field_name,
+                order_by,
+                filter,
+            )),
+            version => Err(ProtocolError::UnknownVersionMismatch {
+                method: "index_for_types_matching_including_terminal".to_string(),
+                known_versions: vec![0, 1],
                 received: version,
             }),
         }
@@ -164,9 +473,10 @@ pub trait DocumentTypeV0Methods: DocumentTypeV0Getters + DocumentTypeV0MethodsVe
             .estimated_size
         {
             0 => self.estimated_size_v0(platform_version),
+            1 => self.estimated_size_v1(platform_version),
             version => Err(ProtocolError::UnknownVersionMismatch {
                 method: "estimated_size".to_string(),
-                known_versions: vec![0],
+                known_versions: vec![0, 1],
                 received: version,
             }),
         }
@@ -301,7 +611,7 @@ pub trait DocumentTypeV0Methods: DocumentTypeV0Getters + DocumentTypeV0MethodsVe
             .methods
             .contested_vote_poll_for_document
         {
-            0 => Ok(self.contested_vote_poll_for_document_v0(document)),
+            0 => self.contested_vote_poll_for_document_v0(document, platform_version),
             version => Err(ProtocolError::UnknownVersionMismatch {
                 method: "contested_vote_poll_for_document".to_string(),
                 known_versions: vec![0],
@@ -322,9 +632,86 @@ pub trait DocumentTypeV0Methods: DocumentTypeV0Getters + DocumentTypeV0MethodsVe
             .methods
             .contested_vote_poll_for_document
         {
-            0 => Ok(self.contested_vote_poll_for_document_properties_v0(document_properties)),
+            0 => self.contested_vote_poll_for_document_properties_v0(
+                document_properties,
+                platform_version,
+            ),
             version => Err(ProtocolError::UnknownVersionMismatch {
                 method: "contested_vote_poll_for_document_properties".to_string(),
+                known_versions: vec![0],
+                received: version,
+            }),
+        }
+    }
+
+    /// Judges the `distinctFrom` declarations of the document type against a document's
+    /// `data` and the id of the identity writing it: an identifier property whose value
+    /// equals the named property of the same document, or the writer's `$ownerId`, fails
+    /// with `DocumentPropertyNotDistinctError` (10419). A declaration whose named property
+    /// is absent from `data` passes. Reads the transition alone, so it runs in the structure
+    /// stage of document create and replace, and of transfer and purchase against the
+    /// stored document and its new owner.
+    ///
+    /// `None` in the version table (protocol versions before 14) selects the behavior of
+    /// the versions that predate the keyword: nothing is checked, as no parsed property
+    /// carries a declaration there.
+    fn validate_distinct_from_properties(
+        &self,
+        data: &BTreeMap<String, Value>,
+        owner_id: Identifier,
+        platform_version: &PlatformVersion,
+    ) -> Result<SimpleConsensusValidationResult, ProtocolError>
+    where
+        Self: DocumentTypeV2Getters,
+    {
+        match platform_version
+            .dpp
+            .contract_versions
+            .document_type_versions
+            .methods
+            .validate_distinct_from
+        {
+            None => Ok(SimpleConsensusValidationResult::default()),
+            Some(0) => Ok(self.validate_distinct_from_properties_v0(data, owner_id)),
+            Some(version) => Err(ProtocolError::UnknownVersionMismatch {
+                method: "validate_distinct_from_properties".to_string(),
+                known_versions: vec![0],
+                received: version,
+            }),
+        }
+    }
+
+    /// Judges a document's properties, `data` (a map), against every rule of the document
+    /// type's `propertyConstraints`, in name order: the first rule it breaks fails with
+    /// `DocumentPropertyConstraintViolatedError` (10422), naming the rule and why (the
+    /// comparison does not hold, or evaluating it overflowed, divided by zero, raised to a
+    /// negative power or read a value that is not an integer). A property the document
+    /// leaves out counts as 0, or as its `ifAbsent` value. Reads the properties alone:
+    /// `DataContract::validate_document_properties` runs it after the schema validation,
+    /// so document create and replace, and every client validating a document, apply it.
+    ///
+    /// `None` in the version table (protocol versions before 14) selects the behavior of
+    /// the versions that predate the keyword: nothing is checked, as no parsed document
+    /// type carries a rule there.
+    fn validate_property_constraints(
+        &self,
+        data: &Value,
+        platform_version: &PlatformVersion,
+    ) -> Result<SimpleConsensusValidationResult, ProtocolError>
+    where
+        Self: DocumentTypeV2Getters,
+    {
+        match platform_version
+            .dpp
+            .contract_versions
+            .document_type_versions
+            .methods
+            .validate_property_constraints
+        {
+            None => Ok(SimpleConsensusValidationResult::default()),
+            Some(0) => Ok(self.validate_property_constraints_v0(data)),
+            Some(version) => Err(ProtocolError::UnknownVersionMismatch {
+                method: "validate_property_constraints".to_string(),
                 known_versions: vec![0],
                 received: version,
             }),
@@ -555,6 +942,46 @@ mod tests {
 
         let got = props.get("payload").unwrap();
         match got {
+            Value::Bytes(bytes) => assert_eq!(bytes.as_slice(), &[0xde, 0xad, 0xbe, 0xef]),
+            other => panic!("expected sanitized Bytes, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn sanitize_document_properties_converts_integer_array_bytearray_to_bytes() {
+        // A binary property re-hydrated through a schemaless JSON layer (an edited
+        // and replaced cached document) arrives as a plain array of numbers that
+        // decode to wider Value integer variants (U64), not Value::U8. Sanitize must
+        // normalize it to Value::Bytes so the strict binary serializer accepts it;
+        // otherwise the replace fails with "not an array of bytes".
+        let schema = platform_value!({
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "type": "array",
+                    "byteArray": true,
+                    "minItems": 1_u32,
+                    "maxItems": 64_u32,
+                    "position": 0
+                }
+            },
+            "additionalProperties": false,
+        });
+        let dt = build_doc_type("blob_doc", schema);
+        let mut props: BTreeMap<String, Value> = BTreeMap::new();
+        props.insert(
+            "payload".to_string(),
+            Value::Array(vec![
+                Value::U64(0xde),
+                Value::U64(0xad),
+                Value::U64(0xbe),
+                Value::U64(0xef),
+            ]),
+        );
+
+        dt.as_ref().sanitize_document_properties_ref(&mut props);
+
+        match props.get("payload").unwrap() {
             Value::Bytes(bytes) => assert_eq!(bytes.as_slice(), &[0xde, 0xad, 0xbe, 0xef]),
             other => panic!("expected sanitized Bytes, got {:?}", other),
         }

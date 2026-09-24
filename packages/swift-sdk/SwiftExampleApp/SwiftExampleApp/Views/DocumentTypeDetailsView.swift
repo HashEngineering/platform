@@ -85,6 +85,14 @@ struct DocumentTypeDetailsView: View {
     private var documentSettingsSection: some View {
         Section("Document Settings") {
             VStack(alignment: .leading, spacing: 8) {
+                if documentType.indexOnly {
+                    HStack {
+                        Label("Index Only (entries are the documents)", systemImage: "tray.full.fill")
+                            .foregroundColor(.teal)
+                        Spacer()
+                    }
+                }
+
                 HStack {
                     Label("Keep History", systemImage: documentType.documentsKeepHistory ? "clock.fill" : "clock")
                         .foregroundColor(documentType.documentsKeepHistory ? .blue : .secondary)
@@ -95,6 +103,28 @@ struct DocumentTypeDetailsView: View {
                     Label("Mutable", systemImage: documentType.documentsMutable ? "pencil.circle.fill" : "pencil.circle")
                         .foregroundColor(documentType.documentsMutable ? .green : .secondary)
                     Spacer()
+                }
+
+                // Protocol version 14: a mutable type can still freeze
+                // individual top-level properties at creation. A replace that
+                // touches one is rejected by consensus (code 40128), so name
+                // them here and in the replace form.
+                let immutability = documentType.immutability
+                if !immutability.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label(
+                            "Immutable: \(immutability.immutableProperties.joined(separator: ", "))",
+                            systemImage: "lock.fill"
+                        )
+                        .foregroundColor(.orange)
+
+                        if !immutability.immutableAllowSetting.isEmpty {
+                            Text("Settable once while absent: \(immutability.immutableAllowSetting.joined(separator: ", "))")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 HStack {
@@ -211,6 +241,16 @@ struct ExpandableIndexRowView: View {
                             .cornerRadius(4)
                     }
 
+                    if index.preallocated {
+                        Text("PREALLOCATED")
+                            .font(.caption2)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.teal.opacity(0.2))
+                            .foregroundColor(.teal)
+                            .cornerRadius(4)
+                    }
+
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -239,6 +279,22 @@ struct ExpandableIndexRowView: View {
                         }
                     }
 
+                    // An omitted terminal on an indexOnly type means
+                    // $ownerId per DPP; the SDK persists verbatim, so the
+                    // display default is applied here.
+                    let displayTerminal = index.terminal
+                        ?? (index.documentType?.indexOnly == true ? "$ownerId" : nil)
+                    if let terminal = displayTerminal {
+                        HStack {
+                            Text("Terminal:")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text(terminal)
+                                .font(.caption)
+                                .foregroundColor(.teal)
+                        }
+                    }
+
                     HStack(spacing: 12) {
                         if index.nullSearchable {
                             Label("Null Searchable", systemImage: "magnifyingglass")
@@ -251,6 +307,45 @@ struct ExpandableIndexRowView: View {
                                 .font(.caption2)
                                 .foregroundColor(.orange)
                         }
+                    }
+
+                    // Count / sum / ranking axes (protocol version 14).
+                    // The SDK persists the keywords verbatim, so the
+                    // display mapping - countable's bool-or-string
+                    // spellings and the averageable sugar (shorthand for
+                    // countable + summable, per DPP's desugar) - lives
+                    // here, mirroring the Kotlin example app's
+                    // indexAxisDescriptors helper.
+                    let axisLabels: [String] = {
+                        var labels: [String] = []
+                        if index.countable == "countableAllowingOffset" {
+                            labels.append("Countable (offsets)")
+                        } else if index.countable == "true" || index.countable == "countable"
+                            || (index.countable == nil && index.averageable != nil) {
+                            labels.append("Countable")
+                        }
+                        if index.rangeCountable || index.rangeAverageable { labels.append("Range Count") }
+                        if let summable = index.summable ?? index.averageable {
+                            labels.append("Summable (\(summable))")
+                        }
+                        if index.rangeSummable || index.rangeAverageable { labels.append("Range Sum") }
+                        if index.rankedCountable { labels.append("Ranked by Count") }
+                        if index.rankedSummable { labels.append("Ranked by Sum") }
+                        if index.rankedAverageable { labels.append("Ranked by Average") }
+                        return labels
+                    }()
+                    if !axisLabels.isEmpty {
+                        Text(axisLabels.joined(separator: " · "))
+                            .font(.caption2)
+                            .foregroundColor(.green)
+                    }
+
+                    if let timeRange = index.timeRange,
+                       let range = timeRange["range"] as? Int,
+                       let step = timeRange["step"] as? Int {
+                        Label("Time Range: \(range)s windows every \(step)s", systemImage: "clock.badge")
+                            .font(.caption2)
+                            .foregroundColor(.cyan)
                     }
 
                     // Show contested details if available
@@ -328,6 +423,14 @@ struct PropertyRowView: View {
 
             // Property attributes
             propertyAttributesView
+
+            // A typed array (protocol version 14): what its elements are
+            if let dict = propertyDict,
+               let typedArray = DocumentTypedArray(path: propertyName, propertySchema: dict) {
+                Label(typedArray.summary, systemImage: "list.bullet")
+                    .font(.caption2)
+                    .foregroundColor(.purple)
+            }
 
             // Sub-properties for objects
             if propertyType == "object", let dict = propertyDict {

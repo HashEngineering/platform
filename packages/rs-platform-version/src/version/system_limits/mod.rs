@@ -1,28 +1,410 @@
 pub mod v1;
 pub mod v2;
+pub mod v3;
+pub mod v4;
 
 #[derive(Clone, Debug, Default)]
 pub struct SystemLimits {
     pub estimated_contract_max_serialized_size: u16,
     pub max_field_value_size: u32,
+    /// Maximum number of nested map/array containers in document properties.
+    ///
+    /// `None` preserves the behavior of protocol versions that predate this limit.
+    pub max_document_value_depth: Option<u16>,
+    /// Maximum `maxItems` a typed array document property (`type: "array"` with an `items`
+    /// element schema) may declare, enforced when a contract is registered or updated (every
+    /// parse requires `maxItems`; full validation refuses one above this). The bound keeps an
+    /// array's worst-case encoded size, which fee estimation charges by, small. Read by
+    /// document type parser generation 3 (protocol version 14), the only generation that
+    /// parses typed arrays, and never reached before.
+    pub max_typed_array_items: u16,
+    /// Maximum number of references one document of a document type may carry, counted at
+    /// contract registration or update from the type's `refersTo` declarations: one for each
+    /// property that declares one (an identifier, or a key id carrying a key reference), one
+    /// for the type's `ownerRefersTo`, and `maxItems` for each typed array whose identifier
+    /// elements declare one. Every reference is checked against state when the
+    /// document is created or replaced, each check a billed read, so this bounds the reads one
+    /// document write can cause; without it a type could declare many typed arrays of
+    /// `max_typed_array_items` references each. Refused under full validation only, like
+    /// `max_typed_array_items`. Read by document type parser generation 3 (protocol version
+    /// 14), the only generation that parses `refersTo`, and never reached before.
+    pub max_references_per_document: u16,
+    /// Maximum number of operands one `anyOf` or `allOf` list of a `refersTo` reference
+    /// expression may hold (it holds at least two). Every leaf may be read for each value the
+    /// declaration covers when the document is written, and each counts against
+    /// `max_references_per_document`; this keeps one list from spending the whole budget on
+    /// alternatives. Refused under full validation only, like `max_typed_array_items`. Read by
+    /// document type parser generation 3 (protocol version 14), the only generation that parses
+    /// `refersTo`, and never reached before.
+    pub max_reference_operands: u16,
+    /// Maximum number of `anyOf` / `allOf` combinators on any path from a `refersTo` reference
+    /// expression to one of its leaves (a flat `anyOf` is 1). Refused under full validation
+    /// only, like `max_reference_operands`. Must stay at most
+    /// `dpp`'s `MAX_REFERENCE_EXPRESSION_DECODE_DEPTH` (16), the nesting a decoder of a
+    /// consensus error carrying the declaration accepts; a test there holds every version to
+    /// it. Read by document type parser generation 3 (protocol version 14) and never reached
+    /// before.
+    pub max_reference_expression_depth: u16,
+    /// Maximum number of named rules one document type's `propertyConstraints` may
+    /// declare. Every rule is evaluated on each create and replace of a document of the
+    /// type, and no rule reads state, so this and `max_property_constraint_nodes` are what
+    /// bound the arithmetic one document write causes. Refused under full validation only,
+    /// like `max_typed_array_items`. Read by document type parser generation 3 (protocol
+    /// version 14), the only generation that parses `propertyConstraints`, and never
+    /// reached before.
+    pub max_property_constraints: u16,
+    /// Maximum number of nodes in one `propertyConstraints` rule: its comparison, every
+    /// arithmetic operator and every operand, an integer value or a property. An `ifAbsent`
+    /// operand is one node, the default it gives included. Refused under full validation
+    /// only, like `max_property_constraints`. Read by document type parser generation 3
+    /// (protocol version 14) and never reached before.
+    pub max_property_constraint_nodes: u16,
     /// Max size of a state transition in bytes.
     ///
     /// NOTE: This must be equal to the `max-tx-bytes` in the Tenderdash config
     pub max_state_transition_size: u64,
+    /// Maximum number of batched transitions (document and token transitions counted together)
+    /// one batch state transition may carry.
+    ///
+    /// This cap is load-bearing for state correctness, not merely a size or throughput limit.
+    /// `BatchTransitionAction::into_high_level_drive_operations` flattens every transition of a
+    /// batch into one `Vec<DriveOperation>`, and `apply_drive_operations` turns that vector into
+    /// a single GroveDB batch. Within one such batch the ordinary document Add/Update/Delete
+    /// conversions are blind to each other: the check that decides whether an index group tree
+    /// has become empty and should be removed sees committed state plus only the operations of
+    /// its own conversion.
+    ///
+    /// While the cap is 1, no two document operations can share a GroveDB batch *by way of a
+    /// batch state transition*, so on that route the blindness has nothing to act on. Raise it
+    /// and two operations that jointly empty a group each observe the other's document still
+    /// committed, each conclude the group is not yet empty, and the group tree survives with no
+    /// documents behind it. On a ranked index that leftover tree is mirrored into the aggregate
+    /// secondary, so the group keeps ranking with a zero aggregate — sorting ahead of every
+    /// group with a positive one — and, because primary and secondary agree that the empty
+    /// group exists, the state is internally consistent: integrity verification passes and
+    /// proofs attest the wrong ranking against the live root hash.
+    ///
+    /// The cap is not the only thing standing between that machinery and a live path, and a
+    /// reader raising it needs to know what the other two are:
+    ///
+    /// * `Drive::update_contract_keywords_operations` puts N blind document deletes and M adds
+    ///   in one batch over a single shared index group. Every batch it actually emits refills
+    ///   the group it empties, but only because its caller skips it outright when the new
+    ///   keyword set is empty — and that skip is a shield, not a fix. Called directly with an
+    ///   empty set it does strand the group, and the skip leaves the old keyword documents in
+    ///   place, so a contract that clears its keywords keeps being found under them. Both
+    ///   halves are pinned by tests; see the call site in `update_contract_v1`.
+    /// * `DocumentOperationType::MultipleDocumentOperationsForSameContractDocumentType` threads
+    ///   the accumulated operations through, so document operations in *that* variant do see
+    ///   their siblings — which is why the withdrawal paths batch many documents safely. It is
+    ///   not a drop-in for batch transitions: it carries no delete variant.
+    ///
+    /// Five cases in `rs-drive`'s `batched_group_drain` suite are `#[ignore]`d for exactly this
+    /// reason; the rest of that suite runs. Anyone raising this cap should un-ignore those five
+    /// first and make them pass.
     pub max_transitions_in_documents_batch: u16,
     pub withdrawal_transactions_per_block_limit: u16,
     pub retry_signing_expired_withdrawal_documents_per_block_limit: u16,
     pub max_withdrawal_amount: u64,
+    /// Daily withdrawal limit as a percentage of the total credits Platform held a day ago.
+    /// From protocol version 14 Platform pools at most this share of the total credits recorded
+    /// at the latest block at least 24 hours before the current one into asset unlock
+    /// transactions per 24 hours (`daily_withdrawal_limit` method version 2; the history is
+    /// kept by `record_total_credits_history_for_withdrawals`). `None` for the protocol versions
+    /// that predate the rule: method version 0 derived the limit from the current total, method
+    /// version 1 applied a flat 2000 Dash. Versioned: see `daily_withdrawal_limit_percent` in
+    /// each `SYSTEM_LIMITS_V*`.
+    pub daily_withdrawal_limit_percent: Option<u8>,
+    /// Upper bound (in credits) of the relative daily withdrawal limit from protocol version 14:
+    /// Core's credit-pool unlock capacity per day, `LimitAmountV24` = 4000 Dash per 576-block
+    /// window (Core v24). Platform cannot usefully pool more than Core will mine — the excess
+    /// only cycles through expiry and re-signing — so the limit never exceeds this whatever the
+    /// total credits are; raise it together with Core. Must be at least `max_withdrawal_amount`.
+    /// `None` for the protocol versions that predate the relative rule.
+    pub max_daily_withdrawal_amount: Option<u64>,
     /// Minimum net amount (in credits) a withdrawal may send to Core, shared by the
     /// transparent (identity + address) and shielded withdrawal paths. The dust floor that
     /// keeps Core from rejecting the resulting `TxOut`. Versioned: see `min_withdrawal_amount`
     /// in each `SYSTEM_LIMITS_V*`.
     pub min_withdrawal_amount: u64,
-    pub max_contract_group_size: u16,
+    /// Core's dust relay fee rate in duffs per kilobyte, from which the per-output dust
+    /// threshold Core's mempool enforces is derived (Core's `GetDustThreshold`: the fee at
+    /// this rate of the serialized output plus the input that would spend it, 546 duffs for
+    /// a P2PKH output at the default 3000 duffs/kB). From protocol version 14 an expired
+    /// withdrawal whose whole amount is below the threshold of its output script is marked
+    /// FAILED instead of being re-signed forever (`rebroadcast_expired_withdrawal_documents`
+    /// method version 2). `None` for the protocol versions that predate the rule.
+    pub core_dust_relay_fee_per_kb: Option<u64>,
+    /// Maximum Core transaction fee rate, in duffs per byte, accepted for a withdrawal.
+    /// `None` preserves the behavior of protocol versions that predate this limit.
+    pub max_core_fee_per_byte: Option<u32>,
+    /// Maximum number of members a change-control `Group` declared inside a data contract may
+    /// have (the groups token change-control rules delegate to). Not to be confused with
+    /// contract groups, the identity-owned sets of contracts below.
+    pub max_group_member_count: u16,
+    /// Maximum number of contract group memberships one data contract create transition may
+    /// declare. Contract groups exist from protocol version 14; earlier versions never reach
+    /// the check.
+    pub max_contract_group_memberships_per_contract: u16,
+    /// Maximum number of admins a contract group may name besides its owner.
+    pub max_contract_group_admins: u16,
+    /// Maximum length, in characters, of a contract group name.
+    pub max_contract_group_name_length: u16,
+    /// Maximum length, in characters, of a contract group description.
+    pub max_contract_group_description_length: u16,
+    /// Maximum number of moderator identities a moderated data contract may name
+    /// (`DataContractConfigV2::moderation`); the owner counts when it is named, and moderates
+    /// without being named. Contract moderation exists from protocol
+    /// version 14; read by the contract's `validate_moderation_config` v0 and never reached
+    /// before.
+    pub max_contract_moderators: u16,
+    /// Latest block time, in milliseconds, a contract suspension may run until: 2^53 - 1, the
+    /// largest integer JSON and JavaScript numbers hold exactly, which is how `until` travels
+    /// to clients. Read by the `ContractUserModeration` basic structure validation v0
+    /// (protocol version 14) and never reached before.
+    pub max_contract_suspension_until: u64,
+    /// Maximum length, in bytes of UTF-8, of the text of the reason a ban, a suspension, a
+    /// warning or a moderator's document deletion carries (`ContractModerationReason::text`). Read by the `ContractUserModeration` basic
+    /// structure validation v0 (protocol version 14) and never reached before.
+    pub max_contract_moderation_reason_length: u16,
+    /// Maximum number of warnings one identity may carry on a contract's warning list at a
+    /// time: a warn that would exceed it is refused until the warnings are cleared. Read by
+    /// the `ContractUserModeration` state validation v0 (protocol version 14) and never
+    /// reached before.
+    pub max_contract_warnings_per_identity: u16,
+    /// Maximum number of documents a contract moderation reason may cite
+    /// (`ContractModerationReason::documents`). Read by the reason's validation (protocol
+    /// version 14) and never reached before.
+    pub max_contract_moderation_reason_documents: u16,
+    /// Shortest join window and vote window, in seconds, an elected moderation team
+    /// declaration (`ContractModerators::Elected`) may set: one day. Read by the contract's
+    /// `validate_moderation_config` v0 (protocol version 14) and never reached before.
+    pub min_contract_moderation_election_window_seconds: u32,
+    /// Longest join window and vote window, in seconds, such a declaration may set: four
+    /// weeks.
+    pub max_contract_moderation_election_window_seconds: u32,
+    /// Shortest challenge cool-down, in seconds, such a declaration may set: two weeks. The
+    /// cool-down is how long a seated team is safe from a challenge after a seat change.
+    pub min_contract_moderation_challenge_cool_down_seconds: u32,
+    /// Longest challenge cool-down, in seconds, such a declaration may set: three years.
+    pub max_contract_moderation_challenge_cool_down_seconds: u32,
+    /// How long after a moderator's deletion of a document, in milliseconds of block time,
+    /// the contract's moderators may restore it (`ContractUserModeration`'s `RestoreDocument`
+    /// action): a week. Read by the `ContractUserModeration` state validation v0 (protocol
+    /// version 14) and never reached before.
+    pub contract_document_restore_window_ms: u64,
+    /// Most members an elected moderation declaration may let a seated team's leader add
+    /// after the election (`maxAddedModerators`). Read by the declaration's validation
+    /// (protocol version 14) and never reached before.
+    pub max_contract_moderation_added_moderators: u16,
     // This the max redemption cycles we can process if we don't use a constant distribution
     // For a constant perpetual distribution this is very cheap since it's just a multiplication
     // For other distributions we much calculate at each cycle the rewards, so we don't want to
     // do this that much
     pub max_token_redemption_cycles: u32,
     pub max_shielded_transition_actions: u16,
+    /// Maximum overlap factor (`range / step`) a `timeRange` index transform
+    /// may declare, enforced at contract registration.
+    ///
+    /// The overlap factor is the number of buckets that contain any given
+    /// timestamp — i.e. the write amplification of the index: every document
+    /// insert, delete, and (on a bucket-set change) update fans out into that
+    /// many index entries. The bound of 24 covers the natural worst case, a
+    /// day-long window sliding hourly, without letting a contract buy a
+    /// 256-entry fan-out per document.
+    ///
+    /// `None` preserves the behavior of protocol versions that predate
+    /// time-range indexes (nothing to bound: the `timeRange` keyword does not
+    /// parse there).
+    pub max_time_range_overlap_factor: Option<u64>,
+    /// Maximum time-to-live (in seconds) a `timeRange` index transform may
+    /// declare, enforced at contract registration.
+    ///
+    /// The cap is what makes the TTL fee model safe: entries under a TTL'd
+    /// index bill their bytes as processing (the ephemeral-bytes rate)
+    /// instead of storage, and a flat rate is only an honest price while
+    /// the lifetime it covers is bounded. One week in V4.
+    /// See `book/src/drive/time-range-ttl.md`.
+    ///
+    /// `None` preserves the behavior of protocol versions that predate the
+    /// `ttl` key (nothing to bound: the key does not parse there).
+    pub max_time_range_ttl_seconds: Option<u64>,
+    /// Minimum per-write drainage budget for a TTL'd time-range grid.
+    /// Drive raises this floor to twice the maximum trees one document
+    /// can create in the grid's merged index structure, times its overlap
+    /// factor. This gives cleanup capacity above the tree creation rate,
+    /// including shared grids and deep suffixes. Each drop is O(1).
+    /// `None` disables cleanup on versions predating the `ttl` key.
+    pub min_time_range_ttl_drop_operations_per_write: Option<u16>,
+    /// Lowest GroveDB proof envelope version a client accepts from a
+    /// current-state response.
+    ///
+    /// Read by `drive-proof-verifier`'s `supported_grovedb_proof_bytes` and
+    /// `verify_tenderdash_proof`, by `wasm-drive-verify`'s
+    /// `supported_grovedb_proof`, and by Drive's
+    /// `verify_compacted_address_balance_changes` v1 for its nested proofs.
+    ///
+    /// `0` keeps accepting the legacy V0 envelope. Protocol version 14 raises
+    /// the floor to `1`: V0's item binding lets a prover return different
+    /// item bytes under the same authenticated root, so a quorum signature on
+    /// the root does not make a V0 payload safe. GroveDB emits V1 from grove
+    /// version 3 (protocol version 13), so every live network already serves
+    /// V1 by the time the floor applies.
+    pub minimum_grovedb_proof_envelope_version: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::version::protocol_version::PLATFORM_VERSIONS;
+    use crate::version::{PlatformVersion, LATEST_VERSION};
+
+    /// The cap is what keeps two document operations out of a shared GroveDB batch, and with
+    /// them the phantom index groups described on `max_transitions_in_documents_batch`. It has
+    /// been 1 since the first mainnet release; a version that relaxes it must be a deliberate,
+    /// reviewed decision rather than a copy-paste into a new `SYSTEM_LIMITS_V*`.
+    #[test]
+    fn documents_batch_is_capped_at_one_transition_at_every_protocol_version() {
+        // The loop below only inspects what the registry holds, so the registry
+        // has to be known complete first. `LATEST_VERSION` is declared
+        // independently of `PLATFORM_VERSIONS`, which is what makes it a usable
+        // reference point: a version that is declared but never added to the
+        // registry leaves the count short and fails here, and so does a registry
+        // that loses entries. Deriving the expectation from the registry itself
+        // — `PlatformVersion::latest()` is `PLATFORM_VERSIONS.last()` — would
+        // pass in both cases.
+        assert_eq!(
+            PLATFORM_VERSIONS.len(),
+            LATEST_VERSION as usize,
+            "the protocol version registry does not hold every declared version, so the cap \
+             would go unchecked on the ones it is missing"
+        );
+        for platform_version in PLATFORM_VERSIONS {
+            assert_eq!(
+                platform_version
+                    .system_limits
+                    .max_transitions_in_documents_batch,
+                1,
+                "protocol version {} allows more than one transition per documents batch; \
+                 see the documentation on SystemLimits::max_transitions_in_documents_batch \
+                 for what that exposes",
+                platform_version.protocol_version
+            );
+        }
+    }
+
+    /// The mock versions are never live, but they do execute state transitions
+    /// in drive-abci's protocol-upgrade suite, and one of them hand-writes its
+    /// `SystemLimits` rather than reusing a `SYSTEM_LIMITS_V*` — so it is the
+    /// one place the loop above cannot reach. A mock at a raised cap would
+    /// surface the phantom-group defect there as an unexplained failure.
+    ///
+    /// `PLATFORM_TEST_VERSIONS` is a process-global `OnceLock`, so if another
+    /// test in this binary initialised it first this asserts over whatever is
+    /// actually in use rather than over the defaults named here. That is the
+    /// more useful of the two, and deliberate.
+    #[cfg(feature = "mock-versions")]
+    #[test]
+    fn mock_platform_versions_carry_the_same_documents_batch_cap() {
+        use crate::version::mocks::v2_test::TEST_PLATFORM_V2;
+        use crate::version::mocks::v3_test::TEST_PLATFORM_V3;
+        use crate::version::protocol_version::PLATFORM_TEST_VERSIONS;
+
+        let versions =
+            PLATFORM_TEST_VERSIONS.get_or_init(|| vec![TEST_PLATFORM_V2, TEST_PLATFORM_V3]);
+        assert!(
+            !versions.is_empty(),
+            "the mock version registry is empty; this test would assert nothing"
+        );
+        for platform_version in versions {
+            assert_eq!(
+                platform_version
+                    .system_limits
+                    .max_transitions_in_documents_batch,
+                1,
+                "mock platform version {} allows more than one transition per documents \
+                 batch; see SystemLimits::max_transitions_in_documents_batch",
+                platform_version.protocol_version
+            );
+        }
+    }
+
+    #[test]
+    fn document_value_depth_limit_starts_at_protocol_version_13() {
+        // v12 is already active on live networks, so the limit must not apply there.
+        assert_eq!(
+            PlatformVersion::get(12)
+                .expect("protocol version 12 should exist")
+                .system_limits
+                .max_document_value_depth,
+            None
+        );
+        assert_eq!(
+            PlatformVersion::get(13)
+                .expect("protocol version 13 should exist")
+                .system_limits
+                .max_document_value_depth,
+            Some(256)
+        );
+    }
+
+    /// The withdrawal structure generations selected from protocol version 14 read the cap
+    /// through `dpp::withdrawal::validate_core_fee_per_byte_cap`, which treats `None` as "no
+    /// cap" per the field's contract. A table that selected one of those generations without a
+    /// cap would drop the limit silently, so that combination has to be a deliberate edit here.
+    #[test]
+    fn should_carry_a_core_fee_cap_wherever_the_capped_withdrawal_rules_are_selected() {
+        let selecting_capped_rules: Vec<_> = PLATFORM_VERSIONS
+            .iter()
+            .filter(|platform_version| {
+                let dpp_transitions = &platform_version.dpp.state_transitions;
+                let identity_structure = platform_version
+                    .drive_abci
+                    .validation_and_processing
+                    .state_transitions
+                    .identity_credit_withdrawal_state_transition
+                    .basic_structure;
+                dpp_transitions
+                    .address_funds
+                    .validate_credit_withdrawal_structure
+                    >= 1
+                    || dpp_transitions.shielded.validate_withdrawal_structure >= 1
+                    || identity_structure.is_some_and(|version| version >= 2)
+            })
+            .collect();
+        assert!(
+            !selecting_capped_rules.is_empty(),
+            "no protocol version selects the fee-capped withdrawal rules; this test would \
+             assert nothing"
+        );
+        for platform_version in selecting_capped_rules {
+            assert!(
+                platform_version
+                    .system_limits
+                    .max_core_fee_per_byte
+                    .is_some(),
+                "protocol version {} selects the fee-capped withdrawal structure rules without \
+                 a Core fee-rate cap; see SystemLimits::max_core_fee_per_byte",
+                platform_version.protocol_version
+            );
+        }
+    }
+
+    #[test]
+    fn core_fee_per_byte_limit_starts_at_protocol_version_14() {
+        // v13 is already active on live networks, so the limit must not apply there.
+        assert_eq!(
+            PlatformVersion::get(13)
+                .expect("protocol version 13 should exist")
+                .system_limits
+                .max_core_fee_per_byte,
+            None
+        );
+        assert_eq!(
+            PlatformVersion::get(14)
+                .expect("protocol version 14 should exist")
+                .system_limits
+                .max_core_fee_per_byte,
+            Some(6_765)
+        );
+    }
 }

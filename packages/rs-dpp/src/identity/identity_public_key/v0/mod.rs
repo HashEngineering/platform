@@ -1,6 +1,6 @@
 mod accessors;
 mod conversion;
-mod methods;
+pub(super) mod methods;
 #[cfg(feature = "random-public-keys")]
 mod random;
 
@@ -8,7 +8,7 @@ pub use crate::identity::identity_public_key::key_type::KeyType;
 pub use crate::identity::identity_public_key::purpose::Purpose;
 pub use crate::identity::identity_public_key::security_level::SecurityLevel;
 
-use bincode::{Decode, Encode};
+use bincode::{Decode, DecodeUntrusted, Encode};
 
 #[cfg(feature = "json-conversion")]
 use crate::serialization::json_safe_fields;
@@ -37,6 +37,7 @@ use crate::state_transition::public_key_in_creation::v0::IdentityPublicKeyInCrea
     Ord,
     PartialOrd,
     Hash,
+    DecodeUntrusted,
 )]
 #[serde(rename_all = "camelCase")]
 #[ferment_macro::export]
@@ -49,7 +50,14 @@ pub struct IdentityPublicKeyV0 {
     pub key_type: KeyType,
     pub read_only: bool,
     pub data: BinaryData,
-    #[serde(default)]
+    // Phase D step 4: skip emitting `disabledAt: null` for non-disabled keys.
+    // Bincode (consensus binary path) is independent of this attribute and
+    // always writes the Option discriminant + payload. Identity hashing /
+    // Drive storage / state-transition signing all go through bincode, so
+    // none of those are affected. JSON / platform_value wire path becomes
+    // `{ ...fields }` instead of `{ ..., disabledAt: null }` for the
+    // common non-disabled case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled_at: Option<TimestampMillis>,
 }
 

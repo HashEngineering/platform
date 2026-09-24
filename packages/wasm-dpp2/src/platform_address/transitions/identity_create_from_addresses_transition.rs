@@ -1,6 +1,6 @@
 use crate::error::{WasmDppError, WasmDppResult};
 use crate::identity::transitions::public_key_in_creation::IdentityPublicKeyInCreationWasm;
-use crate::impl_wasm_conversions_serde;
+use crate::impl_wasm_conversions_inner;
 use crate::impl_wasm_type_info;
 use crate::platform_address::{
     PlatformAddressInputWasm, PlatformAddressOutputWasm, fee_strategy_from_js_options,
@@ -14,7 +14,7 @@ use crate::utils::{
 use dpp::platform_value::string_encoding::Encoding::{Base64, Hex};
 use dpp::platform_value::string_encoding::{decode, encode};
 use dpp::prelude::UserFeeIncrease;
-use dpp::serialization::{PlatformDeserializable, PlatformSerializable};
+use dpp::serialization::{PlatformDeserializableUntrusted, PlatformSerializable};
 use dpp::state_transition::StateTransition;
 use dpp::state_transition::identity_create_from_addresses_transition::IdentityCreateFromAddressesTransition;
 use dpp::state_transition::identity_create_from_addresses_transition::v0::IdentityCreateFromAddressesTransitionV0;
@@ -127,7 +127,9 @@ impl IdentityCreateFromAddressesTransitionWasm {
     #[wasm_bindgen(js_name = "fromBytes")]
     pub fn from_bytes(bytes: Vec<u8>) -> WasmDppResult<IdentityCreateFromAddressesTransitionWasm> {
         let rs_transition =
-            IdentityCreateFromAddressesTransition::deserialize_from_bytes(bytes.as_slice())?;
+            IdentityCreateFromAddressesTransition::deserialize_from_bytes_untrusted(
+                bytes.as_slice(),
+            )?;
         Ok(IdentityCreateFromAddressesTransitionWasm(rs_transition))
     }
 
@@ -258,8 +260,9 @@ impl IdentityCreateFromAddressesTransitionWasm {
     }
 }
 
-impl_wasm_conversions_serde!(
+impl_wasm_conversions_inner!(
     IdentityCreateFromAddressesTransitionWasm,
+    IdentityCreateFromAddressesTransition,
     IdentityCreateFromAddressesTransition,
     IdentityCreateFromAddressesTransitionObjectJs,
     IdentityCreateFromAddressesTransitionJSONJs

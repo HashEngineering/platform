@@ -19,7 +19,7 @@ use crate::data_contract::change_control_rules::ChangeControlRules;
 use crate::data_contract::GroupContractPosition;
 #[cfg(feature = "json-conversion")]
 use crate::serialization::json_safe_fields;
-use bincode::{Decode, Encode};
+use bincode::{Decode, DecodeUntrusted, Encode};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -33,7 +33,7 @@ use std::fmt;
 /// This configuration is designed to be deterministic and versioned for compatibility
 /// across protocol upgrades and validation environments.
 #[cfg_attr(feature = "json-conversion", json_safe_fields)]
-#[derive(Serialize, Deserialize, Decode, Encode, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Decode, Encode, Debug, Clone, PartialEq, Eq, DecodeUntrusted)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenConfigurationV0 {
     /// Metadata conventions, including decimals and localizations.
@@ -248,7 +248,19 @@ impl fmt::Display for TokenConfigurationV0 {
 ///
 /// These presets are intended to be used in conjunction with `TokenConfigurationPreset`
 /// to simplify token setup and enforce governance constraints consistently.
-#[derive(Serialize, Deserialize, Decode, Encode, Debug, Clone, Copy, PartialEq, Eq, PartialOrd)]
+#[derive(
+    Serialize,
+    Deserialize,
+    Decode,
+    Encode,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    DecodeUntrusted,
+)]
 pub enum TokenConfigurationPresetFeatures {
     /// No actions are permitted after initialization. All governance and control
     /// settings are immutable.
@@ -292,7 +304,10 @@ pub enum TokenConfigurationPresetFeatures {
 ///
 /// This abstraction allows users to choose between common control configurations
 /// ranging from immutable tokens to fully administrator-controlled assets.
-#[derive(Serialize, Deserialize, Decode, Encode, Debug, Clone, PartialEq, Eq, PartialOrd)]
+#[derive(
+    Serialize, Deserialize, Decode, Encode, Debug, Clone, PartialEq, Eq, PartialOrd, DecodeUntrusted,
+)]
+#[serde(rename_all = "camelCase")]
 pub struct TokenConfigurationPreset {
     /// Defines the set of capabilities enabled in this preset (e.g., whether minting,
     /// burning, freezing, or emergency actions are permitted).
@@ -307,6 +322,113 @@ pub struct TokenConfigurationPreset {
     /// operations, or performing emergency control (depending on the selected feature set).
     pub action_taker: AuthorizedActionTakers,
 }
+
+// Manual impls because the preset types are flat (not versioned V0/V1).
+#[cfg(all(feature = "json-conversion", feature = "serde-conversion"))]
+impl crate::serialization::JsonConvertible for TokenConfigurationPresetFeatures {}
+
+#[cfg(all(feature = "value-conversion", feature = "serde-conversion"))]
+impl crate::serialization::ValueConvertible for TokenConfigurationPresetFeatures {}
+
+#[cfg(all(feature = "json-conversion", feature = "serde-conversion"))]
+impl crate::serialization::JsonConvertible for TokenConfigurationPreset {}
+
+#[cfg(all(feature = "value-conversion", feature = "serde-conversion"))]
+impl crate::serialization::ValueConvertible for TokenConfigurationPreset {}
+
+#[cfg(all(
+    test,
+    feature = "json-conversion",
+    feature = "value-conversion",
+    feature = "serde-conversion"
+))]
+mod json_convertible_tests_preset {
+    use super::*;
+    use crate::serialization::{JsonConvertible, ValueConvertible};
+    use platform_value::platform_value;
+    use serde_json::json;
+
+    fn fixture() -> TokenConfigurationPreset {
+        TokenConfigurationPreset {
+            features: TokenConfigurationPresetFeatures::WithAllAdvancedActions,
+            action_taker: AuthorizedActionTakers::Group(7),
+        }
+    }
+
+    #[test]
+    fn preset_json_round_trip_with_full_wire_shape() {
+        let original = fixture();
+        let json = original.to_json().expect("to_json");
+        // `features` is a unit-only enum (bare PascalCase string);
+        // `actionTaker` uses AuthorizedActionTakers' internally-tagged shape.
+        // `position` is u16 — JSON erases the size; the value path locks it.
+        assert_eq!(
+            json,
+            json!({
+                "features": "WithAllAdvancedActions",
+                "actionTaker": {"$type": "group", "position": 7},
+            })
+        );
+        let recovered = TokenConfigurationPreset::from_json(json).expect("from_json");
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn preset_value_round_trip_with_full_wire_shape() {
+        let original = fixture();
+        let value = original.to_object().expect("to_object");
+        assert_eq!(
+            value,
+            platform_value!({
+                "features": "WithAllAdvancedActions",
+                "actionTaker": {"$type": "group", "position": 7u16},
+            })
+        );
+        let recovered = TokenConfigurationPreset::from_object(value).expect("from_object");
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn preset_features_round_trips_all_variants() {
+        let cases = [
+            (
+                TokenConfigurationPresetFeatures::MostRestrictive,
+                "MostRestrictive",
+            ),
+            (
+                TokenConfigurationPresetFeatures::WithOnlyEmergencyAction,
+                "WithOnlyEmergencyAction",
+            ),
+            (
+                TokenConfigurationPresetFeatures::WithMintingAndBurningActions,
+                "WithMintingAndBurningActions",
+            ),
+            (
+                TokenConfigurationPresetFeatures::WithAllAdvancedActions,
+                "WithAllAdvancedActions",
+            ),
+            (
+                TokenConfigurationPresetFeatures::WithExtremeActions,
+                "WithExtremeActions",
+            ),
+        ];
+        for (original, expected) in cases {
+            let json_v = original.to_json().expect("to_json");
+            assert_eq!(json_v, json!(expected));
+            assert_eq!(
+                TokenConfigurationPresetFeatures::from_json(json_v).expect("from_json"),
+                original
+            );
+            let value = original.to_object().expect("to_object");
+            assert_eq!(value, platform_value!(expected));
+            assert_eq!(
+                TokenConfigurationPresetFeatures::from_object(value).expect("from_object"),
+                original
+            );
+        }
+    }
+}
+
 impl TokenConfigurationPreset {
     pub fn default_main_control_group_can_be_modified(&self) -> AuthorizedActionTakers {
         match self.features {

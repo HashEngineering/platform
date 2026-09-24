@@ -50,7 +50,6 @@
 
 use std::collections::BTreeMap;
 
-use dpp::identity::accessors::IdentitySettersV0;
 use dpp::identity::signer::Signer;
 use dpp::identity::v0::IdentityV0;
 use dpp::identity::Identity;
@@ -63,14 +62,14 @@ use key_wallet::wallet::managed_wallet_info::asset_lock_builder::AssetLockFundin
 
 use dash_sdk::platform::transition::put_identity::PutIdentity;
 use dash_sdk::platform::transition::put_settings::PutSettings;
-use dash_sdk::platform::transition::top_up_identity::TopUpIdentity;
+use dash_sdk::platform::transition::top_up_identity::TopUpIdentityWithMetadata;
 
 use crate::error::{is_instant_lock_proof_invalid, PlatformWalletError};
 use crate::wallet::asset_lock::orchestration::{
     out_point_from_proof, submit_with_cl_height_retry, FundingResolution, ResolvedFunding,
-    CL_FALLBACK_TIMEOUT,
 };
 use crate::wallet::asset_lock::AssetLockFunding;
+use crate::BlockTime;
 
 use super::*;
 
@@ -97,6 +96,8 @@ impl IdentityWallet {
     ///    (`InvalidInstantAssetLockProofSignatureError`).
     /// 4. On success, add the confirmed identity to the local
     ///    `IdentityManager` and record each key's derivation breadcrumb.
+    ///    Best-effort: Platform has already accepted, so a local
+    ///    bookkeeping failure is logged, not propagated.
     /// 5. Remove the tracked asset lock (if any) — the credit output
     ///    has been consumed, so the entry is no longer needed.
     ///
@@ -128,7 +129,7 @@ impl IdentityWallet {
     ) -> Result<Identity, PlatformWalletError>
     where
         S: Signer<IdentityPublicKey> + Send + Sync,
-        AS: ::key_wallet::signer::Signer + Send + Sync,
+        AS: ::key_wallet::signer::ExtendedPubKeySigner + Send + Sync,
     {
         // Step 1: pre-flight on the caller-supplied keys map.
         if keys_map.is_empty() {
@@ -184,7 +185,7 @@ impl IdentityWallet {
                 );
                 let chain_proof = self
                     .asset_locks
-                    .upgrade_to_chain_lock_proof(&out_point, CL_FALLBACK_TIMEOUT)
+                    .upgrade_to_chain_lock_proof(&out_point, None)
                     .await?;
                 // Recover the credit-output derivation path. The
                 // asset lock is now CL-attached (status advanced by
@@ -193,10 +194,7 @@ impl IdentityWallet {
                 // proof branch and just re-derives the path. This is
                 // cheap (no SPV wait) and avoids duplicating the
                 // path-derivation logic here.
-                let (_, path) = self
-                    .asset_locks
-                    .resume_asset_lock(&out_point, CL_FALLBACK_TIMEOUT)
-                    .await?;
+                let (_, path) = self.asset_locks.resume_asset_lock(&out_point, None).await?;
                 ResolvedFunding {
                     proof: chain_proof,
                     path,
@@ -226,7 +224,7 @@ impl IdentityWallet {
         // CL-height retry also iterates inside the IS→CL fallback branch
         // so a freshly-upgraded CL proof gets the same patience.
         let proof_out_point = out_point_from_proof(&proof);
-        let identity = match submit_with_cl_height_retry(settings, |s| {
+        let (submit_result, effective_proof) = match submit_with_cl_height_retry(settings, |s| {
             placeholder.put_to_platform_and_wait_for_response_with_signer(
                 &self.sdk,
                 proof.clone(),
@@ -238,7 +236,7 @@ impl IdentityWallet {
         })
         .await
         {
-            Ok(identity) => identity,
+            Ok(identity) => (Ok(identity), proof.clone()),
             Err(e) if is_instant_lock_proof_invalid(&e) => {
                 let out_point = proof_out_point;
                 tracing::warn!(
@@ -248,9 +246,9 @@ impl IdentityWallet {
                 );
                 let chain_proof = self
                     .asset_locks
-                    .upgrade_to_chain_lock_proof(&out_point, CL_FALLBACK_TIMEOUT)
+                    .upgrade_to_chain_lock_proof(&out_point, None)
                     .await?;
-                submit_with_cl_height_retry(settings, |s| {
+                let submit_result = submit_with_cl_height_retry(settings, |s| {
                     placeholder.put_to_platform_and_wait_for_response_with_signer(
                         &self.sdk,
                         chain_proof.clone(),
@@ -260,46 +258,92 @@ impl IdentityWallet {
                         s,
                     )
                 })
-                .await
-                .map_err(PlatformWalletError::Sdk)?
+                .await;
+                (submit_result, chain_proof)
             }
-            Err(e) => return Err(PlatformWalletError::Sdk(e)),
+            Err(e) => (Err(e), proof.clone()),
         };
+        let identity = self
+            .asset_locks
+            .reconcile_asset_lock_submit_result(
+                submit_result,
+                &proof_out_point,
+                &effective_proof,
+                None,
+            )
+            .await?;
 
-        // Step 4: bookkeeping — add to local IdentityManager + record
-        // key derivation breadcrumbs.
+        // Step 4 (best-effort): bookkeeping — add to local
+        // IdentityManager + record key derivation breadcrumbs.
+        //
+        // Platform has ALREADY accepted the registration, so a local
+        // bookkeeping failure must NOT propagate as `Err` — the caller
+        // would report failure for an identity that exists on chain,
+        // and the early return would skip Step 5's `consume_asset_lock`,
+        // leaving the spent lock in the Resumable Funding list where a
+        // Resume gets Platform's deterministic "lock already consumed"
+        // rejection. A missed local add self-heals on the next identity
+        // re-sync. This mirrors `register_from_addresses` Step 3.
         {
             use dpp::identity::accessors::IdentityGettersV0;
 
             let mut wm = self.wallet_manager.write().await;
-            let info = wm.get_wallet_info_mut(&self.wallet_id).ok_or_else(|| {
-                PlatformWalletError::WalletNotFound(
-                    "Wallet info not found in wallet manager".to_string(),
-                )
-            })?;
-            info.identity_manager.add_identity(
-                identity.clone(),
-                identity_index,
-                self.wallet_id,
-                &self.persister,
-            )?;
+            match wm.get_wallet_info_mut(&self.wallet_id) {
+                Some(info) => match info.identity_manager.add_identity(
+                    identity.clone(),
+                    identity_index,
+                    self.wallet_id,
+                    &self.persister,
+                ) {
+                    Ok(()) => {
+                        let wallet_id = self.wallet_id;
+                        let identity_id = identity.id();
+                        let public_keys: Vec<(KeyID, IdentityPublicKey)> = identity
+                            .public_keys()
+                            .iter()
+                            .map(|(k, v)| (*k, v.clone()))
+                            .collect();
 
-            let wallet_id = self.wallet_id;
-            let identity_id = identity.id();
-            let public_keys: Vec<(KeyID, IdentityPublicKey)> = identity
-                .public_keys()
-                .iter()
-                .map(|(k, v)| (*k, v.clone()))
-                .collect();
-
-            if let Some(managed) = info.identity_manager.managed_identity_mut(&identity_id) {
-                managed.wallet_id = Some(wallet_id);
-                for (key_id, pub_key) in public_keys {
-                    let key_index = key_id;
-                    managed.add_key(
-                        pub_key,
-                        Some((wallet_id, identity_index, key_index)),
-                        &self.persister,
+                        if let Some(managed) =
+                            info.identity_manager.managed_identity_mut(&identity_id)
+                        {
+                            managed.wallet_id = Some(wallet_id);
+                            for (key_id, pub_key) in public_keys {
+                                let key_index = key_id;
+                                managed
+                                    .add_key(
+                                        pub_key,
+                                        Some((wallet_id, identity_index, key_index)),
+                                        &self.persister,
+                                    )
+                                    .map_err(|e| {
+                                        PlatformWalletError::Persistence(format!(
+                                            "identity key not persisted after registration: {e}"
+                                        ))
+                                    })?;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // Breadcrumbs are skipped too: `IdentityAlreadyExists`
+                        // can mean an out-of-wallet entry, and stamping
+                        // `wallet_id` on one without moving buckets would
+                        // contradict the manager's location index.
+                        tracing::warn!(
+                            error = %e,
+                            identity_id = %identity.id(),
+                            "register_identity_with_funding: identity registered on \
+                             Platform but local add_identity failed; continuing so \
+                             the spent asset lock is still consumed"
+                        );
+                    }
+                },
+                None => {
+                    tracing::warn!(
+                        identity_id = %identity.id(),
+                        "register_identity_with_funding: identity registered on \
+                         Platform but wallet info was not found locally; skipping \
+                         local persistence"
                     );
                 }
             }
@@ -348,7 +392,8 @@ impl IdentityWallet {
     ///    Core-side timeout and Platform-side rejection (same as
     ///    register).
     /// 4. Persist the new credit balance + remove the tracked asset
-    ///    lock.
+    ///    lock. Best-effort: Platform has already accepted, so a local
+    ///    bookkeeping failure is logged, not propagated.
     pub async fn top_up_identity_with_funding<AS>(
         &self,
         identity_id: &Identifier,
@@ -357,7 +402,7 @@ impl IdentityWallet {
         settings: Option<PutSettings>,
     ) -> Result<u64, PlatformWalletError>
     where
-        AS: ::key_wallet::signer::Signer + Send + Sync,
+        AS: ::key_wallet::signer::ExtendedPubKeySigner + Send + Sync,
     {
         // Step 1: retrieve the identity + its HD index.
         let (identity, identity_index) = {
@@ -404,12 +449,9 @@ impl IdentityWallet {
                 );
                 let chain_proof = self
                     .asset_locks
-                    .upgrade_to_chain_lock_proof(&out_point, CL_FALLBACK_TIMEOUT)
+                    .upgrade_to_chain_lock_proof(&out_point, None)
                     .await?;
-                let (_, path) = self
-                    .asset_locks
-                    .resume_asset_lock(&out_point, CL_FALLBACK_TIMEOUT)
-                    .await?;
+                let (_, path) = self.asset_locks.resume_asset_lock(&out_point, None).await?;
                 ResolvedFunding {
                     proof: chain_proof,
                     path,
@@ -424,8 +466,8 @@ impl IdentityWallet {
         // cache, and IS-lock rejection triggers an IS→CL upgrade on the
         // same outpoint.
         let proof_out_point = out_point_from_proof(&proof);
-        let new_balance = match submit_with_cl_height_retry(settings, |s| {
-            identity.top_up_identity_with_signer(
+        let (submit_result, effective_proof) = match submit_with_cl_height_retry(settings, |s| {
+            identity.top_up_identity_with_signer_with_metadata(
                 &self.sdk,
                 proof.clone(),
                 &path,
@@ -435,7 +477,7 @@ impl IdentityWallet {
         })
         .await
         {
-            Ok(balance) => balance,
+            Ok(balance) => (Ok(balance), proof.clone()),
             Err(e) if is_instant_lock_proof_invalid(&e) => {
                 let out_point = proof_out_point;
                 tracing::warn!(
@@ -445,10 +487,10 @@ impl IdentityWallet {
                 );
                 let chain_proof = self
                     .asset_locks
-                    .upgrade_to_chain_lock_proof(&out_point, CL_FALLBACK_TIMEOUT)
+                    .upgrade_to_chain_lock_proof(&out_point, None)
                     .await?;
-                submit_with_cl_height_retry(settings, |s| {
-                    identity.top_up_identity_with_signer(
+                let submit_result = submit_with_cl_height_retry(settings, |s| {
+                    identity.top_up_identity_with_signer_with_metadata(
                         &self.sdk,
                         chain_proof.clone(),
                         &path,
@@ -456,27 +498,50 @@ impl IdentityWallet {
                         s,
                     )
                 })
-                .await
-                .map_err(PlatformWalletError::Sdk)?
+                .await;
+                (submit_result, chain_proof)
             }
-            Err(e) => return Err(PlatformWalletError::Sdk(e)),
+            Err(e) => (Err(e), proof.clone()),
         };
+        let (mut new_balance, metadata) = self
+            .asset_locks
+            .reconcile_asset_lock_submit_result(
+                submit_result,
+                &proof_out_point,
+                &effective_proof,
+                None,
+            )
+            .await?;
 
-        // Step 4: persist the new balance + clean up the tracked lock.
+        // Step 4 (best-effort): persist the new balance + clean up the
+        // tracked lock.
+        //
+        // Platform has ALREADY accepted the top-up, so a missing local
+        // wallet must NOT propagate as `Err` — the caller would report
+        // failure for credits that exist on chain, and the early return
+        // would skip the `consume_asset_lock` below, leaving the spent
+        // lock in the Resumable Funding list where a Resume gets
+        // Platform's deterministic "lock already consumed" rejection.
+        // The stale local balance self-heals on the next identity
+        // re-sync. Same posture as register's Step 4.
         {
             let mut wm = self.wallet_manager.write().await;
-            let info = wm.get_wallet_info_mut(&self.wallet_id).ok_or_else(|| {
-                PlatformWalletError::WalletNotFound(
-                    "Wallet info not found in wallet manager".to_string(),
-                )
-            })?;
-            if let Some(managed) = info.identity_manager.managed_identity_mut(identity_id) {
-                managed.identity.set_balance(new_balance);
-                if let Err(e) = self.persister.store(managed.snapshot_changeset().into()) {
-                    tracing::error!(
+            match wm.get_wallet_info_mut(&self.wallet_id) {
+                Some(info) => {
+                    if let Some(managed) = info.identity_manager.managed_identity_mut(identity_id) {
+                        new_balance = managed.persist_confirmed_balance(
+                            new_balance,
+                            BlockTime::from(metadata),
+                            &self.persister,
+                        );
+                    }
+                }
+                None => {
+                    tracing::warn!(
                         identity = %identity_id,
-                        error = %e,
-                        "Failed to persist identity balance update after top_up"
+                        "top_up_identity_with_funding: top-up accepted on Platform \
+                         but wallet info was not found locally; skipping balance \
+                         persistence"
                     );
                 }
             }
@@ -504,12 +569,11 @@ impl IdentityWallet {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// `find_tracked_unproven_lock` was removed when
-// `PlatformWalletError::FinalityTimeout` was widened to carry the full
-// `OutPoint` (previously only the `Txid`). The IS→CL fallback now reads
-// the outpoint directly off the error payload — no BTreeMap walk by
-// `(funding_type, identity_index)` is needed, which also closes the
-// non-determinism gap when multiple unproven locks shared that key.
+// `PlatformWalletError::FinalityTimeout` carries the full `OutPoint`, so
+// the IS→CL fallback reads the outpoint directly off the error payload —
+// no BTreeMap walk by `(funding_type, identity_index)` is needed, which
+// also closes the non-determinism gap when multiple unproven locks share
+// that key.
 
 // ---------------------------------------------------------------------------
 // Tests

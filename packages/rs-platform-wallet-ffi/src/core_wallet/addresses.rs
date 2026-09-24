@@ -1,5 +1,6 @@
 //! FFI bindings for CoreWallet address derivation.
 
+use super::transaction_builder::CoreAccountTypeFFI;
 use crate::error::*;
 use crate::handle::*;
 use crate::runtime::runtime;
@@ -48,6 +49,35 @@ pub unsafe extern "C" fn core_wallet_next_change_address(
     let addr = unwrap_result_or_return!(result);
     let c_str = unwrap_result_or_return!(CString::new(addr.to_string()));
     *out_address = c_str.into_raw();
+    PlatformWalletFFIResult::ok()
+}
+
+/// Widen the gap limit for an account, generating the addresses the wider
+/// limit now requires.
+///
+/// # Safety
+/// `handle` must be a valid core-wallet handle.
+#[no_mangle]
+pub unsafe extern "C" fn core_wallet_set_gap_limit(
+    handle: Handle,
+    account_type: CoreAccountTypeFFI,
+    account_index: u32,
+    gap_limit: u32,
+) -> PlatformWalletFFIResult {
+    let Some(source) = account_type.single_preference() else {
+        return PlatformWalletFFIResult::err(
+            PlatformWalletFFIResultCode::ErrorInvalidParameter,
+            "AllSpendable pools multiple accounts; set gap limits per account".to_string(),
+        );
+    };
+
+    let option = CORE_WALLET_STORAGE.with_item(handle, |wallet| {
+        runtime().block_on(wallet.set_gap_limit(source, account_index, gap_limit))
+    });
+
+    let result = unwrap_option_or_return!(option);
+    unwrap_result_or_return!(result);
+
     PlatformWalletFFIResult::ok()
 }
 

@@ -27,6 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error as StdError;
 use std::fmt;
 
+use super::balance::ShieldedBalanceSource;
 use crate::wallet::platform_wallet::WalletId;
 
 /// Identifies a single shielded "subwallet" — one Orchard account
@@ -71,6 +72,12 @@ pub struct ShieldedNote {
     /// Stamped per-batch — the SAME height OVK-recovered outgoing notes
     /// from that chunk get — so the activity deriver can cluster one
     /// bundle's incoming change and outgoing send together by height.
+    ///
+    /// This is an *observed at-or-before* bound (the tip the fetch was
+    /// proven at), NOT the note's inclusion height, which the proof
+    /// doesn't carry. It is a grouping key only — never surface it as
+    /// when the note was mined (scan-derived activity entries carry
+    /// `block_height: None` for exactly this reason).
     pub block_height: u64,
     /// Whether the nullifier was seen on-chain (spent).
     pub is_spent: bool,
@@ -112,8 +119,96 @@ pub struct ShieldedOutgoingNote {
     /// rather than `[u8; 36]` so the persisted shape stays flexible if
     /// the memo size ever changes; always 36 bytes for a recovered note.
     pub memo: Vec<u8>,
-    /// Block height at which the sent note appeared on-chain.
+    /// Proven platform height of the chunk fetch that recovered the
+    /// note — the same per-batch *observed at-or-before* bound (and
+    /// grouping key) as [`ShieldedNote::block_height`]; NOT the height
+    /// the send was mined at.
     pub block_height: u64,
+}
+
+/// A pending reservation that carries a recorded anchor:
+/// `(nullifier, anchor, activity_id)`. Yielded by
+/// [`ShieldedStore::stale_pending_spends`] for the sync reconcile,
+/// which releases the reservation once `anchor` is no longer in
+/// Platform's recorded set (the spend can then never execute).
+pub type StalePendingSpend = ([u8; 32], [u8; 32], Option<[u8; 32]>);
+
+/// An unresolved signed transition and its durable retry guard: the signed
+/// transition bytes plus everything the sync-time re-drive needs to
+/// resolve the ambiguity actively — re-broadcast the transition
+/// ([`nullifiers`](Self::nullifiers) detect a landing, `anchor` feeds
+/// the prune backstop, `activity_id` links the UI row, `attempts`
+/// bounds the retries.
+///
+/// Identity-funded shields arm this record before broadcast and have no input
+/// nullifiers. Their guard survives even after rebroadcasting stops. Note spends
+/// arm it only on the ambiguous outcome (`ShieldedSpendUnconfirmed`):
+/// the broadcast was accepted but the result wait failed, so the spend
+/// may or may not have executed. Re-broadcasting the byte-identical
+/// transition is fund-safe — identical nullifiers cannot double-spend —
+/// and converts silence into either a confirmation (next scan sees the
+/// nullifiers spent) or a definitive consensus verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingRedrive {
+    /// Activity-entry id of the spend (sha256 of visible output cmxs);
+    /// the spend-level key — every nullifier of one spend shares it.
+    pub activity_id: [u8; 32],
+    /// Platform-recorded anchor the spend was built against.
+    pub anchor: [u8; 32],
+    /// Nullifiers of every note the spend consumes.
+    pub nullifiers: Vec<[u8; 32]>,
+    /// The signed state transition, platform-serialized byte-exact as
+    /// originally broadcast.
+    pub st_bytes: Vec<u8>,
+    /// Re-broadcast attempts made so far.
+    pub attempts: u32,
+    /// A proven identity nonce has made this exact debit impossible to execute
+    /// again. Stop broadcasting, but keep its unresolved-payment guard until
+    /// the scan confirms the outputs. Always false for note-spend redrives.
+    pub identity_nonce_finalized: bool,
+    /// The host explicitly accepted that this payment may have executed or may
+    /// still execute. Retain the signed record for reconciliation/audit, but stop
+    /// automatic retries and permit separately authorized new payments.
+    /// This is never a proof of failure and is always false for note spends.
+    pub identity_user_abandoned: bool,
+}
+
+/// What the wallet knows about an identity debit's local recovery state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityDebitRecoveryStatus {
+    /// The original signed transaction may still be retried.
+    Retrying,
+    /// Its nonce is unavailable; output confirmation is still missing.
+    Parked,
+    /// The user accepted an unknown outcome and stopped automatic recovery.
+    Unknown,
+}
+
+/// An active or explicitly abandoned identity debit retained by the wallet.
+/// Missing decoded fields indicate a damaged record; the wallet/account/activity
+/// key still allows a deliberate, precisely scoped recovery decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityDebitRecoveryRecord {
+    pub account_index: u32,
+    pub activity_id: [u8; 32],
+    pub identity_id: Option<[u8; 32]>,
+    pub nonce: Option<u64>,
+    pub amount: Option<u64>,
+    pub status: IdentityDebitRecoveryStatus,
+}
+
+/// The result of [`SubwalletState::mark_spent`].
+///
+/// `newly_spent` preserves the historical `bool` return (the
+/// unspent→spent transition, which the durable store keys its
+/// note-row write on). `dropped_redrives` carries the activity ids of
+/// any redrive records resolved by this nullifier so the durable store
+/// can mirror the SQLite deletion — even on the already-spent path,
+/// where the in-memory drop happens but `newly_spent` is false.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct MarkSpentOutcome {
+    pub newly_spent: bool,
+    pub dropped_redrives: Vec<[u8; 32]>,
 }
 
 /// Storage abstraction for shielded wallet state.
@@ -135,6 +230,11 @@ pub trait ShieldedStore: Send + Sync {
 
     /// Return all unspent notes for `id`.
     fn get_unspent_notes(&self, id: SubwalletId) -> Result<Vec<ShieldedNote>, Self::Error>;
+
+    /// The same reservation-aware sum used by sync and local balance reads.
+    /// Implementations must reject sums exceeding `u64::MAX` with their storage
+    /// error, rather than wrapping, saturating, or panicking.
+    fn spendable_balance(&self, id: SubwalletId) -> Result<u64, Self::Error>;
 
     /// Return all notes (spent and unspent) for `id`.
     fn get_all_notes(&self, id: SubwalletId) -> Result<Vec<ShieldedNote>, Self::Error>;
@@ -168,6 +268,70 @@ pub trait ShieldedStore: Send + Sync {
     /// `mark_spent`).
     fn clear_pending(&mut self, id: SubwalletId, nullifier: &[u8; 32])
         -> Result<bool, Self::Error>;
+
+    /// Attach the recorded `anchor` the spend was built against, and
+    /// the linked `activity_id`, to `id`'s pending reservation for
+    /// `nullifier` (taken earlier by [`Self::mark_pending`]). No-op
+    /// if the nullifier is no longer pending. The sync reconcile uses
+    /// the stored anchor to detect a stranded spend whose anchor
+    /// Platform has pruned (see [`Self::stale_pending_spends`]).
+    fn set_pending_spend(
+        &mut self,
+        id: SubwalletId,
+        nullifier: &[u8; 32],
+        anchor: [u8; 32],
+        activity_id: [u8; 32],
+    ) -> Result<(), Self::Error>;
+
+    /// Pending reservations for `id` that carry a recorded anchor —
+    /// `(nullifier, anchor, activity_id)` per built-but-unconfirmed
+    /// spend. Empty when `id` has no anchored reservations (the common
+    /// case, which lets the sync reconcile skip its network round-trip).
+    /// The reconcile checks each anchor against Platform's recorded set
+    /// and releases the reservation via [`Self::clear_pending`] when the
+    /// anchor is pruned — the spend can then never execute.
+    fn stale_pending_spends(&self, id: SubwalletId) -> Result<Vec<StalePendingSpend>, Self::Error>;
+
+    // ── Re-drivable unconfirmed spends (per-subwallet) ─────────────────
+
+    /// Persist a re-drivable record for a broadcast-accepted spend whose
+    /// result wait failed ambiguously. Keyed by `redrive.activity_id`;
+    /// re-arming the same id overwrites. Unlike the bare `mark_pending`
+    /// reservations, redrive records survive a restart where the backend
+    /// persists them (the file store does): on reopen both the record
+    /// and its note reservations are rehydrated, so the re-drive — and
+    /// the linked activity row's eventual Confirmed/Failed flip —
+    /// continue across relaunches.
+    fn arm_redrive(&mut self, id: SubwalletId, redrive: PendingRedrive) -> Result<(), Self::Error>;
+
+    /// Every armed redrive record for `id`.
+    fn pending_redrives(&self, id: SubwalletId) -> Result<Vec<PendingRedrive>, Self::Error>;
+
+    /// Every armed redrive record for a wallet, paired with the subwallet
+    /// that owns its durable row. Previously bound accounts remain visible
+    /// here while they retain a wallet-wide identity-debit guard.
+    fn pending_redrives_for_wallet(
+        &self,
+        wallet_id: WalletId,
+    ) -> Result<Vec<(SubwalletId, PendingRedrive)>, Self::Error>;
+
+    /// Increment the attempt counter on `id`'s redrive keyed by
+    /// `activity_id`, returning the new count (`0` when no such record
+    /// exists).
+    fn bump_redrive_attempts(
+        &mut self,
+        id: SubwalletId,
+        activity_id: &[u8; 32],
+    ) -> Result<u32, Self::Error>;
+
+    /// Drop the redrive record keyed by `activity_id` — the spend
+    /// resolved (landed, definitively rejected, or released by the
+    /// anchor-prune backstop). Implementations also drop the record
+    /// implicitly when [`Self::mark_spent`] or [`Self::clear_pending`]
+    /// resolves one of its nullifiers, since a transition lands or dies
+    /// atomically for all of its nullifiers.
+    fn clear_redrive(&mut self, id: SubwalletId, activity_id: &[u8; 32])
+        -> Result<(), Self::Error>;
 
     // ── Outgoing history (per-subwallet) ───────────────────────────────
 
@@ -252,13 +416,35 @@ pub trait ShieldedStore: Send + Sync {
     /// Return the current tree root (Sinsemilla anchor, 32 bytes).
     fn tree_anchor(&self) -> Result<[u8; 32], Self::Error>;
 
-    /// Generate a Merkle authentication path for `position`
-    /// against the current tree state. Returns `Ok(None)` if no
-    /// witness is available (position not marked, or pruned).
+    /// Generate a Merkle authentication path for `position` as of the
+    /// checkpoint at `depth` (0 = current tree state, 1 = the previous
+    /// checkpoint, and so on). Returns `Ok(None)` when no witness is
+    /// available at that depth — the position is unmarked/pruned, the
+    /// requested checkpoint depth doesn't exist, or the position was
+    /// appended after that checkpoint.
+    ///
+    /// Building a spend against an older-but-recorded checkpoint is how the
+    /// wallet keeps its anchor consistent with a root Platform actually
+    /// recorded: Platform records one anchor per block while an index-chunk
+    /// sync routinely leaves the tree mid-block, so the depth-0 root is often
+    /// one Platform never recorded.
+    fn witness_at_depth(
+        &self,
+        position: u64,
+        depth: usize,
+    ) -> Result<Option<grovedb_commitment_tree::MerklePath>, Self::Error>;
+
+    /// Generate a Merkle authentication path for `position` against the
+    /// current tree state. Returns `Ok(None)` if no witness is available
+    /// (position not marked, or pruned).
+    ///
+    /// Delegates to [`Self::witness_at_depth`] at depth 0.
     fn witness(
         &self,
         position: u64,
-    ) -> Result<Option<grovedb_commitment_tree::MerklePath>, Self::Error>;
+    ) -> Result<Option<grovedb_commitment_tree::MerklePath>, Self::Error> {
+        self.witness_at_depth(position, 0)
+    }
 
     /// Number of leaves currently in the shared commitment tree
     /// (= highest appended position + 1, or 0 when empty).
@@ -302,6 +488,19 @@ pub trait ShieldedStore: Send + Sync {
     /// rather than resuming behind the stale watermark.
     fn purge_wallet(&mut self, wallet_id: WalletId) -> Result<(), Self::Error>;
 
+    /// Drop the account-scoped state and nullifier-backed redrives for exactly
+    /// one subwallet, leaving every other subwallet and the shared commitment
+    /// tree intact. Empty-nullifier identity-debit guards are wallet-wide and
+    /// survive until authenticated resolution or an explicit wallet purge.
+    ///
+    /// The account-scoped sibling of [`Self::purge_wallet`]. Used by
+    /// the coordinator when a re-bind changes a wallet's account set:
+    /// only the accounts that were dropped (or whose viewing key
+    /// changed — their stored notes belong to the old key) are
+    /// purged, so the accounts that remain bound keep their fresh
+    /// in-memory notes and watermarks across the re-bind.
+    fn purge_subwallet(&mut self, id: SubwalletId) -> Result<(), Self::Error>;
+
     /// Drop ALL in-memory per-subwallet state for every subwallet
     /// of every wallet. The shared commitment tree is left
     /// untouched. Used by `NetworkShieldedCoordinator::clear()`.
@@ -328,6 +527,28 @@ pub trait ShieldedStore: Send + Sync {
 
 // ── Per-subwallet bookkeeping ──────────────────────────────────────────
 
+/// In-flight-spend bookkeeping for a single reserved nullifier.
+///
+/// A reservation starts life bare (both fields `None`) the moment
+/// [`SubwalletState::mark_pending`] excludes the note from selection.
+/// Once the spend is actually built, [`SubwalletState::set_pending_spend`]
+/// records the Platform-**recorded** anchor it was built against and the
+/// linked activity-log entry, so the sync reconcile can later detect a
+/// stranded (broadcast-accepted-but-never-landed) spend: once that anchor
+/// is pruned from Platform's recorded set the spend can never execute, and
+/// with the nullifier still unspent the reservation is provably dead and
+/// its note can be freed. All in-memory only — a restart drops every
+/// reservation regardless.
+#[derive(Debug, Clone, Default)]
+pub(super) struct PendingSpend {
+    /// The recorded anchor the spend was built against, once known.
+    /// `None` while the note is reserved but the spend isn't built yet.
+    pub anchor: Option<[u8; 32]>,
+    /// The linked activity-log entry id, so a released reservation can
+    /// flip its "Pending" row to "Failed" instead of stranding it.
+    pub activity_id: Option<[u8; 32]>,
+}
+
 /// Per-subwallet note + sync state used by both the in-memory and
 /// file-backed stores. Kept in this module so both share the
 /// exact same shape and the persister callback can serialize it
@@ -341,11 +562,25 @@ pub(super) struct SubwalletState {
     /// Sync watermark: count of note positions scanned = the next
     /// global index to scan (exclusive). `0` = nothing scanned yet.
     pub last_synced_index: u64,
+    /// Session-only provenance; durable watermarks are still ordinary u64 rows.
+    pub last_scanned_index: Option<u64>,
+    pub balance_source: ShieldedBalanceSource,
     /// Nullifiers of notes currently being spent in an in-flight
-    /// transition. Excluded from `unspent_notes()` so concurrent
-    /// callers can't double-select. In-memory only — never
-    /// persisted; the next sync after a crash reconciles state.
-    pub pending_nullifiers: BTreeSet<[u8; 32]>,
+    /// transition, mapped to the [`PendingSpend`] bookkeeping the
+    /// sync reconcile needs. Excluded from `unspent_notes()` so
+    /// concurrent callers can't double-select. Held in memory; a
+    /// pre-broadcast reservation dies with the process, but a
+    /// reservation belonging to an armed [`PendingRedrive`] is
+    /// rehydrated on file-store open (the redrive row carries its
+    /// nullifiers), so an unconfirmed broadcast keeps its notes
+    /// reserved across restarts.
+    pub pending_nullifiers: BTreeMap<[u8; 32], PendingSpend>,
+    /// Armed re-drivable unconfirmed spends, keyed by activity id.
+    /// See [`PendingRedrive`]. Kept consistent with
+    /// `pending_nullifiers`: resolving any of a redrive's nullifiers
+    /// (mark_spent / clear_pending) drops the whole record — a
+    /// transition lands or dies atomically for all its nullifiers.
+    pub redrives: BTreeMap<[u8; 32], PendingRedrive>,
     /// Notes this subwallet SENT, recovered via OVK during the scan.
     /// Append-only send history in recording order.
     pub outgoing_notes: Vec<ShieldedOutgoingNote>,
@@ -375,44 +610,169 @@ impl SubwalletState {
         self.notes.push(note.clone());
     }
 
-    pub(super) fn unspent_notes(&self) -> Vec<ShieldedNote> {
+    /// Borrow the selectable notes so balance reads do not clone note payloads.
+    fn unspent_notes_iter(&self) -> impl Iterator<Item = &ShieldedNote> {
         self.notes
             .iter()
-            .filter(|n| !n.is_spent && !self.pending_nullifiers.contains(&n.nullifier))
-            .cloned()
-            .collect()
+            .filter(|note| !note.is_spent && !self.pending_nullifiers.contains_key(&note.nullifier))
+    }
+
+    pub(super) fn unspent_notes(&self) -> Vec<ShieldedNote> {
+        self.unspent_notes_iter().cloned().collect()
+    }
+
+    /// Both stores use the same borrowed, reservation-aware checked sum.
+    /// Each caller maps overflow into its own storage error.
+    pub(super) fn spendable_balance(&self) -> Option<u64> {
+        self.unspent_notes_iter()
+            .try_fold(0u64, |total, note| total.checked_add(note.value))
     }
 
     pub(super) fn all_notes(&self) -> Vec<ShieldedNote> {
         self.notes.clone()
     }
 
-    pub(super) fn mark_spent(&mut self, nullifier: &[u8; 32]) -> bool {
-        if let Some(&idx) = self.nullifier_index.get(nullifier) {
-            if !self.notes[idx].is_spent {
-                self.notes[idx].is_spent = true;
-                // Promotion implies the spend confirmed; drop any
-                // matching pending reservation. Idempotent — the
-                // common path already cleared pending in the
-                // spend-flow finalizer.
-                self.pending_nullifiers.remove(nullifier);
-                return true;
-            }
+    pub(super) fn mark_spent(&mut self, nullifier: &[u8; 32]) -> MarkSpentOutcome {
+        let Some(&idx) = self.nullifier_index.get(nullifier) else {
+            return MarkSpentOutcome::default();
+        };
+        let newly_spent = !self.notes[idx].is_spent;
+        self.notes[idx].is_spent = true;
+        // Resolve the reservation + redrive record whenever the
+        // nullifier is KNOWN, not only on the first unspent→spent
+        // transition. A note restored from disk already `is_spent`
+        // (its owning transition landed in a prior session) paired with
+        // a rehydrated redrive row would otherwise keep a ghost
+        // reservation alive and re-broadcast a transition that already
+        // executed. Removing a pending reservation on a spent note is
+        // always safe — a spent note can't be re-spent. `dropped` is
+        // returned so the durable store can mirror the deletion even
+        // when `newly_spent` is false (the in-memory drop still
+        // happened here).
+        self.pending_nullifiers.remove(nullifier);
+        let dropped = self.drop_redrives_containing(nullifier);
+        MarkSpentOutcome {
+            newly_spent,
+            dropped_redrives: dropped,
         }
-        false
+    }
+
+    /// Drop every redrive record that carries `nullifier`, returning
+    /// the dropped activity ids (the file store mirrors the deletions
+    /// to SQLite). A transition lands or dies atomically for all of
+    /// its nullifiers, so resolving one resolves the record.
+    pub(super) fn drop_redrives_containing(&mut self, nullifier: &[u8; 32]) -> Vec<[u8; 32]> {
+        let dropped: Vec<[u8; 32]> = self
+            .redrives
+            .iter()
+            .filter(|(_, r)| r.nullifiers.contains(nullifier))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &dropped {
+            self.redrives.remove(id);
+        }
+        dropped
     }
 
     /// Reserve `nullifier` against an in-flight spend. Returns
-    /// `true` if newly added.
+    /// `true` if newly added, `false` if it was already reserved.
+    /// Re-reserving is a true no-op: an already-armed entry keeps its
+    /// anchor/activity link (selection excludes pending nullifiers, so
+    /// this shouldn't happen — but a plain `insert` would silently
+    /// wipe the release pass's only handle on a stranded spend if it
+    /// ever did).
     pub(super) fn mark_pending(&mut self, nullifier: &[u8; 32]) -> bool {
-        self.pending_nullifiers.insert(*nullifier)
+        match self.pending_nullifiers.entry(*nullifier) {
+            std::collections::btree_map::Entry::Vacant(e) => {
+                e.insert(PendingSpend::default());
+                true
+            }
+            std::collections::btree_map::Entry::Occupied(_) => false,
+        }
+    }
+
+    /// Attach the built spend's recorded `anchor` and linked
+    /// `activity_id` to an existing reservation for `nullifier`.
+    /// No-op if the nullifier is no longer pending (e.g. the
+    /// reservation was already cleared by a concurrent finalize).
+    pub(super) fn set_pending_spend(
+        &mut self,
+        nullifier: &[u8; 32],
+        anchor: [u8; 32],
+        activity_id: [u8; 32],
+    ) {
+        if let Some(pending) = self.pending_nullifiers.get_mut(nullifier) {
+            pending.anchor = Some(anchor);
+            pending.activity_id = Some(activity_id);
+        }
+    }
+
+    /// Reservations that carry a recorded anchor — i.e. built,
+    /// broadcast-but-unconfirmed spends. Returns `(nullifier,
+    /// anchor, activity_id)` per such entry; reservations still
+    /// awaiting a built spend (`anchor: None`) are skipped. The
+    /// sync reconcile checks each anchor against Platform's recorded
+    /// set and releases the reservation when the anchor is pruned.
+    pub(super) fn stale_pending_spends(&self) -> Vec<StalePendingSpend> {
+        self.pending_nullifiers
+            .iter()
+            .filter_map(|(nullifier, spend)| {
+                spend
+                    .anchor
+                    .map(|anchor| (*nullifier, anchor, spend.activity_id))
+            })
+            .collect()
     }
 
     /// Release a reservation previously taken via `mark_pending`.
     /// Returns `true` if a matching reservation was actually
     /// removed.
     pub(super) fn clear_pending(&mut self, nullifier: &[u8; 32]) -> bool {
-        self.pending_nullifiers.remove(nullifier)
+        let removed = self.pending_nullifiers.remove(nullifier).is_some();
+        if removed {
+            // Releasing a reservation resolves its spend for good
+            // (definitive rejection or prune backstop) — the redrive
+            // record goes with it.
+            self.drop_redrives_containing(nullifier);
+        }
+        removed
+    }
+
+    /// Arm (or overwrite by activity id) a re-drivable record.
+    pub(super) fn arm_redrive(&mut self, redrive: PendingRedrive) {
+        self.redrives.insert(redrive.activity_id, redrive);
+    }
+
+    pub(super) fn pending_redrives(&self) -> Vec<PendingRedrive> {
+        self.redrives.values().cloned().collect()
+    }
+
+    pub(super) fn identity_redrives(&self) -> Vec<PendingRedrive> {
+        self.redrives
+            .values()
+            .filter(|redrive| redrive.nullifiers.is_empty())
+            .cloned()
+            .collect()
+    }
+
+    /// Current attempt count for `activity_id`'s redrive, if armed.
+    pub(super) fn redrive_attempts(&self, activity_id: &[u8; 32]) -> Option<u32> {
+        self.redrives.get(activity_id).map(|r| r.attempts)
+    }
+
+    /// Bump the attempt counter; `0` when no such record exists.
+    pub(super) fn bump_redrive_attempts(&mut self, activity_id: &[u8; 32]) -> u32 {
+        self.redrives
+            .get_mut(activity_id)
+            .map(|r| {
+                r.attempts = r.attempts.saturating_add(1);
+                r.attempts
+            })
+            .unwrap_or(0)
+    }
+
+    pub(super) fn clear_redrive(&mut self, activity_id: &[u8; 32]) {
+        self.redrives.remove(activity_id);
     }
 
     /// Record an outgoing (sent) note. Idempotent by `cmx`: returns
@@ -518,6 +878,13 @@ impl ShieldedStore for InMemoryShieldedStore {
             .unwrap_or_default())
     }
 
+    fn spendable_balance(&self, id: SubwalletId) -> Result<u64, Self::Error> {
+        self.subwallets
+            .get(&id)
+            .map_or(Some(0), SubwalletState::spendable_balance)
+            .ok_or_else(|| InMemoryStoreError("spendable shielded balance exceeds u64".to_string()))
+    }
+
     fn get_all_notes(&self, id: SubwalletId) -> Result<Vec<ShieldedNote>, Self::Error> {
         Ok(self
             .subwallets
@@ -527,10 +894,13 @@ impl ShieldedStore for InMemoryShieldedStore {
     }
 
     fn mark_spent(&mut self, id: SubwalletId, nullifier: &[u8; 32]) -> Result<bool, Self::Error> {
+        // In-memory store: the redrive map lives in the same
+        // `SubwalletState`, so `mark_spent` already dropped any resolved
+        // redrives — nothing durable to mirror. Surface `newly_spent`.
         Ok(self
             .subwallets
             .get_mut(&id)
-            .map(|sw| sw.mark_spent(nullifier))
+            .map(|sw| sw.mark_spent(nullifier).newly_spent)
             .unwrap_or(false))
     }
 
@@ -552,6 +922,80 @@ impl ShieldedStore for InMemoryShieldedStore {
             .get_mut(&id)
             .map(|sw| sw.clear_pending(nullifier))
             .unwrap_or(false))
+    }
+
+    fn set_pending_spend(
+        &mut self,
+        id: SubwalletId,
+        nullifier: &[u8; 32],
+        anchor: [u8; 32],
+        activity_id: [u8; 32],
+    ) -> Result<(), Self::Error> {
+        if let Some(sw) = self.subwallets.get_mut(&id) {
+            sw.set_pending_spend(nullifier, anchor, activity_id);
+        }
+        Ok(())
+    }
+
+    fn stale_pending_spends(&self, id: SubwalletId) -> Result<Vec<StalePendingSpend>, Self::Error> {
+        Ok(self
+            .subwallets
+            .get(&id)
+            .map(SubwalletState::stale_pending_spends)
+            .unwrap_or_default())
+    }
+
+    fn arm_redrive(&mut self, id: SubwalletId, redrive: PendingRedrive) -> Result<(), Self::Error> {
+        self.subwallets.entry(id).or_default().arm_redrive(redrive);
+        Ok(())
+    }
+
+    fn pending_redrives(&self, id: SubwalletId) -> Result<Vec<PendingRedrive>, Self::Error> {
+        Ok(self
+            .subwallets
+            .get(&id)
+            .map(SubwalletState::pending_redrives)
+            .unwrap_or_default())
+    }
+
+    fn pending_redrives_for_wallet(
+        &self,
+        wallet_id: WalletId,
+    ) -> Result<Vec<(SubwalletId, PendingRedrive)>, Self::Error> {
+        Ok(self
+            .subwallets
+            .iter()
+            .filter(|(id, _)| id.wallet_id == wallet_id)
+            .flat_map(|(id, subwallet)| {
+                subwallet
+                    .pending_redrives()
+                    .into_iter()
+                    .map(|redrive| (*id, redrive))
+            })
+            .collect())
+    }
+
+    fn bump_redrive_attempts(
+        &mut self,
+        id: SubwalletId,
+        activity_id: &[u8; 32],
+    ) -> Result<u32, Self::Error> {
+        Ok(self
+            .subwallets
+            .get_mut(&id)
+            .map(|sw| sw.bump_redrive_attempts(activity_id))
+            .unwrap_or(0))
+    }
+
+    fn clear_redrive(
+        &mut self,
+        id: SubwalletId,
+        activity_id: &[u8; 32],
+    ) -> Result<(), Self::Error> {
+        if let Some(sw) = self.subwallets.get_mut(&id) {
+            sw.clear_redrive(activity_id);
+        }
+        Ok(())
     }
 
     fn record_outgoing_note(
@@ -633,9 +1077,10 @@ impl ShieldedStore for InMemoryShieldedStore {
         Ok(self.anchor)
     }
 
-    fn witness(
+    fn witness_at_depth(
         &self,
         _position: u64,
+        _depth: usize,
     ) -> Result<Option<grovedb_commitment_tree::MerklePath>, Self::Error> {
         Err(InMemoryStoreError(
             "Merkle witness not supported in in-memory store".into(),
@@ -659,12 +1104,31 @@ impl ShieldedStore for InMemoryShieldedStore {
         id: SubwalletId,
         index: u64,
     ) -> Result<(), Self::Error> {
-        self.subwallets.entry(id).or_default().last_synced_index = index;
+        let state = self.subwallets.entry(id).or_default();
+        state.last_synced_index = index;
+        state.last_scanned_index = Some(index);
+        state.balance_source = ShieldedBalanceSource::ScannedThisSession;
         Ok(())
     }
 
     fn purge_wallet(&mut self, wallet_id: WalletId) -> Result<(), Self::Error> {
         self.subwallets.retain(|id, _| id.wallet_id != wallet_id);
+        Ok(())
+    }
+
+    fn purge_subwallet(&mut self, id: SubwalletId) -> Result<(), Self::Error> {
+        let identity_redrives = self
+            .subwallets
+            .get(&id)
+            .map(SubwalletState::identity_redrives)
+            .unwrap_or_default();
+        self.subwallets.remove(&id);
+        if !identity_redrives.is_empty() {
+            let retained = self.subwallets.entry(id).or_default();
+            for redrive in identity_redrives {
+                retained.arm_redrive(redrive);
+            }
+        }
         Ok(())
     }
 
@@ -692,6 +1156,83 @@ mod tests {
 
     fn test_id(account: u32) -> SubwalletId {
         SubwalletId::new([0xAA; 32], account)
+    }
+
+    #[test]
+    fn should_borrow_spendable_notes_and_preserve_the_selection_filter() {
+        let mut state = SubwalletState::default();
+        for tag in 1..=4 {
+            let mut note = note_with_nullifier([tag; 32]);
+            note.value = u64::from(tag) * 100;
+            state.save_note(&note);
+        }
+        state.mark_pending(&[2; 32]);
+        state.mark_spent(&[3; 32]);
+
+        let borrowed: Vec<_> = state.unspent_notes_iter().collect();
+        assert_eq!(borrowed.len(), 2);
+        assert!(std::ptr::eq(borrowed[0], &state.notes[0]));
+        assert!(std::ptr::eq(borrowed[1], &state.notes[3]));
+        assert_eq!(state.spendable_balance(), Some(500));
+        assert_eq!(
+            state
+                .unspent_notes()
+                .iter()
+                .map(|note| note.value)
+                .collect::<Vec<_>>(),
+            vec![100, 400]
+        );
+        state.clear_pending(&[2; 32]);
+        assert_eq!(state.spendable_balance(), Some(700));
+    }
+
+    #[test]
+    fn should_reject_overflowing_in_memory_spendable_balance() {
+        let mut store = InMemoryShieldedStore::new();
+        let id = test_id(0);
+        for (tag, value) in [(1, u64::MAX), (2, 1)] {
+            store
+                .save_note(
+                    id,
+                    &ShieldedNote {
+                        position: tag as u64,
+                        cmx: [tag; 32],
+                        nullifier: [tag; 32],
+                        block_height: 100,
+                        is_spent: false,
+                        value,
+                        note_data: vec![],
+                    },
+                )
+                .expect("save test note");
+        }
+        let error = store
+            .spendable_balance(id)
+            .expect_err("overflow must not wrap or panic");
+        assert!(error.to_string().contains("exceeds u64"));
+
+        // Reservations and spent notes are excluded before checked addition.
+        store
+            .mark_pending(id, &[2; 32])
+            .expect("reserve small note");
+        assert_eq!(store.spendable_balance(id).unwrap(), u64::MAX);
+        assert_eq!(store.spendable_balance(test_id(1)).unwrap(), 0);
+        assert_eq!(
+            store
+                .spendable_balance(SubwalletId::new([0xBB; 32], 0))
+                .unwrap(),
+            0
+        );
+        store
+            .clear_pending(id, &[2; 32])
+            .expect("release reservation");
+        assert!(store.spendable_balance(id).is_err());
+        store.mark_spent(id, &[2; 32]).expect("spend small note");
+        assert_eq!(store.spendable_balance(id).unwrap(), u64::MAX);
+        store
+            .mark_spent(id, &[1; 32])
+            .expect("spend remaining note");
+        assert_eq!(store.spendable_balance(id).unwrap(), 0);
     }
 
     #[test]
@@ -744,6 +1285,55 @@ mod tests {
         assert!(!store.mark_spent(id, &nullifier).unwrap());
     }
 
+    /// Resolving any of a redrive's nullifiers — landing (`mark_spent`)
+    /// or release (`clear_pending`) — drops the whole record: a
+    /// transition lands or dies atomically for all its nullifiers.
+    #[test]
+    fn resolving_a_nullifier_drops_the_redrive_record() {
+        let mut store = InMemoryShieldedStore::new();
+        let id = test_id(0);
+        let n1 = [3u8; 32];
+        let n2 = [4u8; 32];
+        let note = ShieldedNote {
+            position: 0,
+            cmx: [1u8; 32],
+            nullifier: n1,
+            block_height: 50,
+            is_spent: false,
+            value: 500,
+            note_data: vec![0u8; 115],
+        };
+        store.save_note(id, &note).unwrap();
+        let redrive = PendingRedrive {
+            activity_id: [9u8; 32],
+            anchor: [8u8; 32],
+            nullifiers: vec![n1, n2],
+            st_bytes: vec![1, 2, 3],
+            attempts: 0,
+            identity_nonce_finalized: false,
+            identity_user_abandoned: false,
+        };
+
+        // Landing path: mark_spent on one nullifier drops the record.
+        store.mark_pending(id, &n1).unwrap();
+        store.arm_redrive(id, redrive.clone()).unwrap();
+        assert_eq!(store.pending_redrives(id).unwrap().len(), 1);
+        assert!(store.mark_spent(id, &n1).unwrap());
+        assert!(
+            store.pending_redrives(id).unwrap().is_empty(),
+            "landed spend drops its redrive record"
+        );
+
+        // Release path: clear_pending on a nullifier drops the record.
+        store.mark_pending(id, &n2).unwrap();
+        store.arm_redrive(id, redrive).unwrap();
+        assert!(store.clear_pending(id, &n2).unwrap());
+        assert!(
+            store.pending_redrives(id).unwrap().is_empty(),
+            "released reservation drops its redrive record"
+        );
+    }
+
     #[test]
     fn test_sync_state_per_subwallet() {
         let mut store = InMemoryShieldedStore::new();
@@ -788,6 +1378,7 @@ mod tests {
                 block_height: height,
                 status,
                 created_at_ms: 0,
+                min_note_position: None,
                 note_cmxs: vec![[id; 32]],
                 spent_nullifiers: vec![],
             }
@@ -864,5 +1455,192 @@ mod tests {
         // Re-append starts from position 0 again.
         store.append_commitment(&[3u8; 32], true).unwrap();
         assert_eq!(store.tree_size().unwrap(), 1);
+    }
+
+    /// Build a minimal unspent note carrying `nullifier`.
+    fn note_with_nullifier(nullifier: [u8; 32]) -> ShieldedNote {
+        ShieldedNote {
+            position: 0,
+            cmx: [1u8; 32],
+            nullifier,
+            block_height: 1,
+            is_spent: false,
+            value: 1_000,
+            note_data: vec![0u8; 115],
+        }
+    }
+
+    /// A reservation carrying a recorded anchor surfaces via
+    /// `stale_pending_spends`, and the sync reconcile's release decision
+    /// (release iff the anchor is absent from the recorded set) must RETAIN
+    /// it while the anchor is still recorded — a slow-but-landing spend is
+    /// never freed, so its note stays out of the unspent set.
+    #[test]
+    fn pending_spend_with_recorded_anchor_is_retained() {
+        use std::collections::HashSet;
+
+        let mut store = InMemoryShieldedStore::new();
+        let id = test_id(0);
+        let nullifier = [0x11; 32];
+        let anchor = [0x22; 32];
+        let activity_id = [0x33; 32];
+
+        store
+            .save_note(id, &note_with_nullifier(nullifier))
+            .unwrap();
+        assert!(
+            store.mark_pending(id, &nullifier).unwrap(),
+            "newly reserved"
+        );
+        store
+            .set_pending_spend(id, &nullifier, anchor, activity_id)
+            .unwrap();
+
+        assert_eq!(
+            store.stale_pending_spends(id).unwrap(),
+            vec![(nullifier, anchor, Some(activity_id))],
+            "an armed reservation surfaces as an anchored (stale-checkable) spend"
+        );
+
+        // Anchor IS still recorded → retain.
+        let recorded: HashSet<[u8; 32]> = [anchor].into_iter().collect();
+        for (n, a, _) in store.stale_pending_spends(id).unwrap() {
+            if !recorded.contains(&a) {
+                store.clear_pending(id, &n).unwrap();
+            }
+        }
+        assert_eq!(
+            store.stale_pending_spends(id).unwrap().len(),
+            1,
+            "a still-recorded anchor must not be released"
+        );
+        assert!(
+            store.get_unspent_notes(id).unwrap().is_empty(),
+            "the retained note stays excluded from selection candidates"
+        );
+    }
+
+    /// The fund-safe release: once the anchor is pruned (absent from the
+    /// recorded set) the spend can never execute, so the reservation is
+    /// released and the freed note becomes spendable again.
+    #[test]
+    fn pending_spend_with_pruned_anchor_is_released() {
+        use std::collections::HashSet;
+
+        let mut store = InMemoryShieldedStore::new();
+        let id = test_id(0);
+        let nullifier = [0x11; 32];
+        let anchor = [0x22; 32];
+        let activity_id = [0x33; 32];
+
+        store
+            .save_note(id, &note_with_nullifier(nullifier))
+            .unwrap();
+        store.mark_pending(id, &nullifier).unwrap();
+        store
+            .set_pending_spend(id, &nullifier, anchor, activity_id)
+            .unwrap();
+        assert!(store.get_unspent_notes(id).unwrap().is_empty());
+
+        // Anchor is ABSENT from the recorded set (pruned) → release.
+        let recorded: HashSet<[u8; 32]> = [[0xEE; 32]].into_iter().collect();
+        for (n, a, _) in store.stale_pending_spends(id).unwrap() {
+            if !recorded.contains(&a) {
+                assert!(store.clear_pending(id, &n).unwrap());
+            }
+        }
+        assert!(
+            store.stale_pending_spends(id).unwrap().is_empty(),
+            "a pruned-anchor reservation must be released"
+        );
+        let unspent = store.get_unspent_notes(id).unwrap();
+        assert_eq!(unspent.len(), 1, "the freed note is spendable again");
+        assert_eq!(unspent[0].nullifier, nullifier);
+    }
+
+    /// A reserved note is excluded from `unspent_notes` (so a concurrent
+    /// spend can't re-select it) and re-included once the reservation is
+    /// cleared.
+    #[test]
+    fn unspent_notes_excludes_pending_and_reincludes_after_clear() {
+        let mut store = InMemoryShieldedStore::new();
+        let id = test_id(0);
+        let nullifier = [0x55; 32];
+        store
+            .save_note(id, &note_with_nullifier(nullifier))
+            .unwrap();
+        assert_eq!(store.get_unspent_notes(id).unwrap().len(), 1);
+
+        store.mark_pending(id, &nullifier).unwrap();
+        assert!(
+            store.get_unspent_notes(id).unwrap().is_empty(),
+            "a reserved note is excluded from selection candidates"
+        );
+
+        assert!(store.clear_pending(id, &nullifier).unwrap());
+        assert_eq!(
+            store.get_unspent_notes(id).unwrap().len(),
+            1,
+            "releasing the reservation re-includes the note"
+        );
+    }
+
+    /// `stale_pending_spends` ignores a reservation that was `mark_pending`ed
+    /// but never armed with an anchor (a just-reserved, not-yet-built spend):
+    /// the reconcile must never release such a transient entry.
+    #[test]
+    fn unarmed_reservation_is_not_stale() {
+        let mut store = InMemoryShieldedStore::new();
+        let id = test_id(0);
+        let nullifier = [0x66; 32];
+        store
+            .save_note(id, &note_with_nullifier(nullifier))
+            .unwrap();
+        store.mark_pending(id, &nullifier).unwrap();
+
+        assert!(
+            store.stale_pending_spends(id).unwrap().is_empty(),
+            "a reservation with no recorded anchor must not surface as stale"
+        );
+    }
+
+    #[test]
+    fn account_purge_retains_wallet_wide_identity_guard_only() {
+        let wallet_id = [0x81; 32];
+        let id = SubwalletId::new(wallet_id, 4);
+        let mut store = InMemoryShieldedStore::new();
+        let identity_guard = PendingRedrive {
+            activity_id: [0x11; 32],
+            anchor: [0x22; 32],
+            nullifiers: vec![],
+            st_bytes: vec![0x33; 16],
+            attempts: 7,
+            identity_nonce_finalized: false,
+            identity_user_abandoned: false,
+        };
+        let note_spend = PendingRedrive {
+            activity_id: [0x44; 32],
+            anchor: [0x55; 32],
+            nullifiers: vec![[0x66; 32]],
+            st_bytes: vec![0x77; 16],
+            attempts: 1,
+            identity_nonce_finalized: false,
+            identity_user_abandoned: false,
+        };
+        store.arm_redrive(id, identity_guard.clone()).unwrap();
+        store.arm_redrive(id, note_spend).unwrap();
+
+        store.purge_subwallet(id).unwrap();
+
+        assert_eq!(
+            store.pending_redrives(id).unwrap(),
+            vec![identity_guard.clone()],
+            "account removal must keep the unresolved identity debit but discard account spends"
+        );
+        assert_eq!(
+            store.pending_redrives_for_wallet(wallet_id).unwrap(),
+            vec![(id, identity_guard)],
+            "the retained guard must remain visible to wallet-wide admission and redrive"
+        );
     }
 }

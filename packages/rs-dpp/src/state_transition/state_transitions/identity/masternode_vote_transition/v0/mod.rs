@@ -1,11 +1,7 @@
 mod identity_signed;
-#[cfg(feature = "json-conversion")]
-mod json_conversion;
 mod state_transition_like;
 mod types;
 pub(super) mod v0_methods;
-#[cfg(feature = "value-conversion")]
-mod value_conversion;
 mod version;
 
 use crate::identity::KeyID;
@@ -16,8 +12,10 @@ use crate::prelude::{Identifier, IdentityNonce};
 
 use crate::protocol_error::ProtocolError;
 use crate::voting::votes::Vote;
-use bincode::{Decode, Encode};
-use platform_serialization_derive::{PlatformDeserialize, PlatformSerialize, PlatformSignable};
+use bincode::{Decode, DecodeUntrusted, Encode};
+use platform_serialization_derive::{
+    PlatformDeserializeTrusted, PlatformDeserializeUntrusted, PlatformSerialize, PlatformSignable,
+};
 use platform_value::BinaryData;
 #[cfg(feature = "serde-conversion")]
 use serde::{Deserialize, Serialize};
@@ -29,9 +27,11 @@ use serde::{Deserialize, Serialize};
     Encode,
     Decode,
     PlatformSerialize,
-    PlatformDeserialize,
+    PlatformDeserializeTrusted,
+    PlatformDeserializeUntrusted,
     PlatformSignable,
     PartialEq,
+    DecodeUntrusted,
 )]
 #[cfg_attr(
     feature = "serde-conversion",
@@ -55,7 +55,7 @@ pub struct MasternodeVoteTransitionV0 {
 #[cfg(test)]
 mod test {
 
-    use crate::serialization::{PlatformDeserializable, PlatformSerializable};
+    use crate::serialization::{PlatformDeserializableUntrusted, PlatformSerializable};
 
     use crate::state_transition::masternode_vote_transition::v0::MasternodeVoteTransitionV0;
     use crate::voting::vote_choices::resource_vote_choice::ResourceVoteChoice;
@@ -69,15 +69,15 @@ mod test {
     use std::fmt::Debug;
 
     fn test_masternode_vote_transition<
-        T: PlatformSerializable + PlatformDeserializable + Debug + PartialEq,
+        T: PlatformSerializable + PlatformDeserializableUntrusted + Debug + PartialEq,
     >(
         transition: T,
     ) where
         <T as PlatformSerializable>::Error: std::fmt::Debug,
     {
         let serialized = T::serialize_to_bytes(&transition).expect("expected to serialize");
-        let deserialized =
-            T::deserialize_from_bytes(serialized.as_slice()).expect("expected to deserialize");
+        let deserialized = T::deserialize_from_bytes_untrusted(serialized.as_slice())
+            .expect("expected to deserialize");
         assert_eq!(transition, deserialized);
     }
 
@@ -197,43 +197,9 @@ mod test {
         }
     }
 
-    #[test]
-    fn test_value_conversion_roundtrip_v0() {
-        use crate::state_transition::StateTransitionValueConvert;
-        use crate::version::LATEST_PLATFORM_VERSION;
-        let t = make_vote_v0();
-        let obj = t.to_object(false).expect("to_object should work");
-        let restored = MasternodeVoteTransitionV0::from_object(obj, LATEST_PLATFORM_VERSION)
-            .expect("from_object should work");
-        assert_eq!(t, restored);
-    }
-
-    #[test]
-    fn test_from_value_map_v0() {
-        use crate::state_transition::StateTransitionValueConvert;
-        use crate::version::LATEST_PLATFORM_VERSION;
-        let t = make_vote_v0();
-        let obj = t.to_object(false).expect("should work");
-        let map = obj.into_btree_string_map().expect("should be map");
-        let restored = MasternodeVoteTransitionV0::from_value_map(map, LATEST_PLATFORM_VERSION)
-            .expect("should work");
-        assert_eq!(t, restored);
-    }
-
-    #[test]
-    fn test_to_cleaned_object_v0() {
-        use crate::state_transition::StateTransitionValueConvert;
-        let t = make_vote_v0();
-        let obj = t.to_cleaned_object(false).expect("should work");
-        assert!(obj.is_map());
-    }
-
-    #[test]
-    fn test_to_object_skip_signature_v0() {
-        use crate::state_transition::StateTransitionValueConvert;
-        let t = make_vote_v0();
-        let obj = t.to_object(true).expect("should work");
-        let map = obj.into_btree_string_map().expect("should be map");
-        assert!(!map.contains_key("signature"));
-    }
+    // Legacy `StateTransitionValueConvert` round-trip / cleaned-object /
+    // skip-signature tests on the V0 inner struct deleted in Phase D
+    // step 9. The canonical `JsonConvertible` / `ValueConvertible`
+    // round-trip is exercised on the outer enum derive — these tested
+    // methods that no longer exist.
 }
