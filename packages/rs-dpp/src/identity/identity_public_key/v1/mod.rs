@@ -3,10 +3,11 @@ mod methods;
 
 use bincode::{Decode, DecodeUntrusted, Encode};
 
-use crate::fee::Credits;
+use crate::balances::credits::Credits;
+use crate::identity::identity_public_key::TimestampMillis;
 use crate::identity::identity_public_key::contract_bounds::ContractBounds;
 use crate::identity::identity_public_key::v0::IdentityPublicKeyV0;
-use crate::identity::{KeyID, KeyType, Purpose, SecurityLevel, TimestampMillis};
+use crate::identity::{KeyID, KeyType, Purpose, SecurityLevel};
 #[cfg(feature = "json-conversion")]
 use crate::serialization::json_safe_fields;
 #[cfg(feature = "state-transitions")]
@@ -36,6 +37,7 @@ use serde::{Deserialize, Serialize};
     DecodeUntrusted,
 )]
 #[serde(rename_all = "camelCase")]
+#[ferment_macro::export]
 pub struct IdentityPublicKeyV1 {
     pub id: KeyID,
     pub purpose: Purpose,

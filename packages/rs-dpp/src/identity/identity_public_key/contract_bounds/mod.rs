@@ -1,6 +1,5 @@
 #[cfg(feature = "state-transitions")]
 use crate::contract_group::ContractGroupMember;
-use platform_value::types::identifier::Identifier;
 use crate::identity::identity_public_key::contract_bounds::ContractBounds::{
     ContractGroup, SingleContract, SingleContractDocumentType,
 };
@@ -18,6 +17,7 @@ use crate::state_transition::batch_transition::batched_transition::BatchedTransi
 use crate::state_transition::batch_transition::token_base_transition::v0::v0_methods::TokenBaseTransitionV0Methods;
 use crate::ProtocolError;
 use bincode::{Decode, DecodeUntrusted, Encode};
+use platform_value::types::identifier::Identifier;
 use serde::{Deserialize, Serialize};
 
 pub type ContractBoundsType = u8;
@@ -62,7 +62,7 @@ pub enum ContractBounds {
     /// this key can only be used within the members of a contract group: the contracts,
     /// document types and tokens the group holds when the key signs (protocol version 14)
     #[serde(rename = "contractGroup")]
-    ContractGroup { id: Identifier } = 2,
+    ContractGroup { id: Identifier },
 }
 
 /// What authorizing one batch member with a contract-bound AUTHENTICATION key needs.

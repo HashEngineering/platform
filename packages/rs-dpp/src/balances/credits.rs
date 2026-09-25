@@ -19,6 +19,7 @@ use std::convert::TryFrom;
 pub type Duffs = u64;
 
 /// Credits type
+#[ferment_macro::export]
 pub type Credits = u64;
 
 /// RemainingCredits type

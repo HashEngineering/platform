@@ -8,7 +8,7 @@ use dpp::dashcore::secp256k1::rand::SeedableRng;
 use dpp::dashcore::secp256k1::SecretKey;
 use dpp::data_contract::accessors::v0::DataContractV0Getters;
 use dpp::data_contract::document_type::methods::DocumentTypeBasicMethods;
-use dpp::document::{DocumentV0, DocumentV0Getters, INITIAL_REVISION};
+use dpp::document::{v0::DocumentV0, DocumentV0Getters, INITIAL_REVISION};
 use dpp::identity::accessors::IdentityGettersV0;
 use dpp::moderation_charter::{
     property_names, ELECTED_CHARTER_DOCUMENT_TYPE_NAME, JOIN_REQUEST_DOCUMENT_TYPE_NAME,

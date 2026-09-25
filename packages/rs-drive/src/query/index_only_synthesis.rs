@@ -41,7 +41,7 @@ use crate::verify::RootHash;
 use dpp::data_contract::accessors::v0::DataContractV0Getters;
 use dpp::data_contract::document_type::accessors::{DocumentTypeV0Getters, DocumentTypeV2Getters};
 use dpp::data_contract::document_type::{DocumentPropertyType, DocumentTypeRef, Index};
-use dpp::document::{Document, DocumentV0};
+use dpp::document::{v0::DocumentV0, Document};
 use dpp::identifier::Identifier;
 use dpp::platform_value::btreemap_extensions::BTreeValueMapInsertionPathHelper;
 use dpp::platform_value::Value;
