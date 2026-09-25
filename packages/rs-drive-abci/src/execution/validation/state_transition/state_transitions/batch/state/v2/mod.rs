@@ -1,4 +1,5 @@
 use dpp::block::block_info::BlockInfo;
+use dpp::data_contract::document_type::action_fees::ActionFeePricing;
 use dpp::identifier::Identifier;
 use dpp::identity::identity_public_key::accessors::v0::IdentityPublicKeyGettersV0;
 use dpp::identity::{PartialIdentity, Purpose};
@@ -8,16 +9,21 @@ use dpp::state_transition::batch_transition::batched_transition::document_transi
 use dpp::state_transition::batch_transition::batched_transition::token_transition::TokenTransitionV0Methods;
 use dpp::state_transition::batch_transition::batched_transition::BatchedTransitionRef;
 use dpp::state_transition::batch_transition::BatchTransition;
-use dpp::state_transition::StateTransitionIdentitySigned;
+use dpp::state_transition::{StateTransitionIdentitySigned, StateTransitionOwned};
 use drive::grovedb::TransactionArg;
-use drive::state_transition_action::batch::ResolvedContractGroupMemberships;
+use drive::state_transition_action::batch::{
+    GasPayer, ResolvedContractGroupMemberships, ResolvedGasSponsor,
+};
 use drive::state_transition_action::StateTransitionAction;
 use std::collections::BTreeSet;
 
 use crate::error::Error;
-use crate::execution::types::state_transition_execution_context::StateTransitionExecutionContext;
+use crate::execution::types::execution_operation::ValidationOperation;
+use crate::execution::types::state_transition_execution_context::{
+    StateTransitionExecutionContext, StateTransitionExecutionContextMethodsV0,
+};
+use crate::execution::validation::state_transition::common::seated_moderation_charter::fetch_seated_moderation_charter;
 use crate::execution::validation::state_transition::state_transitions::batch::transformer::v0::BatchTransitionTransformerV0;
-use crate::execution::validation::state_transition::ValidationMode;
 use crate::platform_types::platform::PlatformStateRef;
 use crate::platform_types::platform_state::PlatformStateV0Methods;
 
@@ -43,7 +49,7 @@ pub(in crate::execution::validation::state_transition::state_transitions::batch)
         platform: &PlatformStateRef,
         block_info: &BlockInfo,
         signer_identity: Option<&PartialIdentity>,
-        validation_mode: ValidationMode,
+        validate_against_state: bool,
         execution_context: &mut StateTransitionExecutionContext,
         tx: TransactionArg,
     ) -> Result<ConsensusValidationResult<StateTransitionAction>, Error>;
@@ -55,7 +61,7 @@ impl DocumentsBatchStateTransitionStateValidationV2 for BatchTransition {
         platform: &PlatformStateRef,
         block_info: &BlockInfo,
         signer_identity: Option<&PartialIdentity>,
-        validation_mode: ValidationMode,
+        validate_against_state: bool,
         execution_context: &mut StateTransitionExecutionContext,
         tx: TransactionArg,
     ) -> Result<ConsensusValidationResult<StateTransitionAction>, Error> {
@@ -73,7 +79,7 @@ impl DocumentsBatchStateTransitionStateValidationV2 for BatchTransition {
         let mut validation_result = self.try_into_action_v0(
             platform,
             block_info,
-            validation_mode.should_validate_batch_valid_against_state(),
+            validate_against_state,
             tx,
             execution_context,
         )?;
@@ -107,6 +113,105 @@ impl DocumentsBatchStateTransitionStateValidationV2 for BatchTransition {
                     contract_id,
                     ResolvedContractGroupMemberships { memberships, fee },
                 );
+            }
+        }
+
+        // A batch whose every transition asks the contract owner to pay its gas, on a document
+        // type that offers it, names that contract owner its sponsor. Their balance is read here,
+        // billed to the batch, and judged by fee validation against the fee. The batch's own
+        // signer is never their own sponsor. A batch that already has errors, or asks for a payer
+        // the contracts do not offer, resolves nothing: advanced structure validation raises the
+        // latter, and the signer pays for the former.
+        if let Some(action) = validation_result
+            .data
+            .as_mut()
+            .filter(|_| validation_result.errors.is_empty())
+        {
+            if let Ok(GasPayer::ContractOwner {
+                identity_id,
+                strict,
+            }) = action.resolve_gas_payer()
+            {
+                if identity_id != self.owner_id() {
+                    let platform_version = platform.state.current_platform_version()?;
+                    let (balance, fee) = platform.drive.fetch_identity_balance_with_costs(
+                        identity_id.to_buffer(),
+                        block_info,
+                        true,
+                        tx,
+                        platform_version,
+                    )?;
+                    execution_context
+                        .add_operation(ValidationOperation::PrecalculatedOperation(fee));
+                    action.set_gas_sponsor(Some(ResolvedGasSponsor {
+                        identity_id,
+                        balance: balance.unwrap_or_default(),
+                        strict,
+                    }));
+                }
+            }
+        }
+
+        // Document action fees (the `actionFees` keyword): a fee priced by the fee multiplier
+        // follows the multiplier of the epoch the batch executes in. It is read here, where
+        // state is read, once, only when some transition declares such a fee, and billed to the
+        // batch. The fees themselves are settled when the batch executes, off the transitions
+        // state validation left standing: one it replaced with a nonce bump owes nothing.
+        if let Some(action) = validation_result.data.as_mut() {
+            let priced_by_the_fee_multiplier = action
+                .declared_action_fees()
+                .iter()
+                .any(|(_, _, pricing, _)| *pricing == ActionFeePricing::FeeMultiplier);
+            if priced_by_the_fee_multiplier {
+                let platform_version = platform.state.current_platform_version()?;
+                let (fee, multiplier) = platform.drive.fetch_action_fee_multiplier_with_fee(
+                    &block_info.epoch,
+                    tx,
+                    platform_version,
+                )?;
+                execution_context.add_operation(ValidationOperation::PrecalculatedOperation(fee));
+                action.set_action_fee_multiplier_permille(Some(multiplier));
+            }
+        }
+
+        // A discounted moderators part (decentralized moderation teams): a transition on a
+        // document type an elected contract moderates may agree to less than the declared
+        // moderators part, and is judged against the share of the contract's seated charter.
+        // That share is read here, billed, once per contract, only for a transition that asks
+        // for less: an agreement to the declared amounts reads nothing. What is read is a
+        // charter lookup through the charter contract's `byTargetContract` index and a fetch of
+        // the proposal it runs on, which carries the share. The agreement is judged against it
+        // by advanced structure validation, and again on every recheck, which transforms anew.
+        // A result that already carries errors never reaches that judgement, so it reads
+        // nothing for it.
+        if let Some(action) = validation_result
+            .data
+            .as_mut()
+            .filter(|_| validation_result.errors.is_empty())
+        {
+            let contract_ids = action.contracts_with_moderators_discounts();
+            if !contract_ids.is_empty() {
+                let platform_version = platform.state.current_platform_version()?;
+                for contract_id in contract_ids {
+                    let share = match fetch_seated_moderation_charter(
+                        platform.drive,
+                        contract_id,
+                        &block_info.epoch,
+                        execution_context,
+                        tx,
+                        platform_version,
+                    )? {
+                        None => None,
+                        Some(charter) => Some(charter.fetch_moderators_share(
+                            platform.drive,
+                            &block_info.epoch,
+                            execution_context,
+                            tx,
+                            platform_version,
+                        )?),
+                    };
+                    action.set_seated_moderators_share(contract_id, share);
+                }
             }
         }
 

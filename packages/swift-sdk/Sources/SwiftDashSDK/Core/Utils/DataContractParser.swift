@@ -322,8 +322,14 @@ public struct DataContractParser {
             if let rankedAverageable = indexData["rankedAverageable"] as? Bool {
                 index.rankedAverageable = rankedAverageable
             }
+            // A composite terminal is an ordered list of component names;
+            // the persisted string keeps them joined, in order, so display
+            // layers show the whole member key.
             if let terminal = indexData["terminal"] as? String {
                 index.terminal = terminal
+            } else if let components = indexData["terminal"] as? [String],
+                      !components.isEmpty {
+                index.terminal = components.joined(separator: " ‖ ")
             }
             if let preallocated = indexData["preallocated"] as? Bool {
                 index.preallocated = preallocated
@@ -364,6 +370,14 @@ public struct DataContractParser {
 
             // Extract type
             let type = propertyDict["type"] as? String ?? "unknown"
+
+            // A protocol-version-14 typed array (an array declaring `items`
+            // instead of `byteArray`) is persisted like any array: `type`
+            // "array", `byteArray` false, `minItems` / `maxItems` counting
+            // elements. Its element schema needs no column of its own:
+            // `schemaJSON` is the whole type dictionary, and
+            // `PersistentDocumentType.typedArrays` reads it back. Keep that
+            // true when touching the schema stored there.
 
             // Create persistent property
             let property = PersistentProperty(
@@ -497,6 +511,80 @@ public struct DataContractParser {
         return nil
     }
 
+    /// Render a once-per-identity `amount` to a canonical decimal string,
+    /// accepting what the carrier type can hold: a non-negative integer that
+    /// fits in `u64`, the protocol's `TokenAmount`.
+    ///
+    /// This checks the encoding, not the rule. rs-dpp's
+    /// `validate_once_per_identity_distribution` narrows the value further
+    /// (1 to `i64::MAX`) and enforced that when the contract was registered,
+    /// so a contract that came from chain cannot carry anything outside it.
+    /// Mirroring that range here would be a second copy of a protocol
+    /// constant living where it cannot be kept in step.
+    ///
+    /// Still stricter than `stringifyDistributionAmount`, which hands any
+    /// string back verbatim and stringifies negative or fractional numbers.
+    /// That leniency is fine for the pre-programmed schedule, whose
+    /// malformed entries are skipped one by one, but here it would make
+    /// `"abc"`, `-5` or `1.5` read as a distribution the token does not
+    /// have.
+    ///
+    /// JSON booleans bridge to `NSNumber` and would otherwise pass as 0 or
+    /// 1, so they are rejected by identity against `CFBoolean` before the
+    /// numeric read.
+    private static func oncePerIdentityAmount(_ value: Any) -> String? {
+        if CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID() {
+            return nil
+        }
+        if let string = value as? String {
+            // `UInt64(_:)` rejects a fractional, negative or non-numeric
+            // string and anything above `UInt64.max`; re-rendering the
+            // parsed value drops leading zeros and a leading `+`.
+            guard let parsed = UInt64(string.trimmingCharacters(in: .whitespaces)) else {
+                return nil
+            }
+            return String(parsed)
+        }
+        // `NSNumber` covers every numeric JSON value. `UInt64(exactly:)`
+        // fails on a negative, fractional or out-of-range number, which is
+        // exactly the set the carrier cannot hold.
+        if let number = value as? NSNumber, let exact = UInt64(exactly: number) {
+            return String(exact)
+        }
+        return nil
+    }
+
+    /// Read a token's once-per-identity distribution out of its
+    /// `distributionRules` block (protocol version 14).
+    ///
+    /// rs-dpp emits the block as
+    /// `"oncePerIdentityDistribution": {"$formatVersion": "0", "amount": 5000}`.
+    /// `amount` is a protocol `u64`, so it arrives as a JSON number up to
+    /// 2^53 - 1 and as a decimal string above that; both normalise to an
+    /// exact decimal string, which is what the value type carries.
+    ///
+    /// Returns nil when the block is absent, is not a dictionary, or carries
+    /// an `amount` the `u64` carrier cannot hold. A malformed block
+    /// therefore reads the same as "this token has no once-per-identity
+    /// distribution" rather than claiming an amount that was never authored.
+    /// Which amounts the protocol itself allows (1 to `i64::MAX`) is rs-dpp's
+    /// rule, checked when the contract was registered, and is deliberately
+    /// not mirrored here.
+    ///
+    /// This is the single place that shape is parsed:
+    /// `PersistentToken.oncePerIdentityDistribution` derives its value by
+    /// calling straight back into here.
+    static func parseOncePerIdentityDistribution(
+        _ value: Any?
+    ) -> TokenOncePerIdentityDistribution? {
+        guard let dict = value as? [String: Any],
+              let amountValue = dict["amount"],
+              let amount = oncePerIdentityAmount(amountValue) else {
+            return nil
+        }
+        return TokenOncePerIdentityDistribution(amount: amount)
+    }
+
     private static func parseTokenConfiguration(token: PersistentToken, from tokenDict: [String: Any]) {
         // Basic properties
         let maxSupplyStr = extractTokenSupply(from: tokenDict, key: "maxSupply")
@@ -625,6 +713,15 @@ public struct DataContractParser {
                 }
                 token.perpetualDistribution = dist
             }
+
+            // The once-per-identity distribution is parsed too, but not
+            // here: it has no column on `PersistentToken`, so it is derived
+            // from the contract JSON persisted on the owning
+            // `PersistentDataContract` through
+            // `PersistentToken.oncePerIdentityDistribution`, which calls
+            // `parseOncePerIdentityDistribution` above. Adding a stored
+            // property instead would move the model's entity hash and cost a
+            // schema version (see `DashModelContainer.modelTypes`).
 
             // Pre-programmed distribution
             if let preProgrammed = distributionRules["preProgrammedDistribution"] as? [String: Any] {

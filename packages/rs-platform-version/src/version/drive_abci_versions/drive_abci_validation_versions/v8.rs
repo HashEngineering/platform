@@ -125,6 +125,22 @@ pub const DRIVE_ABCI_VALIDATION_VERSIONS_V8: DriveAbciValidationVersions =
                 state: 0,
                 transform_into_action: 0,
             },
+            contract_user_moderation_state_transition: DriveAbciStateTransitionValidationVersion {
+                basic_structure: None,
+                advanced_structure: None,
+                identity_signatures: None,
+                nonce: None,
+                state: 0,
+                transform_into_action: 0,
+            },
+            contract_fee_claim_state_transition: DriveAbciStateTransitionValidationVersion {
+                basic_structure: None,
+                advanced_structure: None,
+                identity_signatures: None,
+                nonce: None,
+                state: 0,
+                transform_into_action: 0,
+            },
             data_contract_reference_validation: 0,
             batch_state_transition: DriveAbciDocumentsStateTransitionValidationVersions {
                 basic_structure: 0,
@@ -162,6 +178,7 @@ pub const DRIVE_ABCI_VALIDATION_VERSIONS_V8: DriveAbciValidationVersions =
                 // ownership/revision check). v0 stays for chain
                 // reproducibility on PROTOCOL_VERSION_11 and below.
                 failed_per_transition_action: 1,
+                contract_moderation_gate: None,
                 // PROTOCOL_VERSION_12 (v3.1 hard fork): fetch_documents
                 // helpers bumped to v1 which bill the grovedb cost of
                 // their query_documents calls. v0 stays for PV11 chain
@@ -188,7 +205,7 @@ pub const DRIVE_ABCI_VALIDATION_VERSIONS_V8: DriveAbciValidationVersions =
                         reject_data_trigger: 0,
                     },
                 },
-                is_allowed: 0,
+                identity_minimum_balance_pre_check: 0,
                 document_create_transition_structure_validation: 0,
                 document_delete_transition_structure_validation: 0,
                 document_index_only_delete_transition_structure_validation: 0,

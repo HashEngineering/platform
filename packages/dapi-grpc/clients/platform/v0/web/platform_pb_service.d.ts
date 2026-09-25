@@ -184,6 +184,42 @@ type PlatformgetContractGroupsForContract = {
   readonly responseType: typeof platform_pb.GetContractGroupsForContractResponse;
 };
 
+type PlatformgetContractModerationStatus = {
+  readonly methodName: string;
+  readonly service: typeof Platform;
+  readonly requestStream: false;
+  readonly responseStream: false;
+  readonly requestType: typeof platform_pb.GetContractModerationStatusRequest;
+  readonly responseType: typeof platform_pb.GetContractModerationStatusResponse;
+};
+
+type PlatformgetContractModerationEntries = {
+  readonly methodName: string;
+  readonly service: typeof Platform;
+  readonly requestStream: false;
+  readonly responseStream: false;
+  readonly requestType: typeof platform_pb.GetContractModerationEntriesRequest;
+  readonly responseType: typeof platform_pb.GetContractModerationEntriesResponse;
+};
+
+type PlatformgetContractDocumentRemovals = {
+  readonly methodName: string;
+  readonly service: typeof Platform;
+  readonly requestStream: false;
+  readonly responseStream: false;
+  readonly requestType: typeof platform_pb.GetContractDocumentRemovalsRequest;
+  readonly responseType: typeof platform_pb.GetContractDocumentRemovalsResponse;
+};
+
+type PlatformgetContractFeePots = {
+  readonly methodName: string;
+  readonly service: typeof Platform;
+  readonly requestStream: false;
+  readonly responseStream: false;
+  readonly requestType: typeof platform_pb.GetContractFeePotsRequest;
+  readonly responseType: typeof platform_pb.GetContractFeePotsResponse;
+};
+
 type PlatformgetDocumentHistory = {
   readonly methodName: string;
   readonly service: typeof Platform;
@@ -620,6 +656,10 @@ export class Platform {
   static readonly getContractGroupInfo: PlatformgetContractGroupInfo;
   static readonly getContractGroupMembers: PlatformgetContractGroupMembers;
   static readonly getContractGroupsForContract: PlatformgetContractGroupsForContract;
+  static readonly getContractModerationStatus: PlatformgetContractModerationStatus;
+  static readonly getContractModerationEntries: PlatformgetContractModerationEntries;
+  static readonly getContractDocumentRemovals: PlatformgetContractDocumentRemovals;
+  static readonly getContractFeePots: PlatformgetContractFeePots;
   static readonly getDocumentHistory: PlatformgetDocumentHistory;
   static readonly getDocuments: PlatformgetDocuments;
   static readonly getIdentityByPublicKeyHash: PlatformgetIdentityByPublicKeyHash;
@@ -879,6 +919,42 @@ export class PlatformClient {
   getContractGroupsForContract(
     requestMessage: platform_pb.GetContractGroupsForContractRequest,
     callback: (error: ServiceError|null, responseMessage: platform_pb.GetContractGroupsForContractResponse|null) => void
+  ): UnaryResponse;
+  getContractModerationStatus(
+    requestMessage: platform_pb.GetContractModerationStatusRequest,
+    metadata: grpc.Metadata,
+    callback: (error: ServiceError|null, responseMessage: platform_pb.GetContractModerationStatusResponse|null) => void
+  ): UnaryResponse;
+  getContractModerationStatus(
+    requestMessage: platform_pb.GetContractModerationStatusRequest,
+    callback: (error: ServiceError|null, responseMessage: platform_pb.GetContractModerationStatusResponse|null) => void
+  ): UnaryResponse;
+  getContractModerationEntries(
+    requestMessage: platform_pb.GetContractModerationEntriesRequest,
+    metadata: grpc.Metadata,
+    callback: (error: ServiceError|null, responseMessage: platform_pb.GetContractModerationEntriesResponse|null) => void
+  ): UnaryResponse;
+  getContractModerationEntries(
+    requestMessage: platform_pb.GetContractModerationEntriesRequest,
+    callback: (error: ServiceError|null, responseMessage: platform_pb.GetContractModerationEntriesResponse|null) => void
+  ): UnaryResponse;
+  getContractDocumentRemovals(
+    requestMessage: platform_pb.GetContractDocumentRemovalsRequest,
+    metadata: grpc.Metadata,
+    callback: (error: ServiceError|null, responseMessage: platform_pb.GetContractDocumentRemovalsResponse|null) => void
+  ): UnaryResponse;
+  getContractDocumentRemovals(
+    requestMessage: platform_pb.GetContractDocumentRemovalsRequest,
+    callback: (error: ServiceError|null, responseMessage: platform_pb.GetContractDocumentRemovalsResponse|null) => void
+  ): UnaryResponse;
+  getContractFeePots(
+    requestMessage: platform_pb.GetContractFeePotsRequest,
+    metadata: grpc.Metadata,
+    callback: (error: ServiceError|null, responseMessage: platform_pb.GetContractFeePotsResponse|null) => void
+  ): UnaryResponse;
+  getContractFeePots(
+    requestMessage: platform_pb.GetContractFeePotsRequest,
+    callback: (error: ServiceError|null, responseMessage: platform_pb.GetContractFeePotsResponse|null) => void
   ): UnaryResponse;
   getDocumentHistory(
     requestMessage: platform_pb.GetDocumentHistoryRequest,

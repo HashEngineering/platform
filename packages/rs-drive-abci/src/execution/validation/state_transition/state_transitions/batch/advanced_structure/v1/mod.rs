@@ -99,6 +99,48 @@ impl DocumentsBatchStateTransitionStructureValidationV1 for BatchTransition {
             ));
         }
 
+        // Every transition's request to have the contract owner pay its gas must be one its
+        // document type's token cost offers, and a batch names one payer for all of them. Both
+        // sides travel on the action, so this reads no state.
+        if let Err(error) = action.resolve_gas_payer() {
+            let first_transition = self.first_transition().ok_or(Error::Execution(
+                ExecutionError::CorruptedCodeExecution("empty validated batch"),
+            ))?;
+            let bump_action = StateTransitionAction::BumpIdentityDataContractNonceAction(
+                BumpIdentityDataContractNonceAction::from_batched_transition_ref(
+                    first_transition,
+                    self.owner_id(),
+                    self.user_fee_increase(),
+                ),
+            );
+            return Ok(ConsensusValidationResult::new_with_data_and_errors(
+                bump_action,
+                vec![error],
+            ));
+        }
+
+        // Every transition that owes an action fee must have agreed to it: it names the amounts
+        // and the pricing its document type declares, and accepts the fee multiplier of the
+        // epoch the batch executes in. The contract is read when the action executes, so
+        // without this its owner could change what a signed transition pays. The declaration,
+        // the agreement and the multiplier all travel on the action, so this reads no state.
+        if let Err(error) = action.validate_action_fee_agreements()? {
+            let first_transition = self.first_transition().ok_or(Error::Execution(
+                ExecutionError::CorruptedCodeExecution("empty validated batch"),
+            ))?;
+            let bump_action = StateTransitionAction::BumpIdentityDataContractNonceAction(
+                BumpIdentityDataContractNonceAction::from_batched_transition_ref(
+                    first_transition,
+                    self.owner_id(),
+                    self.user_fee_increase(),
+                ),
+            );
+            return Ok(ConsensusValidationResult::new_with_data_and_errors(
+                bump_action,
+                vec![error],
+            ));
+        }
+
         // A contract-bound AUTHENTICATION key may only act inside its contract (and document
         // type), or inside the members of its contract group. The signer is authenticated, so
         // an out-of-bounds member is a paid failure.
@@ -175,16 +217,28 @@ impl DocumentsBatchStateTransitionStructureValidationV1 for BatchTransition {
             if let BatchedTransitionRef::Document(DocumentTransition::Create(create_transition)) =
                 transition
             {
-                // Validate the ID
-                let generated_document_id = Document::generate_document_id_v0(
+                // Validate the ID. It commits to the identity contract nonce
+                // of this transition, which is consumed at most once, so an id
+                // can be produced at most once: a deleted document can not be
+                // created again under the id it had.
+                let generated_document_id = Document::generate_document_id(
                     create_transition.base().data_contract_id_ref(),
                     &self.owner_id(),
                     create_transition.base().document_type_name(),
                     &create_transition.entropy(),
-                );
+                    create_transition.base().identity_contract_nonce(),
+                    platform_version,
+                )?;
 
-                // This hash will take 2 blocks (128 bytes)
-                execution_context.add_operation(ValidationOperation::DoubleSha256(2));
+                // The nonce derived id is billed by what the double SHA-256
+                // really hashes, both passes (4 blocks for most document type
+                // names), instead of the flat 2 blocks up to v13.
+                execution_context.add_operation(ValidationOperation::DoubleSha256(
+                    Document::generate_document_id_sha256_blocks(
+                        create_transition.base().document_type_name(),
+                        platform_version,
+                    )?,
+                ));
 
                 let id = create_transition.base().id();
                 if generated_document_id != id {
@@ -229,7 +283,8 @@ impl DocumentsBatchStateTransitionStructureValidationV1 for BatchTransition {
                         }
                     }
                     DocumentTransitionAction::ReplaceAction(replace_action) => {
-                        let result = replace_action.validate_structure(platform_version)?;
+                        let result =
+                            replace_action.validate_structure(identity.id, platform_version)?;
                         if !result.is_valid() {
                             let bump_action = StateTransitionAction::BumpIdentityDataContractNonceAction(
                                     BumpIdentityDataContractNonceAction::from_borrowed_document_base_transition_action(replace_action.base(), self.owner_id(), self.user_fee_increase()),

@@ -1,3 +1,5 @@
+use dpp::consensus::codes::ErrorWithCode;
+use dpp::consensus::ConsensusError;
 use dpp::platform_value::string_encoding::Encoding;
 use platform_wallet::changeset::PersistenceErrorKind;
 use platform_wallet::PlatformWalletError;
@@ -221,8 +223,8 @@ pub enum PlatformWalletFFIResultCode {
     /// Asset-lock coin selection came up short over the *permitted* funding
     /// set (dashpay/platform#4073). Carries the structured
     /// `available`/`required` duff amounts in the message string — the
-    /// by-value `PlatformWalletFFIResult` is ABI-frozen (code + message only),
-    /// so the figures ride the typed `Display` rendering or not at all.
+    /// by-value `PlatformWalletFFIResult` has no per-error value fields, so
+    /// the figures ride the typed `Display` rendering or not at all.
     ///
     /// Distinct from [`Self::ErrorCoreInsufficientFunds`] (22), which is the
     /// atomic Core-send selector rather than the asset-lock builder. What the
@@ -375,8 +377,8 @@ pub enum PlatformWalletFFIResultCode {
     //
     // 38/39/40 carry a STABLE JSON detail object in the result `message`
     // instead of the typed `Display` rendering — see each variant's doc for
-    // the exact object. `PlatformWalletFFIResult` is ABI-frozen (code +
-    // message only), so structured values ride the message or not at all.
+    // the exact object. `PlatformWalletFFIResult` has no per-error value
+    // fields, so structured values ride the message or not at all.
     /// Maps `SignedPaymentError::StaleReservationToken` from the deferred
     /// build → broadcast/release core-send lifecycle (`core_wallet_signed_payment_*`):
     /// the token has outlived the registry's `RESERVATION_MAX_AGE_BLOCKS` bound
@@ -671,6 +673,9 @@ pub enum PlatformWalletFFIResultCode {
     /// Incompatible keys and damaged ciphertext can produce the same symptom.
     ErrorShieldedRecoveryKeysRequired = 57,
 
+    /// Platform returned no balance for a managed identity. Retrying this read
+    /// is safe; this does not imply missing ownership or require registration.
+    ErrorIdentityBalanceUnavailable = 58,
     /// A panic was caught inside the one-time-key (shielded invitation)
     /// claim export, so the claim's outcome is AMBIGUOUS: the panic can
     /// strike after the Type-20 transition reached the wire, meaning the
@@ -706,9 +711,11 @@ pub enum PlatformWalletFFIResultCode {
     /// contract would release the identity slot or decline the recovery
     /// retry (#4313 review finding 4bf998e99652).
     ///
-    /// Code 48 — the registry frontier as of 2026-08-28 (46 merged via
-    /// #4465, 47 reserved for active #4356); see ERROR_CODE_REGISTRY.md.
-    ErrorShieldedClaimUnconfirmed = 58,
+    /// Code 59. Claimed as 48 from the 2026-08-28 frontier; 48 then shipped
+    /// upstream as `ErrorAssetLockInputContested`, so re-claimed as 58; 58
+    /// then went upstream to `ErrorIdentityBalanceUnavailable` (#4799), so
+    /// re-claimed as 59, the next free integer. See ERROR_CODE_REGISTRY.md.
+    ErrorShieldedClaimUnconfirmed = 59,
 
     /// The named thing does not exist.
     ///
@@ -731,12 +738,72 @@ pub enum PlatformWalletFFIResultCode {
     ErrorUnknown = 99,
 }
 
+/// Which family a consensus rejection belongs to, paired with the numeric
+/// `consensus_code` on [`PlatformWalletFFIResult`].
+///
+/// rs-dpp groups consensus errors by the ten-thousands digit of their code
+/// (`packages/rs-dpp/src/errors/consensus/codes.rs`): basic 1xxxx, signature
+/// 2xxxx, fee 3xxxx, state 4xxxx. The kind is handed over as its own value so
+/// a host branches on it instead of re-deriving the grouping from the number.
+///
+/// [`Self::None`] is the only value a result carries when `consensus_code` is
+/// 0, and it covers both "the failure was not a consensus rejection" and the
+/// `ConsensusError::DefaultError` placeholder, which names no rejection a host
+/// could act on.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlatformWalletFFIConsensusErrorKind {
+    None = 0,
+    Basic = 1,
+    Signature = 2,
+    Fee = 3,
+    State = 4,
+}
+
+impl PlatformWalletFFIConsensusErrorKind {
+    /// The kind of `error`, or [`Self::None`] for a variant that carries no
+    /// actionable rejection. The wildcard arm also absorbs
+    /// `ConsensusError::TestConsensusError`, which exists only in dpp's own
+    /// `cfg(test)` builds.
+    fn of(error: &ConsensusError) -> Self {
+        match error {
+            ConsensusError::BasicError(_) => Self::Basic,
+            ConsensusError::SignatureError(_) => Self::Signature,
+            ConsensusError::FeeError(_) => Self::Fee,
+            ConsensusError::StateError(_) => Self::State,
+            _ => Self::None,
+        }
+    }
+}
+
 /// Must be freed with ['platform_wallet_ffi_result_free']
+///
+/// `code` and `message` are the stable pair every host has always read.
+/// `consensus_code` / `consensus_kind` describe Platform's own rejection when
+/// the failure was one: the rs-dpp consensus code (10000 and up) and its
+/// family, or `0` / [`PlatformWalletFFIConsensusErrorKind::None`] when the
+/// failure came from anywhere else. They let a host branch on a rejection it
+/// would otherwise have to recognize by its rendered text.
+///
+/// Both language surfaces are generated from this same source tree (Swift
+/// through the cbindgen header inside the xcframework, Kotlin through an rlib
+/// dependency of `rs-unified-sdk-jni`), so appending a field is a
+/// source-compatible change rather than an ABI break. What has not changed is
+/// that the struct carries no room for a *specific* error's values: those
+/// still ride the `message`, as the codes that document a JSON detail object
+/// below describe.
 #[repr(C)]
 #[derive(Debug)]
 pub struct PlatformWalletFFIResult {
     pub code: PlatformWalletFFIResultCode,
     pub message: *mut c_char,
+    /// The rs-dpp consensus error code Platform rejected the operation with,
+    /// or 0 when the failure was not a consensus rejection. Real codes start
+    /// at 10000, so 0 is unambiguous.
+    pub consensus_code: u32,
+    /// The family `consensus_code` belongs to, or
+    /// [`PlatformWalletFFIConsensusErrorKind::None`] when there is no code.
+    pub consensus_kind: PlatformWalletFFIConsensusErrorKind,
 }
 
 impl Drop for PlatformWalletFFIResult {
@@ -755,6 +822,8 @@ impl PlatformWalletFFIResult {
         Self {
             code: PlatformWalletFFIResultCode::Success,
             message: std::ptr::null_mut(),
+            consensus_code: 0,
+            consensus_kind: PlatformWalletFFIConsensusErrorKind::None,
         }
     }
 
@@ -764,7 +833,26 @@ impl PlatformWalletFFIResult {
         Self {
             code,
             message: c_msg.into_raw(),
+            consensus_code: 0,
+            consensus_kind: PlatformWalletFFIConsensusErrorKind::None,
         }
+    }
+
+    /// Stamp Platform's own rejection onto an already-built result.
+    ///
+    /// Leaves `code` and `message` alone: the numeric result code is the host
+    /// ABI and must keep meaning what it did, so the consensus verdict is
+    /// added beside it rather than in place of it. A `ConsensusError` with no
+    /// actionable family (see [`PlatformWalletFFIConsensusErrorKind::of`])
+    /// leaves the result untouched, so `consensus_code == 0` always means
+    /// "no rejection to branch on".
+    fn with_consensus_error(mut self, error: &ConsensusError) -> Self {
+        let kind = PlatformWalletFFIConsensusErrorKind::of(error);
+        if kind != PlatformWalletFFIConsensusErrorKind::None {
+            self.consensus_code = error.code();
+            self.consensus_kind = kind;
+        }
+        self
     }
 
     /// A `Success`-coded result that still carries an advisory `message`.
@@ -782,6 +870,8 @@ impl PlatformWalletFFIResult {
         Self {
             code: PlatformWalletFFIResultCode::Success,
             message: c_msg.into_raw(),
+            consensus_code: 0,
+            consensus_kind: PlatformWalletFFIConsensusErrorKind::None,
         }
     }
 }
@@ -825,7 +915,7 @@ impl<T> From<Option<T>> for PlatformWalletFFIResult {
 /// The value-carrying DPNS-marketplace rejections, rendered as
 /// `(code, JSON detail)` instead of `(code, Display)`.
 ///
-/// `PlatformWalletFFIResult` is ABI-frozen at `{ code, message }`, so a
+/// `PlatformWalletFFIResult` has no per-error value fields, so a
 /// host that needs the *values* — not prose naming them — can only get
 /// them through the message. These three therefore put a stable JSON
 /// object there; the exact shape is documented on each
@@ -891,6 +981,9 @@ impl From<PlatformWalletError> for PlatformWalletFFIResult {
         // assigned a dedicated code yet — those still carry the
         // typed Display rendering as the message.
         let code = match &error {
+            PlatformWalletError::IdentityBalanceUnavailable(_) => {
+                PlatformWalletFFIResultCode::ErrorIdentityBalanceUnavailable
+            }
             PlatformWalletError::NoSpendableInputs { .. }
             | PlatformWalletError::OnlyOutputAddressesFunded { .. }
             | PlatformWalletError::OnlyDustInputs { .. } => {
@@ -1007,9 +1100,9 @@ impl From<PlatformWalletError> for PlatformWalletFFIResult {
             // A definitively-failed address-nonce race (reaches the blanket impl
             // via identity `top_up_from_addresses` → `?`/`.into()`). Exposing
             // provided/expected nonce as structured out-fields is INTENTIONALLY
-            // out of scope: `PlatformWalletFFIResult` is by-value / ABI-frozen, so
-            // the values travel in the message string and an FFI retry re-fetches
-            // the nonce.
+            // out of scope: `PlatformWalletFFIResult` is by-value and has no
+            // per-error value fields, so the values travel in the message
+            // string and an FFI retry re-fetches the nonce.
             PlatformWalletError::AddressNonceMismatch { .. } => {
                 PlatformWalletFFIResultCode::ErrorAddressNonceMismatch
             }
@@ -1166,7 +1259,18 @@ impl From<PlatformWalletError> for PlatformWalletFFIResult {
         };
         // Classification above already consumed the machine prefix; strip it so
         // the internal token does not reach user-visible host error text.
-        PlatformWalletFFIResult::err(code, strip_signer_machine_prefix(&error.to_string()))
+        let result =
+            PlatformWalletFFIResult::err(code, strip_signer_machine_prefix(&error.to_string()));
+        // Platform's own verdict, for the variants that still hold the SDK
+        // error it arrived in (`Sdk`, `TokenOperationFailed`). It rides
+        // alongside the code chosen above rather than replacing it, so a host
+        // that branches on a dedicated code keeps seeing exactly what it saw
+        // before and one that wants the rejection itself no longer has to
+        // recognize it by its rendered text.
+        match error.consensus_error() {
+            Some(consensus_error) => result.with_consensus_error(consensus_error),
+            None => result,
+        }
     }
 }
 
@@ -1397,6 +1501,10 @@ impl From<anyhow::Error> for PlatformWalletFFIResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dash_sdk::error::StateTransitionBroadcastError;
+    use dpp::consensus::basic::{BasicError, UnsupportedVersionError};
+    use dpp::consensus::state::token::TokenOncePerIdentityDistributionAlreadyClaimedError;
+    use dpp::prelude::Identifier;
     use key_wallet::account::StandardAccountType;
     use key_wallet::wallet::managed_wallet_info::transaction_building::AccountTypePreference;
 
@@ -2273,17 +2381,22 @@ mod tests {
 
     /// This PR's fourth shielded-invite code, pinned like 43-45 above.
     ///
-    /// Originally 48, taken from the registry frontier (46 merged via #4465,
-    /// 47 reserved for active #4356). 48 has since SHIPPED on v4.2-dev as
-    /// `ErrorAssetLockInputContested`, so this code is re-claimed as 58 — the
-    /// same move this PR already made once when upstream took 32. Moving it
-    /// again silently would reclassify an ambiguous claim outcome on every
-    /// host built against the shipped numbering, so it stays pinned here.
+    /// Claimed three times: 48 from the 2026-08-28 frontier, re-claimed as 58
+    /// when 48 shipped upstream as `ErrorAssetLockInputContested`, and as 59
+    /// when 58 went upstream to `ErrorIdentityBalanceUnavailable` (#4799).
+    /// Both earlier numbers are pinned to their shipped owners here so a
+    /// fourth collision fails this test instead of silently reclassifying an
+    /// ambiguous claim outcome on every host.
     #[test]
-    fn shielded_claim_unconfirmed_code_is_pinned_at_58() {
+    fn shielded_claim_unconfirmed_code_is_pinned_at_59() {
         assert_eq!(
             PlatformWalletFFIResultCode::ErrorShieldedClaimUnconfirmed as i32,
-            58
+            59
+        );
+        assert_eq!(
+            PlatformWalletFFIResultCode::ErrorIdentityBalanceUnavailable as i32,
+            58,
+            "58 belongs to upstream's identity-balance code (#4799); nothing may take it back"
         );
         assert_eq!(
             PlatformWalletFFIResultCode::ErrorAssetLockInputContested as i32,
@@ -2566,6 +2679,149 @@ mod tests {
         }
     }
 
+    /// The once-per-identity claim rejection, the state error this whole
+    /// consensus channel exists for: Drive charges for the second claim and
+    /// the host must recognize it to stop offering the kind.
+    fn already_claimed() -> ConsensusError {
+        ConsensusError::from(TokenOncePerIdentityDistributionAlreadyClaimedError::new(
+            Identifier::from([1u8; 32]),
+            Identifier::from([2u8; 32]),
+            1_758_140_722_000,
+        ))
+    }
+
+    /// The wait-stream shape a state rejection arrives in: accepted by
+    /// CheckTx, rejected at block execution.
+    fn broadcast_rejection(cause: ConsensusError) -> dash_sdk::Error {
+        dash_sdk::Error::StateTransitionBroadcastError(StateTransitionBroadcastError {
+            code: cause.code(),
+            message: cause.to_string(),
+            cause: Some(cause),
+        })
+    }
+
+    /// A rejected token operation keeps the catch-all result code it has
+    /// always had, and the consensus verdict travels beside it. Both halves
+    /// matter: the code is what existing hosts branch on, and the verdict is
+    /// what a host needs to stop matching rendered text.
+    #[test]
+    fn should_carry_the_consensus_code_of_a_rejected_token_operation() {
+        let error = PlatformWalletError::token_operation_failed(
+            "claim",
+            broadcast_rejection(already_claimed()),
+        );
+        let rendered = error.to_string();
+        let result: PlatformWalletFFIResult = error.into();
+
+        assert_eq!(
+            result.code,
+            PlatformWalletFFIResultCode::ErrorUnknown,
+            "the host-visible result code must not move for a token failure"
+        );
+        assert_eq!(result.consensus_code, 40722);
+        assert_eq!(
+            result.consensus_kind,
+            PlatformWalletFFIConsensusErrorKind::State
+        );
+        assert_eq!(
+            message_of(&result),
+            rendered,
+            "the Display rendering hosts already log must survive verbatim"
+        );
+    }
+
+    /// The kind comes from the rejection's own family, not from the digits of
+    /// its code: a basic rejection must not arrive labelled as a state one.
+    #[test]
+    fn should_report_the_family_of_a_basic_rejection() {
+        let basic = ConsensusError::BasicError(BasicError::UnsupportedVersionError(
+            UnsupportedVersionError::new(9, 1, 8),
+        ));
+        let expected_code = basic.code();
+        let result: PlatformWalletFFIResult =
+            PlatformWalletError::token_operation_failed("mint", broadcast_rejection(basic)).into();
+
+        assert_eq!(
+            result.consensus_kind,
+            PlatformWalletFFIConsensusErrorKind::Basic
+        );
+        assert_eq!(result.consensus_code, expected_code);
+    }
+
+    /// Everything that is not a consensus rejection reports 0 / None, so a
+    /// host can read `consensus_code == 0` as "nothing to branch on" without
+    /// a second check.
+    #[test]
+    fn should_report_no_consensus_error_for_non_rejections() {
+        let ok = PlatformWalletFFIResult::ok();
+        assert_eq!(ok.consensus_code, 0);
+        assert_eq!(ok.consensus_kind, PlatformWalletFFIConsensusErrorKind::None);
+
+        let err = PlatformWalletFFIResult::err(PlatformWalletFFIResultCode::ErrorUnknown, "boom");
+        assert_eq!(err.consensus_code, 0);
+        assert_eq!(
+            err.consensus_kind,
+            PlatformWalletFFIConsensusErrorKind::None
+        );
+
+        let transport: PlatformWalletFFIResult = PlatformWalletError::token_operation_failed(
+            "claim",
+            dash_sdk::Error::Generic("boom".to_string()),
+        )
+        .into();
+        assert_eq!(transport.consensus_code, 0);
+        assert_eq!(
+            transport.consensus_kind,
+            PlatformWalletFFIConsensusErrorKind::None
+        );
+
+        // A rejection that was rendered into a string before it got here is
+        // gone, however much its text looks like one.
+        let stringified: PlatformWalletFFIResult =
+            PlatformWalletError::TokenError(already_claimed().to_string()).into();
+        assert_eq!(stringified.code, PlatformWalletFFIResultCode::ErrorUnknown);
+        assert_eq!(stringified.consensus_code, 0);
+        assert_eq!(
+            stringified.consensus_kind,
+            PlatformWalletFFIConsensusErrorKind::None
+        );
+    }
+
+    /// A signer that cannot reach its key is not a Platform rejection, and it
+    /// keeps the dedicated code hosts route to key repair.
+    #[test]
+    fn should_keep_the_signing_key_unavailable_code_for_a_token_operation() {
+        let result: PlatformWalletFFIResult = PlatformWalletError::token_operation_failed(
+            "claim",
+            dash_sdk::Error::Protocol(dpp::ProtocolError::Generic(format!(
+                "{}no private key stored for 02abcd",
+                rs_sdk_ffi::DASH_SDK_SIGNER_ERR_KEY_UNAVAILABLE_PREFIX
+            ))),
+        )
+        .into();
+
+        assert_eq!(
+            result.code,
+            PlatformWalletFFIResultCode::ErrorSigningKeyUnavailable
+        );
+        assert_eq!(result.consensus_code, 0);
+        assert_eq!(
+            result.consensus_kind,
+            PlatformWalletFFIConsensusErrorKind::None
+        );
+    }
+
+    /// The kind values are ABI, mirrored by hand in the Swift and Kotlin
+    /// hosts, so pin them rather than trusting declaration order.
+    #[test]
+    fn should_pin_the_consensus_kind_discriminants() {
+        assert_eq!(PlatformWalletFFIConsensusErrorKind::None as i32, 0);
+        assert_eq!(PlatformWalletFFIConsensusErrorKind::Basic as i32, 1);
+        assert_eq!(PlatformWalletFFIConsensusErrorKind::Signature as i32, 2);
+        assert_eq!(PlatformWalletFFIConsensusErrorKind::Fee as i32, 3);
+        assert_eq!(PlatformWalletFFIConsensusErrorKind::State as i32, 4);
+    }
+
     /// Read a result's message back as an owned `String`. Every
     /// marketplace assertion below inspects the message, and the raw
     /// `CStr::from_ptr` dance is noise at each site.
@@ -2574,5 +2830,22 @@ mod tests {
         unsafe { std::ffi::CStr::from_ptr(result.message) }
             .to_string_lossy()
             .into_owned()
+    }
+}
+
+#[cfg(test)]
+mod identity_balance_error_tests {
+    use super::*;
+    #[test]
+    fn should_distinguish_unavailable_network_balance_with_a_retryable_read_code() {
+        let result = PlatformWalletFFIResult::from(
+            PlatformWalletError::IdentityBalanceUnavailable([7; 32].into()),
+        );
+        assert_eq!(
+            result.code,
+            PlatformWalletFFIResultCode::ErrorIdentityBalanceUnavailable
+        );
+        assert_eq!(result.code as u32, 58);
+        assert!(!result.message.is_null());
     }
 }

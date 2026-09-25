@@ -41,6 +41,9 @@ CF_EXTERN_C_BEGIN
 @class CompactedBlockAddressBalanceChanges;
 @class ContractGroupDocumentTypeMember;
 @class ContractGroupTokenMember;
+@class ContractModerationDocument;
+@class ContractModerationReason;
+@class ContractWarning;
 @class GPBBytesValue;
 @class GPBUInt32Value;
 @class GetAddressInfoRequest_GetAddressInfoRequestV0;
@@ -75,6 +78,18 @@ CF_EXTERN_C_BEGIN
 @class GetContestedResourcesRequest_GetContestedResourcesRequestV0_StartAtValueInfo;
 @class GetContestedResourcesResponse_GetContestedResourcesResponseV0;
 @class GetContestedResourcesResponse_GetContestedResourcesResponseV0_ContestedResourceValues;
+@class GetContractDocumentRemovalsRequest_DocumentIds;
+@class GetContractDocumentRemovalsRequest_GetContractDocumentRemovalsRequestV0;
+@class GetContractDocumentRemovalsRequest_Page;
+@class GetContractDocumentRemovalsResponse_ContractDocumentRemoval;
+@class GetContractDocumentRemovalsResponse_ContractDocumentRemovals;
+@class GetContractDocumentRemovalsResponse_ContractDocumentRestoration;
+@class GetContractDocumentRemovalsResponse_GetContractDocumentRemovalsResponseV0;
+@class GetContractFeePotsRequest_GetContractFeePotsRequestV0;
+@class GetContractFeePotsResponse_ContractFeePot;
+@class GetContractFeePotsResponse_ContractFeePotLastClaim;
+@class GetContractFeePotsResponse_ContractFeePots;
+@class GetContractFeePotsResponse_GetContractFeePotsResponseV0;
 @class GetContractGroupInfoRequest_GetContractGroupInfoRequestV0;
 @class GetContractGroupInfoResponse_ContractGroupInfo;
 @class GetContractGroupInfoResponse_GetContractGroupInfoResponseV0;
@@ -91,6 +106,13 @@ CF_EXTERN_C_BEGIN
 @class GetContractGroupsForContractResponse_DocumentTypeMemberships;
 @class GetContractGroupsForContractResponse_GetContractGroupsForContractResponseV0;
 @class GetContractGroupsForContractResponse_TokenMemberships;
+@class GetContractModerationEntriesRequest_GetContractModerationEntriesRequestV0;
+@class GetContractModerationEntriesResponse_ContractModerationEntries;
+@class GetContractModerationEntriesResponse_ContractModerationEntry;
+@class GetContractModerationEntriesResponse_GetContractModerationEntriesResponseV0;
+@class GetContractModerationStatusRequest_GetContractModerationStatusRequestV0;
+@class GetContractModerationStatusResponse_ContractModerationStatus;
+@class GetContractModerationStatusResponse_GetContractModerationStatusResponseV0;
 @class GetCurrentQuorumsInfoRequest_GetCurrentQuorumsInfoRequestV0;
 @class GetCurrentQuorumsInfoResponse_GetCurrentQuorumsInfoResponseV0;
 @class GetCurrentQuorumsInfoResponse_ValidatorSetV0;
@@ -337,6 +359,7 @@ CF_EXTERN_C_BEGIN
 @class SpecificKeys;
 @class StateTransitionBroadcastError;
 @class WaitForStateTransitionResultRequest_WaitForStateTransitionResultRequestV0;
+@class WaitForStateTransitionResultResponse_SuccessWithOwnerBalance;
 @class WaitForStateTransitionResultResponse_WaitForStateTransitionResultResponseV0;
 
 NS_ASSUME_NONNULL_BEGIN
@@ -364,6 +387,37 @@ GPBEnumDescriptor *KeyPurpose_EnumDescriptor(void);
  * the time this source was generated.
  **/
 BOOL KeyPurpose_IsValidValue(int32_t value);
+
+#pragma mark - Enum ContractModerationList
+
+/** One of the moderation lists a moderated data contract may keep (protocol version 14). */
+typedef GPB_ENUM(ContractModerationList) {
+  /**
+   * Value used if any message's field encounters a value that is not defined
+   * by this enum. The message will also have C functions to get/set the rawValue
+   * of the field.
+   **/
+  ContractModerationList_GPBUnrecognizedEnumeratorValue = kGPBUnrecognizedEnumeratorValue,
+  /** Not a list: a request that leaves the field out is refused */
+  ContractModerationList_ContractModerationListUnspecified = 0,
+
+  /** Identities barred until an unban */
+  ContractModerationList_ContractModerationListBanlist = 1,
+
+  /** Identities barred until a block time */
+  ContractModerationList_ContractModerationListSuspensions = 2,
+
+  /** Identities warned, barred from nothing */
+  ContractModerationList_ContractModerationListWarnings = 3,
+};
+
+GPBEnumDescriptor *ContractModerationList_EnumDescriptor(void);
+
+/**
+ * Checks to see if the given value is defined by the enum or was not known at
+ * the time this source was generated.
+ **/
+BOOL ContractModerationList_IsValidValue(int32_t value);
 
 #pragma mark - Enum SecurityLevelMap_KeyKindRequestType
 
@@ -2926,6 +2980,832 @@ GPB_FINAL @interface GetContractGroupMembersResponse_GetContractGroupMembersResp
  **/
 void GetContractGroupMembersResponse_GetContractGroupMembersResponseV0_ClearResultOneOfCase(GetContractGroupMembersResponse_GetContractGroupMembersResponseV0 *message);
 
+#pragma mark - ContractModerationDocument
+
+typedef GPB_ENUM(ContractModerationDocument_FieldNumber) {
+  ContractModerationDocument_FieldNumber_DocumentTypeName = 1,
+  ContractModerationDocument_FieldNumber_DocumentId = 2,
+};
+
+/**
+ * A document a moderation reason is about.
+ **/
+GPB_FINAL @interface ContractModerationDocument : GPBMessage
+
+/** The document type, on the moderated contract */
+@property(nonatomic, readwrite, copy, null_resettable) NSString *documentTypeName;
+
+/** The 32-byte id of the document */
+@property(nonatomic, readwrite, copy, null_resettable) NSData *documentId;
+
+@end
+
+#pragma mark - ContractModerationReason
+
+typedef GPB_ENUM(ContractModerationReason_FieldNumber) {
+  ContractModerationReason_FieldNumber_Code = 1,
+  ContractModerationReason_FieldNumber_Text = 2,
+  ContractModerationReason_FieldNumber_DocumentsArray = 3,
+  ContractModerationReason_FieldNumber_ReasonDocumentId = 4,
+};
+
+/**
+ * Why a moderator banned, suspended or warned an identity, or deleted a
+ * document. Nothing checks what a moderator writes, and the documents cited
+ * are not looked up, except the reason document a seated elected team names.
+ **/
+GPB_FINAL @interface ContractModerationReason : GPBMessage
+
+/** Reserved for the ban codes a contract may declare in a later */
+@property(nonatomic, readwrite) uint32_t code;
+
+@property(nonatomic, readwrite) BOOL hasCode;
+/** protocol version; a u16, expected unset today, never checked */
+@property(nonatomic, readwrite, copy, null_resettable) NSString *text;
+
+/** The documents the reason is about, at most 16, none twice */
+@property(nonatomic, readwrite, strong, null_resettable) NSMutableArray<ContractModerationDocument*> *documentsArray;
+/** The number of items in @c documentsArray without causing the array to be created. */
+@property(nonatomic, readonly) NSUInteger documentsArray_Count;
+
+/** The 32-byte id of the moderation charters contract's `reason` */
+@property(nonatomic, readwrite, copy, null_resettable) NSData *reasonDocumentId;
+/** Test to see if @c reasonDocumentId has been set. */
+@property(nonatomic, readwrite) BOOL hasReasonDocumentId;
+
+@end
+
+#pragma mark - ContractWarning
+
+typedef GPB_ENUM(ContractWarning_FieldNumber) {
+  ContractWarning_FieldNumber_WarnedAt = 1,
+  ContractWarning_FieldNumber_Reason = 2,
+};
+
+/**
+ * One warning an identity carries on a contract's warning list.
+ **/
+GPB_FINAL @interface ContractWarning : GPBMessage
+
+/** The time of the block that issued it, in milliseconds */
+@property(nonatomic, readwrite) uint64_t warnedAt;
+
+/** Why */
+@property(nonatomic, readwrite, strong, null_resettable) ContractModerationReason *reason;
+/** Test to see if @c reason has been set. */
+@property(nonatomic, readwrite) BOOL hasReason;
+
+@end
+
+#pragma mark - GetContractModerationStatusRequest
+
+typedef GPB_ENUM(GetContractModerationStatusRequest_FieldNumber) {
+  GetContractModerationStatusRequest_FieldNumber_V0 = 1,
+};
+
+typedef GPB_ENUM(GetContractModerationStatusRequest_Version_OneOfCase) {
+  GetContractModerationStatusRequest_Version_OneOfCase_GPBUnsetOneOfCase = 0,
+  GetContractModerationStatusRequest_Version_OneOfCase_V0 = 1,
+};
+
+GPB_FINAL @interface GetContractModerationStatusRequest : GPBMessage
+
+@property(nonatomic, readonly) GetContractModerationStatusRequest_Version_OneOfCase versionOneOfCase;
+
+@property(nonatomic, readwrite, strong, null_resettable) GetContractModerationStatusRequest_GetContractModerationStatusRequestV0 *v0;
+
+@end
+
+/**
+ * Clears whatever value was set for the oneof 'version'.
+ **/
+void GetContractModerationStatusRequest_ClearVersionOneOfCase(GetContractModerationStatusRequest *message);
+
+#pragma mark - GetContractModerationStatusRequest_GetContractModerationStatusRequestV0
+
+typedef GPB_ENUM(GetContractModerationStatusRequest_GetContractModerationStatusRequestV0_FieldNumber) {
+  GetContractModerationStatusRequest_GetContractModerationStatusRequestV0_FieldNumber_ContractId = 1,
+  GetContractModerationStatusRequest_GetContractModerationStatusRequestV0_FieldNumber_IdentityId = 2,
+  GetContractModerationStatusRequest_GetContractModerationStatusRequestV0_FieldNumber_ListsArray = 3,
+  GetContractModerationStatusRequest_GetContractModerationStatusRequestV0_FieldNumber_Prove = 4,
+};
+
+GPB_FINAL @interface GetContractModerationStatusRequest_GetContractModerationStatusRequestV0 : GPBMessage
+
+/** The 32-byte id of the moderated contract */
+@property(nonatomic, readwrite, copy, null_resettable) NSData *contractId;
+
+/** The 32-byte id of the identity */
+@property(nonatomic, readwrite, copy, null_resettable) NSData *identityId;
+
+/** The lists to read, which the contract's config must declare; at */
+// |listsArray| contains |ContractModerationList|
+@property(nonatomic, readwrite, strong, null_resettable) GPBEnumArray *listsArray;
+/** The number of items in @c listsArray without causing the array to be created. */
+@property(nonatomic, readonly) NSUInteger listsArray_Count;
+
+/** least one, no repeats */
+@property(nonatomic, readwrite) BOOL prove;
+
+@end
+
+#pragma mark - GetContractModerationStatusResponse
+
+typedef GPB_ENUM(GetContractModerationStatusResponse_FieldNumber) {
+  GetContractModerationStatusResponse_FieldNumber_V0 = 1,
+};
+
+typedef GPB_ENUM(GetContractModerationStatusResponse_Version_OneOfCase) {
+  GetContractModerationStatusResponse_Version_OneOfCase_GPBUnsetOneOfCase = 0,
+  GetContractModerationStatusResponse_Version_OneOfCase_V0 = 1,
+};
+
+GPB_FINAL @interface GetContractModerationStatusResponse : GPBMessage
+
+@property(nonatomic, readonly) GetContractModerationStatusResponse_Version_OneOfCase versionOneOfCase;
+
+@property(nonatomic, readwrite, strong, null_resettable) GetContractModerationStatusResponse_GetContractModerationStatusResponseV0 *v0;
+
+@end
+
+/**
+ * Clears whatever value was set for the oneof 'version'.
+ **/
+void GetContractModerationStatusResponse_ClearVersionOneOfCase(GetContractModerationStatusResponse *message);
+
+#pragma mark - GetContractModerationStatusResponse_ContractModerationStatus
+
+typedef GPB_ENUM(GetContractModerationStatusResponse_ContractModerationStatus_FieldNumber) {
+  GetContractModerationStatusResponse_ContractModerationStatus_FieldNumber_Banned = 1,
+  GetContractModerationStatusResponse_ContractModerationStatus_FieldNumber_SuspendedUntil = 2,
+  GetContractModerationStatusResponse_ContractModerationStatus_FieldNumber_ListsArray = 3,
+  GetContractModerationStatusResponse_ContractModerationStatus_FieldNumber_BanReason = 4,
+  GetContractModerationStatusResponse_ContractModerationStatus_FieldNumber_SuspensionReason = 5,
+  GetContractModerationStatusResponse_ContractModerationStatus_FieldNumber_WarningsArray = 6,
+};
+
+/**
+ * The identity's status on the lists the request named, and on no other: a
+ * list that was not read says nothing, so its field is left unset.
+ **/
+GPB_FINAL @interface GetContractModerationStatusResponse_ContractModerationStatus : GPBMessage
+
+/** Set only when the banlist was read: the identity is on it */
+@property(nonatomic, readwrite) BOOL banned;
+
+@property(nonatomic, readwrite) BOOL hasBanned;
+/** The block time, in milliseconds, until which the identity is */
+@property(nonatomic, readwrite) uint64_t suspendedUntil;
+
+@property(nonatomic, readwrite) BOOL hasSuspendedUntil;
+/**
+ * suspended; a lapsed suspension stays until it is swept. Unset
+ * when the identity is not suspended or the list was not read
+ **/
+// |listsArray| contains |ContractModerationList|
+@property(nonatomic, readwrite, strong, null_resettable) GPBEnumArray *listsArray;
+/** The number of items in @c listsArray without causing the array to be created. */
+@property(nonatomic, readonly) NSUInteger listsArray_Count;
+
+/** Set when the identity is banned: why */
+@property(nonatomic, readwrite, strong, null_resettable) ContractModerationReason *banReason;
+/** Test to see if @c banReason has been set. */
+@property(nonatomic, readwrite) BOOL hasBanReason;
+
+/** Set when the identity is suspended: why */
+@property(nonatomic, readwrite, strong, null_resettable) ContractModerationReason *suspensionReason;
+/** Test to see if @c suspensionReason has been set. */
+@property(nonatomic, readwrite) BOOL hasSuspensionReason;
+
+/** When the warning list was read: the identity's warnings, oldest */
+@property(nonatomic, readwrite, strong, null_resettable) NSMutableArray<ContractWarning*> *warningsArray;
+/** The number of items in @c warningsArray without causing the array to be created. */
+@property(nonatomic, readonly) NSUInteger warningsArray_Count;
+
+@end
+
+#pragma mark - GetContractModerationStatusResponse_GetContractModerationStatusResponseV0
+
+typedef GPB_ENUM(GetContractModerationStatusResponse_GetContractModerationStatusResponseV0_FieldNumber) {
+  GetContractModerationStatusResponse_GetContractModerationStatusResponseV0_FieldNumber_Status = 1,
+  GetContractModerationStatusResponse_GetContractModerationStatusResponseV0_FieldNumber_Proof = 2,
+  GetContractModerationStatusResponse_GetContractModerationStatusResponseV0_FieldNumber_Metadata = 3,
+};
+
+typedef GPB_ENUM(GetContractModerationStatusResponse_GetContractModerationStatusResponseV0_Result_OneOfCase) {
+  GetContractModerationStatusResponse_GetContractModerationStatusResponseV0_Result_OneOfCase_GPBUnsetOneOfCase = 0,
+  GetContractModerationStatusResponse_GetContractModerationStatusResponseV0_Result_OneOfCase_Status = 1,
+  GetContractModerationStatusResponse_GetContractModerationStatusResponseV0_Result_OneOfCase_Proof = 2,
+};
+
+GPB_FINAL @interface GetContractModerationStatusResponse_GetContractModerationStatusResponseV0 : GPBMessage
+
+@property(nonatomic, readonly) GetContractModerationStatusResponse_GetContractModerationStatusResponseV0_Result_OneOfCase resultOneOfCase;
+
+/** The identity's status on the lists read */
+@property(nonatomic, readwrite, strong, null_resettable) GetContractModerationStatusResponse_ContractModerationStatus *status;
+
+/** Cryptographic proof of the status, if requested */
+@property(nonatomic, readwrite, strong, null_resettable) Proof *proof;
+
+/** Metadata about the blockchain state */
+@property(nonatomic, readwrite, strong, null_resettable) ResponseMetadata *metadata;
+/** Test to see if @c metadata has been set. */
+@property(nonatomic, readwrite) BOOL hasMetadata;
+
+@end
+
+/**
+ * Clears whatever value was set for the oneof 'result'.
+ **/
+void GetContractModerationStatusResponse_GetContractModerationStatusResponseV0_ClearResultOneOfCase(GetContractModerationStatusResponse_GetContractModerationStatusResponseV0 *message);
+
+#pragma mark - GetContractModerationEntriesRequest
+
+typedef GPB_ENUM(GetContractModerationEntriesRequest_FieldNumber) {
+  GetContractModerationEntriesRequest_FieldNumber_V0 = 1,
+};
+
+typedef GPB_ENUM(GetContractModerationEntriesRequest_Version_OneOfCase) {
+  GetContractModerationEntriesRequest_Version_OneOfCase_GPBUnsetOneOfCase = 0,
+  GetContractModerationEntriesRequest_Version_OneOfCase_V0 = 1,
+};
+
+GPB_FINAL @interface GetContractModerationEntriesRequest : GPBMessage
+
+@property(nonatomic, readonly) GetContractModerationEntriesRequest_Version_OneOfCase versionOneOfCase;
+
+@property(nonatomic, readwrite, strong, null_resettable) GetContractModerationEntriesRequest_GetContractModerationEntriesRequestV0 *v0;
+
+@end
+
+/**
+ * Clears whatever value was set for the oneof 'version'.
+ **/
+void GetContractModerationEntriesRequest_ClearVersionOneOfCase(GetContractModerationEntriesRequest *message);
+
+#pragma mark - GetContractModerationEntriesRequest_GetContractModerationEntriesRequestV0
+
+typedef GPB_ENUM(GetContractModerationEntriesRequest_GetContractModerationEntriesRequestV0_FieldNumber) {
+  GetContractModerationEntriesRequest_GetContractModerationEntriesRequestV0_FieldNumber_ContractId = 1,
+  GetContractModerationEntriesRequest_GetContractModerationEntriesRequestV0_FieldNumber_List = 2,
+  GetContractModerationEntriesRequest_GetContractModerationEntriesRequestV0_FieldNumber_StartAfter = 3,
+  GetContractModerationEntriesRequest_GetContractModerationEntriesRequestV0_FieldNumber_Limit = 4,
+  GetContractModerationEntriesRequest_GetContractModerationEntriesRequestV0_FieldNumber_Prove = 5,
+};
+
+GPB_FINAL @interface GetContractModerationEntriesRequest_GetContractModerationEntriesRequestV0 : GPBMessage
+
+/** The 32-byte id of the moderated contract */
+@property(nonatomic, readwrite, copy, null_resettable) NSData *contractId;
+
+/** The list to read, which the contract's config must declare */
+@property(nonatomic, readwrite) ContractModerationList list;
+
+/** 32-byte identity id; the page starts after it */
+@property(nonatomic, readwrite, copy, null_resettable) NSData *startAfter;
+/** Test to see if @c startAfter has been set. */
+@property(nonatomic, readwrite) BOOL hasStartAfter;
+
+/** Maximum number of entries to return, from 1 to the protocol's */
+@property(nonatomic, readwrite) uint32_t limit;
+
+@property(nonatomic, readwrite) BOOL hasLimit;
+/** max_returned_elements (100); absent means that maximum */
+@property(nonatomic, readwrite) BOOL prove;
+
+@end
+
+/**
+ * Fetches the raw value of a @c GetContractModerationEntriesRequest_GetContractModerationEntriesRequestV0's @c list property, even
+ * if the value was not defined by the enum at the time the code was generated.
+ **/
+int32_t GetContractModerationEntriesRequest_GetContractModerationEntriesRequestV0_List_RawValue(GetContractModerationEntriesRequest_GetContractModerationEntriesRequestV0 *message);
+/**
+ * Sets the raw value of an @c GetContractModerationEntriesRequest_GetContractModerationEntriesRequestV0's @c list property, allowing
+ * it to be set to a value that was not defined by the enum at the time the code
+ * was generated.
+ **/
+void SetGetContractModerationEntriesRequest_GetContractModerationEntriesRequestV0_List_RawValue(GetContractModerationEntriesRequest_GetContractModerationEntriesRequestV0 *message, int32_t value);
+
+#pragma mark - GetContractModerationEntriesResponse
+
+typedef GPB_ENUM(GetContractModerationEntriesResponse_FieldNumber) {
+  GetContractModerationEntriesResponse_FieldNumber_V0 = 1,
+};
+
+typedef GPB_ENUM(GetContractModerationEntriesResponse_Version_OneOfCase) {
+  GetContractModerationEntriesResponse_Version_OneOfCase_GPBUnsetOneOfCase = 0,
+  GetContractModerationEntriesResponse_Version_OneOfCase_V0 = 1,
+};
+
+GPB_FINAL @interface GetContractModerationEntriesResponse : GPBMessage
+
+@property(nonatomic, readonly) GetContractModerationEntriesResponse_Version_OneOfCase versionOneOfCase;
+
+@property(nonatomic, readwrite, strong, null_resettable) GetContractModerationEntriesResponse_GetContractModerationEntriesResponseV0 *v0;
+
+@end
+
+/**
+ * Clears whatever value was set for the oneof 'version'.
+ **/
+void GetContractModerationEntriesResponse_ClearVersionOneOfCase(GetContractModerationEntriesResponse *message);
+
+#pragma mark - GetContractModerationEntriesResponse_ContractModerationEntry
+
+typedef GPB_ENUM(GetContractModerationEntriesResponse_ContractModerationEntry_FieldNumber) {
+  GetContractModerationEntriesResponse_ContractModerationEntry_FieldNumber_IdentityId = 1,
+  GetContractModerationEntriesResponse_ContractModerationEntry_FieldNumber_Until = 2,
+  GetContractModerationEntriesResponse_ContractModerationEntry_FieldNumber_Reason = 3,
+  GetContractModerationEntriesResponse_ContractModerationEntry_FieldNumber_WarningsArray = 4,
+};
+
+GPB_FINAL @interface GetContractModerationEntriesResponse_ContractModerationEntry : GPBMessage
+
+/** The identity on the list */
+@property(nonatomic, readwrite, copy, null_resettable) NSData *identityId;
+
+/** For a suspension list entry: the block time, in milliseconds, at */
+@property(nonatomic, readwrite) uint64_t until;
+
+@property(nonatomic, readwrite) BOOL hasUntil;
+/** which it lapses */
+@property(nonatomic, readwrite, strong, null_resettable) ContractModerationReason *reason;
+/** Test to see if @c reason has been set. */
+@property(nonatomic, readwrite) BOOL hasReason;
+
+/**
+ * suspension's. Unset for a warning list entry, whose reasons
+ * are its warnings'
+ **/
+@property(nonatomic, readwrite, strong, null_resettable) NSMutableArray<ContractWarning*> *warningsArray;
+/** The number of items in @c warningsArray without causing the array to be created. */
+@property(nonatomic, readonly) NSUInteger warningsArray_Count;
+
+@end
+
+#pragma mark - GetContractModerationEntriesResponse_ContractModerationEntries
+
+typedef GPB_ENUM(GetContractModerationEntriesResponse_ContractModerationEntries_FieldNumber) {
+  GetContractModerationEntriesResponse_ContractModerationEntries_FieldNumber_EntriesArray = 1,
+};
+
+GPB_FINAL @interface GetContractModerationEntriesResponse_ContractModerationEntries : GPBMessage
+
+/** The page, in identity id order */
+@property(nonatomic, readwrite, strong, null_resettable) NSMutableArray<GetContractModerationEntriesResponse_ContractModerationEntry*> *entriesArray;
+/** The number of items in @c entriesArray without causing the array to be created. */
+@property(nonatomic, readonly) NSUInteger entriesArray_Count;
+
+@end
+
+#pragma mark - GetContractModerationEntriesResponse_GetContractModerationEntriesResponseV0
+
+typedef GPB_ENUM(GetContractModerationEntriesResponse_GetContractModerationEntriesResponseV0_FieldNumber) {
+  GetContractModerationEntriesResponse_GetContractModerationEntriesResponseV0_FieldNumber_Entries = 1,
+  GetContractModerationEntriesResponse_GetContractModerationEntriesResponseV0_FieldNumber_Proof = 2,
+  GetContractModerationEntriesResponse_GetContractModerationEntriesResponseV0_FieldNumber_Metadata = 3,
+};
+
+typedef GPB_ENUM(GetContractModerationEntriesResponse_GetContractModerationEntriesResponseV0_Result_OneOfCase) {
+  GetContractModerationEntriesResponse_GetContractModerationEntriesResponseV0_Result_OneOfCase_GPBUnsetOneOfCase = 0,
+  GetContractModerationEntriesResponse_GetContractModerationEntriesResponseV0_Result_OneOfCase_Entries = 1,
+  GetContractModerationEntriesResponse_GetContractModerationEntriesResponseV0_Result_OneOfCase_Proof = 2,
+};
+
+GPB_FINAL @interface GetContractModerationEntriesResponse_GetContractModerationEntriesResponseV0 : GPBMessage
+
+@property(nonatomic, readonly) GetContractModerationEntriesResponse_GetContractModerationEntriesResponseV0_Result_OneOfCase resultOneOfCase;
+
+/** One page of the list */
+@property(nonatomic, readwrite, strong, null_resettable) GetContractModerationEntriesResponse_ContractModerationEntries *entries;
+
+/** Cryptographic proof of the page, if requested */
+@property(nonatomic, readwrite, strong, null_resettable) Proof *proof;
+
+/** Metadata about the blockchain state */
+@property(nonatomic, readwrite, strong, null_resettable) ResponseMetadata *metadata;
+/** Test to see if @c metadata has been set. */
+@property(nonatomic, readwrite) BOOL hasMetadata;
+
+@end
+
+/**
+ * Clears whatever value was set for the oneof 'result'.
+ **/
+void GetContractModerationEntriesResponse_GetContractModerationEntriesResponseV0_ClearResultOneOfCase(GetContractModerationEntriesResponse_GetContractModerationEntriesResponseV0 *message);
+
+#pragma mark - GetContractDocumentRemovalsRequest
+
+typedef GPB_ENUM(GetContractDocumentRemovalsRequest_FieldNumber) {
+  GetContractDocumentRemovalsRequest_FieldNumber_V0 = 1,
+};
+
+typedef GPB_ENUM(GetContractDocumentRemovalsRequest_Version_OneOfCase) {
+  GetContractDocumentRemovalsRequest_Version_OneOfCase_GPBUnsetOneOfCase = 0,
+  GetContractDocumentRemovalsRequest_Version_OneOfCase_V0 = 1,
+};
+
+/**
+ * The records of the documents a contract's moderators deleted, within one
+ * document type whose documents they may delete (`canBeDeletedByModerators`):
+ * the ones of the document ids named, or one page in document id order.
+ **/
+GPB_FINAL @interface GetContractDocumentRemovalsRequest : GPBMessage
+
+@property(nonatomic, readonly) GetContractDocumentRemovalsRequest_Version_OneOfCase versionOneOfCase;
+
+@property(nonatomic, readwrite, strong, null_resettable) GetContractDocumentRemovalsRequest_GetContractDocumentRemovalsRequestV0 *v0;
+
+@end
+
+/**
+ * Clears whatever value was set for the oneof 'version'.
+ **/
+void GetContractDocumentRemovalsRequest_ClearVersionOneOfCase(GetContractDocumentRemovalsRequest *message);
+
+#pragma mark - GetContractDocumentRemovalsRequest_DocumentIds
+
+typedef GPB_ENUM(GetContractDocumentRemovalsRequest_DocumentIds_FieldNumber) {
+  GetContractDocumentRemovalsRequest_DocumentIds_FieldNumber_DocumentIdsArray = 1,
+};
+
+GPB_FINAL @interface GetContractDocumentRemovalsRequest_DocumentIds : GPBMessage
+
+/** 32-byte document ids, from 1 to the protocol's */
+@property(nonatomic, readwrite, strong, null_resettable) NSMutableArray<NSData*> *documentIdsArray;
+/** The number of items in @c documentIdsArray without causing the array to be created. */
+@property(nonatomic, readonly) NSUInteger documentIdsArray_Count;
+
+@end
+
+#pragma mark - GetContractDocumentRemovalsRequest_Page
+
+typedef GPB_ENUM(GetContractDocumentRemovalsRequest_Page_FieldNumber) {
+  GetContractDocumentRemovalsRequest_Page_FieldNumber_StartAfter = 1,
+  GetContractDocumentRemovalsRequest_Page_FieldNumber_Limit = 2,
+};
+
+GPB_FINAL @interface GetContractDocumentRemovalsRequest_Page : GPBMessage
+
+/** 32-byte document id; the page starts after it */
+@property(nonatomic, readwrite, copy, null_resettable) NSData *startAfter;
+/** Test to see if @c startAfter has been set. */
+@property(nonatomic, readwrite) BOOL hasStartAfter;
+
+/** Maximum number of records to return, from 1 to the protocol's */
+@property(nonatomic, readwrite) uint32_t limit;
+
+@property(nonatomic, readwrite) BOOL hasLimit;
+@end
+
+#pragma mark - GetContractDocumentRemovalsRequest_GetContractDocumentRemovalsRequestV0
+
+typedef GPB_ENUM(GetContractDocumentRemovalsRequest_GetContractDocumentRemovalsRequestV0_FieldNumber) {
+  GetContractDocumentRemovalsRequest_GetContractDocumentRemovalsRequestV0_FieldNumber_ContractId = 1,
+  GetContractDocumentRemovalsRequest_GetContractDocumentRemovalsRequestV0_FieldNumber_DocumentTypeName = 2,
+  GetContractDocumentRemovalsRequest_GetContractDocumentRemovalsRequestV0_FieldNumber_DocumentIds = 3,
+  GetContractDocumentRemovalsRequest_GetContractDocumentRemovalsRequestV0_FieldNumber_Page = 4,
+  GetContractDocumentRemovalsRequest_GetContractDocumentRemovalsRequestV0_FieldNumber_Prove = 5,
+};
+
+typedef GPB_ENUM(GetContractDocumentRemovalsRequest_GetContractDocumentRemovalsRequestV0_Selection_OneOfCase) {
+  GetContractDocumentRemovalsRequest_GetContractDocumentRemovalsRequestV0_Selection_OneOfCase_GPBUnsetOneOfCase = 0,
+  GetContractDocumentRemovalsRequest_GetContractDocumentRemovalsRequestV0_Selection_OneOfCase_DocumentIds = 3,
+  GetContractDocumentRemovalsRequest_GetContractDocumentRemovalsRequestV0_Selection_OneOfCase_Page = 4,
+};
+
+GPB_FINAL @interface GetContractDocumentRemovalsRequest_GetContractDocumentRemovalsRequestV0 : GPBMessage
+
+/** The 32-byte id of the moderated contract */
+@property(nonatomic, readwrite, copy, null_resettable) NSData *contractId;
+
+/** The document type, which must let moderators delete its documents */
+@property(nonatomic, readwrite, copy, null_resettable) NSString *documentTypeName;
+
+@property(nonatomic, readonly) GetContractDocumentRemovalsRequest_GetContractDocumentRemovalsRequestV0_Selection_OneOfCase selectionOneOfCase;
+
+/** The records of these documents */
+@property(nonatomic, readwrite, strong, null_resettable) GetContractDocumentRemovalsRequest_DocumentIds *documentIds;
+
+/** One page of the type's records */
+@property(nonatomic, readwrite, strong, null_resettable) GetContractDocumentRemovalsRequest_Page *page;
+
+/** Flag to request a proof as the response */
+@property(nonatomic, readwrite) BOOL prove;
+
+@end
+
+/**
+ * Clears whatever value was set for the oneof 'selection'.
+ **/
+void GetContractDocumentRemovalsRequest_GetContractDocumentRemovalsRequestV0_ClearSelectionOneOfCase(GetContractDocumentRemovalsRequest_GetContractDocumentRemovalsRequestV0 *message);
+
+#pragma mark - GetContractDocumentRemovalsResponse
+
+typedef GPB_ENUM(GetContractDocumentRemovalsResponse_FieldNumber) {
+  GetContractDocumentRemovalsResponse_FieldNumber_V0 = 1,
+};
+
+typedef GPB_ENUM(GetContractDocumentRemovalsResponse_Version_OneOfCase) {
+  GetContractDocumentRemovalsResponse_Version_OneOfCase_GPBUnsetOneOfCase = 0,
+  GetContractDocumentRemovalsResponse_Version_OneOfCase_V0 = 1,
+};
+
+GPB_FINAL @interface GetContractDocumentRemovalsResponse : GPBMessage
+
+@property(nonatomic, readonly) GetContractDocumentRemovalsResponse_Version_OneOfCase versionOneOfCase;
+
+@property(nonatomic, readwrite, strong, null_resettable) GetContractDocumentRemovalsResponse_GetContractDocumentRemovalsResponseV0 *v0;
+
+@end
+
+/**
+ * Clears whatever value was set for the oneof 'version'.
+ **/
+void GetContractDocumentRemovalsResponse_ClearVersionOneOfCase(GetContractDocumentRemovalsResponse *message);
+
+#pragma mark - GetContractDocumentRemovalsResponse_ContractDocumentRestoration
+
+typedef GPB_ENUM(GetContractDocumentRemovalsResponse_ContractDocumentRestoration_FieldNumber) {
+  GetContractDocumentRemovalsResponse_ContractDocumentRestoration_FieldNumber_ModeratorId = 1,
+  GetContractDocumentRemovalsResponse_ContractDocumentRestoration_FieldNumber_RestoredAt = 2,
+};
+
+GPB_FINAL @interface GetContractDocumentRemovalsResponse_ContractDocumentRestoration : GPBMessage
+
+/** The contract owner or moderator that restored the document */
+@property(nonatomic, readwrite, copy, null_resettable) NSData *moderatorId;
+
+/** The time of the block that restored it, in milliseconds */
+@property(nonatomic, readwrite) uint64_t restoredAt;
+
+@end
+
+#pragma mark - GetContractDocumentRemovalsResponse_ContractDocumentRemoval
+
+typedef GPB_ENUM(GetContractDocumentRemovalsResponse_ContractDocumentRemoval_FieldNumber) {
+  GetContractDocumentRemovalsResponse_ContractDocumentRemoval_FieldNumber_DocumentId = 1,
+  GetContractDocumentRemovalsResponse_ContractDocumentRemoval_FieldNumber_DocumentOwnerId = 2,
+  GetContractDocumentRemovalsResponse_ContractDocumentRemoval_FieldNumber_ModeratorId = 3,
+  GetContractDocumentRemovalsResponse_ContractDocumentRemoval_FieldNumber_RemovedAt = 4,
+  GetContractDocumentRemovalsResponse_ContractDocumentRemoval_FieldNumber_Reason = 5,
+  GetContractDocumentRemovalsResponse_ContractDocumentRemoval_FieldNumber_DocumentHash = 6,
+  GetContractDocumentRemovalsResponse_ContractDocumentRemoval_FieldNumber_Restoration = 7,
+};
+
+GPB_FINAL @interface GetContractDocumentRemovalsResponse_ContractDocumentRemoval : GPBMessage
+
+/** The id the removed document had */
+@property(nonatomic, readwrite, copy, null_resettable) NSData *documentId;
+
+/** The identity that owned it */
+@property(nonatomic, readwrite, copy, null_resettable) NSData *documentOwnerId;
+
+/** The contract owner or moderator that removed it */
+@property(nonatomic, readwrite, copy, null_resettable) NSData *moderatorId;
+
+/** The time of the block that removed it, in milliseconds */
+@property(nonatomic, readwrite) uint64_t removedAt;
+
+/** Why the moderator removed it */
+@property(nonatomic, readwrite, strong, null_resettable) ContractModerationReason *reason;
+/** Test to see if @c reason has been set. */
+@property(nonatomic, readwrite) BOOL hasReason;
+
+/** A 32-byte double SHA-256 of the document as it was serialized */
+@property(nonatomic, readwrite, copy, null_resettable) NSData *documentHash;
+
+/**
+ * under its document type when it was removed: what a restore must
+ * bring back byte for byte
+ **/
+@property(nonatomic, readwrite, strong, null_resettable) GetContractDocumentRemovalsResponse_ContractDocumentRestoration *restoration;
+/** Test to see if @c restoration has been set. */
+@property(nonatomic, readwrite) BOOL hasRestoration;
+
+@end
+
+#pragma mark - GetContractDocumentRemovalsResponse_ContractDocumentRemovals
+
+typedef GPB_ENUM(GetContractDocumentRemovalsResponse_ContractDocumentRemovals_FieldNumber) {
+  GetContractDocumentRemovalsResponse_ContractDocumentRemovals_FieldNumber_RemovalsArray = 1,
+};
+
+GPB_FINAL @interface GetContractDocumentRemovalsResponse_ContractDocumentRemovals : GPBMessage
+
+/** The records, in document id order */
+@property(nonatomic, readwrite, strong, null_resettable) NSMutableArray<GetContractDocumentRemovalsResponse_ContractDocumentRemoval*> *removalsArray;
+/** The number of items in @c removalsArray without causing the array to be created. */
+@property(nonatomic, readonly) NSUInteger removalsArray_Count;
+
+@end
+
+#pragma mark - GetContractDocumentRemovalsResponse_GetContractDocumentRemovalsResponseV0
+
+typedef GPB_ENUM(GetContractDocumentRemovalsResponse_GetContractDocumentRemovalsResponseV0_FieldNumber) {
+  GetContractDocumentRemovalsResponse_GetContractDocumentRemovalsResponseV0_FieldNumber_Removals = 1,
+  GetContractDocumentRemovalsResponse_GetContractDocumentRemovalsResponseV0_FieldNumber_Proof = 2,
+  GetContractDocumentRemovalsResponse_GetContractDocumentRemovalsResponseV0_FieldNumber_Metadata = 3,
+};
+
+typedef GPB_ENUM(GetContractDocumentRemovalsResponse_GetContractDocumentRemovalsResponseV0_Result_OneOfCase) {
+  GetContractDocumentRemovalsResponse_GetContractDocumentRemovalsResponseV0_Result_OneOfCase_GPBUnsetOneOfCase = 0,
+  GetContractDocumentRemovalsResponse_GetContractDocumentRemovalsResponseV0_Result_OneOfCase_Removals = 1,
+  GetContractDocumentRemovalsResponse_GetContractDocumentRemovalsResponseV0_Result_OneOfCase_Proof = 2,
+};
+
+GPB_FINAL @interface GetContractDocumentRemovalsResponse_GetContractDocumentRemovalsResponseV0 : GPBMessage
+
+@property(nonatomic, readonly) GetContractDocumentRemovalsResponse_GetContractDocumentRemovalsResponseV0_Result_OneOfCase resultOneOfCase;
+
+/** The records read */
+@property(nonatomic, readwrite, strong, null_resettable) GetContractDocumentRemovalsResponse_ContractDocumentRemovals *removals;
+
+/** Cryptographic proof of the records, if requested */
+@property(nonatomic, readwrite, strong, null_resettable) Proof *proof;
+
+/** Metadata about the blockchain state */
+@property(nonatomic, readwrite, strong, null_resettable) ResponseMetadata *metadata;
+/** Test to see if @c metadata has been set. */
+@property(nonatomic, readwrite) BOOL hasMetadata;
+
+@end
+
+/**
+ * Clears whatever value was set for the oneof 'result'.
+ **/
+void GetContractDocumentRemovalsResponse_GetContractDocumentRemovalsResponseV0_ClearResultOneOfCase(GetContractDocumentRemovalsResponse_GetContractDocumentRemovalsResponseV0 *message);
+
+#pragma mark - GetContractFeePotsRequest
+
+typedef GPB_ENUM(GetContractFeePotsRequest_FieldNumber) {
+  GetContractFeePotsRequest_FieldNumber_V0 = 1,
+};
+
+typedef GPB_ENUM(GetContractFeePotsRequest_Version_OneOfCase) {
+  GetContractFeePotsRequest_Version_OneOfCase_GPBUnsetOneOfCase = 0,
+  GetContractFeePotsRequest_Version_OneOfCase_V0 = 1,
+};
+
+GPB_FINAL @interface GetContractFeePotsRequest : GPBMessage
+
+@property(nonatomic, readonly) GetContractFeePotsRequest_Version_OneOfCase versionOneOfCase;
+
+@property(nonatomic, readwrite, strong, null_resettable) GetContractFeePotsRequest_GetContractFeePotsRequestV0 *v0;
+
+@end
+
+/**
+ * Clears whatever value was set for the oneof 'version'.
+ **/
+void GetContractFeePotsRequest_ClearVersionOneOfCase(GetContractFeePotsRequest *message);
+
+#pragma mark - GetContractFeePotsRequest_GetContractFeePotsRequestV0
+
+typedef GPB_ENUM(GetContractFeePotsRequest_GetContractFeePotsRequestV0_FieldNumber) {
+  GetContractFeePotsRequest_GetContractFeePotsRequestV0_FieldNumber_ContractId = 1,
+  GetContractFeePotsRequest_GetContractFeePotsRequestV0_FieldNumber_Prove = 2,
+};
+
+GPB_FINAL @interface GetContractFeePotsRequest_GetContractFeePotsRequestV0 : GPBMessage
+
+/** The 32-byte id of the data contract */
+@property(nonatomic, readwrite, copy, null_resettable) NSData *contractId;
+
+/** Flag to request a proof as the response */
+@property(nonatomic, readwrite) BOOL prove;
+
+@end
+
+#pragma mark - GetContractFeePotsResponse
+
+typedef GPB_ENUM(GetContractFeePotsResponse_FieldNumber) {
+  GetContractFeePotsResponse_FieldNumber_V0 = 1,
+};
+
+typedef GPB_ENUM(GetContractFeePotsResponse_Version_OneOfCase) {
+  GetContractFeePotsResponse_Version_OneOfCase_GPBUnsetOneOfCase = 0,
+  GetContractFeePotsResponse_Version_OneOfCase_V0 = 1,
+};
+
+GPB_FINAL @interface GetContractFeePotsResponse : GPBMessage
+
+@property(nonatomic, readonly) GetContractFeePotsResponse_Version_OneOfCase versionOneOfCase;
+
+@property(nonatomic, readwrite, strong, null_resettable) GetContractFeePotsResponse_GetContractFeePotsResponseV0 *v0;
+
+@end
+
+/**
+ * Clears whatever value was set for the oneof 'version'.
+ **/
+void GetContractFeePotsResponse_ClearVersionOneOfCase(GetContractFeePotsResponse *message);
+
+#pragma mark - GetContractFeePotsResponse_ContractFeePotLastClaim
+
+typedef GPB_ENUM(GetContractFeePotsResponse_ContractFeePotLastClaim_FieldNumber) {
+  GetContractFeePotsResponse_ContractFeePotLastClaim_FieldNumber_Epoch = 1,
+  GetContractFeePotsResponse_ContractFeePotLastClaim_FieldNumber_TimeMs = 2,
+  GetContractFeePotsResponse_ContractFeePotLastClaim_FieldNumber_ClaimantId = 3,
+};
+
+/**
+ * The last payout of a pot, which the claim that made it left in state
+ **/
+GPB_FINAL @interface GetContractFeePotsResponse_ContractFeePotLastClaim : GPBMessage
+
+/** The epoch (u16) the pot was paid out in; a pot is paid */
+@property(nonatomic, readwrite) uint32_t epoch;
+
+/** out at most once per epoch */
+@property(nonatomic, readwrite) uint64_t timeMs;
+
+/** The identity that signed the claim: the contract */
+@property(nonatomic, readwrite, copy, null_resettable) NSData *claimantId;
+
+@end
+
+#pragma mark - GetContractFeePotsResponse_ContractFeePot
+
+typedef GPB_ENUM(GetContractFeePotsResponse_ContractFeePot_FieldNumber) {
+  GetContractFeePotsResponse_ContractFeePot_FieldNumber_Credits = 1,
+  GetContractFeePotsResponse_ContractFeePot_FieldNumber_LastClaim = 2,
+};
+
+/**
+ * One of the two pots a contract's document action fees collect in
+ **/
+GPB_FINAL @interface GetContractFeePotsResponse_ContractFeePot : GPBMessage
+
+/** What the pot holds */
+@property(nonatomic, readwrite) uint64_t credits;
+
+/** Unset when the pot was never paid out */
+@property(nonatomic, readwrite, strong, null_resettable) GetContractFeePotsResponse_ContractFeePotLastClaim *lastClaim;
+/** Test to see if @c lastClaim has been set. */
+@property(nonatomic, readwrite) BOOL hasLastClaim;
+
+@end
+
+#pragma mark - GetContractFeePotsResponse_ContractFeePots
+
+typedef GPB_ENUM(GetContractFeePotsResponse_ContractFeePots_FieldNumber) {
+  GetContractFeePotsResponse_ContractFeePots_FieldNumber_Owner = 1,
+  GetContractFeePotsResponse_ContractFeePots_FieldNumber_Moderators = 2,
+};
+
+GPB_FINAL @interface GetContractFeePotsResponse_ContractFeePots : GPBMessage
+
+/** The pot the contract owner claims */
+@property(nonatomic, readwrite, strong, null_resettable) GetContractFeePotsResponse_ContractFeePot *owner;
+/** Test to see if @c owner has been set. */
+@property(nonatomic, readwrite) BOOL hasOwner;
+
+/** The pot the moderation team shares */
+@property(nonatomic, readwrite, strong, null_resettable) GetContractFeePotsResponse_ContractFeePot *moderators;
+/** Test to see if @c moderators has been set. */
+@property(nonatomic, readwrite) BOOL hasModerators;
+
+@end
+
+#pragma mark - GetContractFeePotsResponse_GetContractFeePotsResponseV0
+
+typedef GPB_ENUM(GetContractFeePotsResponse_GetContractFeePotsResponseV0_FieldNumber) {
+  GetContractFeePotsResponse_GetContractFeePotsResponseV0_FieldNumber_Pots = 1,
+  GetContractFeePotsResponse_GetContractFeePotsResponseV0_FieldNumber_Proof = 2,
+  GetContractFeePotsResponse_GetContractFeePotsResponseV0_FieldNumber_Metadata = 3,
+};
+
+typedef GPB_ENUM(GetContractFeePotsResponse_GetContractFeePotsResponseV0_Result_OneOfCase) {
+  GetContractFeePotsResponse_GetContractFeePotsResponseV0_Result_OneOfCase_GPBUnsetOneOfCase = 0,
+  GetContractFeePotsResponse_GetContractFeePotsResponseV0_Result_OneOfCase_Pots = 1,
+  GetContractFeePotsResponse_GetContractFeePotsResponseV0_Result_OneOfCase_Proof = 2,
+};
+
+GPB_FINAL @interface GetContractFeePotsResponse_GetContractFeePotsResponseV0 : GPBMessage
+
+@property(nonatomic, readonly) GetContractFeePotsResponse_GetContractFeePotsResponseV0_Result_OneOfCase resultOneOfCase;
+
+/** Both pots of the contract */
+@property(nonatomic, readwrite, strong, null_resettable) GetContractFeePotsResponse_ContractFeePots *pots;
+
+/** Cryptographic proof of the pots, if requested */
+@property(nonatomic, readwrite, strong, null_resettable) Proof *proof;
+
+/** Metadata about the blockchain state */
+@property(nonatomic, readwrite, strong, null_resettable) ResponseMetadata *metadata;
+/** Test to see if @c metadata has been set. */
+@property(nonatomic, readwrite) BOOL hasMetadata;
+
+@end
+
+/**
+ * Clears whatever value was set for the oneof 'result'.
+ **/
+void GetContractFeePotsResponse_GetContractFeePotsResponseV0_ClearResultOneOfCase(GetContractFeePotsResponse_GetContractFeePotsResponseV0 *message);
+
 #pragma mark - GetContractGroupsForContractRequest
 
 typedef GPB_ENUM(GetContractGroupsForContractRequest_FieldNumber) {
@@ -5364,6 +6244,7 @@ void GetDocumentsResponse_GetDocumentsResponseV1_ResultData_ClearVariantOneOfCas
 typedef GPB_ENUM(GetDocumentsResponse_GetDocumentsResponseV1_ChainedDocuments_FieldNumber) {
   GetDocumentsResponse_GetDocumentsResponseV1_ChainedDocuments_FieldNumber_InnerDocumentsArray = 1,
   GetDocumentsResponse_GetDocumentsResponseV1_ChainedDocuments_FieldNumber_OuterDocumentsArray = 2,
+  GetDocumentsResponse_GetDocumentsResponseV1_ChainedDocuments_FieldNumber_MissingOuterIdsArray = 3,
 };
 
 /**
@@ -5379,6 +6260,18 @@ GPB_FINAL @interface GetDocumentsResponse_GetDocumentsResponseV1_ChainedDocument
 @property(nonatomic, readwrite, strong, null_resettable) NSMutableArray<NSData*> *outerDocumentsArray;
 /** The number of items in @c outerDocumentsArray without causing the array to be created. */
 @property(nonatomic, readonly) NSUInteger outerDocumentsArray_Count;
+
+/**
+ * The join values that have NO outer document, in first
+ * appearance order: referenced documents deleted after the
+ * inner document was written. Only a join property declaring
+ * `refersTo: deletableDocument` can report any; under
+ * `refersTo: permanentDocument` a missing document fails the
+ * query instead.
+ **/
+@property(nonatomic, readwrite, strong, null_resettable) NSMutableArray<NSData*> *missingOuterIdsArray;
+/** The number of items in @c missingOuterIdsArray without causing the array to be created. */
+@property(nonatomic, readonly) NSUInteger missingOuterIdsArray_Count;
 
 @end
 
@@ -5411,6 +6304,7 @@ GPB_FINAL @interface GetDocumentsResponse_GetDocumentsResponseV1_CompositeDocume
 typedef GPB_ENUM(GetDocumentsResponse_GetDocumentsResponseV1_CompositeDocuments_SubQueryResult_FieldNumber) {
   GetDocumentsResponse_GetDocumentsResponseV1_CompositeDocuments_SubQueryResult_FieldNumber_Documents = 1,
   GetDocumentsResponse_GetDocumentsResponseV1_CompositeDocuments_SubQueryResult_FieldNumber_Counts = 2,
+  GetDocumentsResponse_GetDocumentsResponseV1_CompositeDocuments_SubQueryResult_FieldNumber_MissingIdsArray = 3,
 };
 
 typedef GPB_ENUM(GetDocumentsResponse_GetDocumentsResponseV1_CompositeDocuments_SubQueryResult_Result_OneOfCase) {
@@ -5435,6 +6329,16 @@ GPB_FINAL @interface GetDocumentsResponse_GetDocumentsResponseV1_CompositeDocume
  * value's index-key bytes.
  **/
 @property(nonatomic, readwrite, strong, null_resettable) GetDocumentsResponse_GetDocumentsResponseV1_CountEntries *counts;
+
+/**
+ * DOCUMENTS by-id join only: the derived ids that have NO
+ * document, in first appearance order (referenced documents
+ * deleted since). Only a source property declaring
+ * `refersTo: deletableDocument` can report any.
+ **/
+@property(nonatomic, readwrite, strong, null_resettable) NSMutableArray<NSData*> *missingIdsArray;
+/** The number of items in @c missingIdsArray without causing the array to be created. */
+@property(nonatomic, readonly) NSUInteger missingIdsArray_Count;
 
 @end
 
@@ -5873,6 +6777,7 @@ void WaitForStateTransitionResultRequest_ClearVersionOneOfCase(WaitForStateTrans
 typedef GPB_ENUM(WaitForStateTransitionResultRequest_WaitForStateTransitionResultRequestV0_FieldNumber) {
   WaitForStateTransitionResultRequest_WaitForStateTransitionResultRequestV0_FieldNumber_StateTransitionHash = 1,
   WaitForStateTransitionResultRequest_WaitForStateTransitionResultRequestV0_FieldNumber_Prove = 2,
+  WaitForStateTransitionResultRequest_WaitForStateTransitionResultRequestV0_FieldNumber_RequestUserBalance = 3,
 };
 
 GPB_FINAL @interface WaitForStateTransitionResultRequest_WaitForStateTransitionResultRequestV0 : GPBMessage
@@ -5882,6 +6787,16 @@ GPB_FINAL @interface WaitForStateTransitionResultRequest_WaitForStateTransitionR
 
 /** Flag to request a proof as the response */
 @property(nonatomic, readwrite) BOOL prove;
+
+/**
+ * Flag to request, without a proof, the credit balance of the identity
+ * that owns the transition after it executed. Ignored when a proof is
+ * requested: from protocol version 14 the proof of an owned, fee-paying
+ * transition (document and token batches, contract creates and updates,
+ * identity updates and key limit updates, contract moderation) carries
+ * the owner's balance itself.
+ **/
+@property(nonatomic, readwrite) BOOL requestUserBalance;
 
 @end
 
@@ -5909,18 +6824,39 @@ GPB_FINAL @interface WaitForStateTransitionResultResponse : GPBMessage
  **/
 void WaitForStateTransitionResultResponse_ClearVersionOneOfCase(WaitForStateTransitionResultResponse *message);
 
+#pragma mark - WaitForStateTransitionResultResponse_SuccessWithOwnerBalance
+
+typedef GPB_ENUM(WaitForStateTransitionResultResponse_SuccessWithOwnerBalance_FieldNumber) {
+  WaitForStateTransitionResultResponse_SuccessWithOwnerBalance_FieldNumber_OwnerBalance = 1,
+};
+
+/**
+ * The result of a successful wait that asked for the owner's balance and for no proof
+ **/
+GPB_FINAL @interface WaitForStateTransitionResultResponse_SuccessWithOwnerBalance : GPBMessage
+
+/**
+ * The credit balance of the identity that owns the transition after it
+ * executed, read from a Drive state at or past the block that executed it
+ **/
+@property(nonatomic, readwrite) uint64_t ownerBalance;
+
+@end
+
 #pragma mark - WaitForStateTransitionResultResponse_WaitForStateTransitionResultResponseV0
 
 typedef GPB_ENUM(WaitForStateTransitionResultResponse_WaitForStateTransitionResultResponseV0_FieldNumber) {
   WaitForStateTransitionResultResponse_WaitForStateTransitionResultResponseV0_FieldNumber_Error = 1,
   WaitForStateTransitionResultResponse_WaitForStateTransitionResultResponseV0_FieldNumber_Proof = 2,
   WaitForStateTransitionResultResponse_WaitForStateTransitionResultResponseV0_FieldNumber_Metadata = 3,
+  WaitForStateTransitionResultResponse_WaitForStateTransitionResultResponseV0_FieldNumber_SuccessWithOwnerBalance = 4,
 };
 
 typedef GPB_ENUM(WaitForStateTransitionResultResponse_WaitForStateTransitionResultResponseV0_Result_OneOfCase) {
   WaitForStateTransitionResultResponse_WaitForStateTransitionResultResponseV0_Result_OneOfCase_GPBUnsetOneOfCase = 0,
   WaitForStateTransitionResultResponse_WaitForStateTransitionResultResponseV0_Result_OneOfCase_Error = 1,
   WaitForStateTransitionResultResponse_WaitForStateTransitionResultResponseV0_Result_OneOfCase_Proof = 2,
+  WaitForStateTransitionResultResponse_WaitForStateTransitionResultResponseV0_Result_OneOfCase_SuccessWithOwnerBalance = 4,
 };
 
 GPB_FINAL @interface WaitForStateTransitionResultResponse_WaitForStateTransitionResultResponseV0 : GPBMessage
@@ -5932,6 +6868,12 @@ GPB_FINAL @interface WaitForStateTransitionResultResponse_WaitForStateTransition
 
 /** Cryptographic proof for the state transition, if requested */
 @property(nonatomic, readwrite, strong, null_resettable) Proof *proof;
+
+/**
+ * Success with the owner's balance, unproved, when the request asked
+ * for it and for no proof
+ **/
+@property(nonatomic, readwrite, strong, null_resettable) WaitForStateTransitionResultResponse_SuccessWithOwnerBalance *successWithOwnerBalance;
 
 /** Metadata about the blockchain state */
 @property(nonatomic, readwrite, strong, null_resettable) ResponseMetadata *metadata;

@@ -1156,7 +1156,7 @@ fn catch_one_time_claim_panic(
 /// `From<PlatformWalletError> for PlatformWalletFFIResult` impl in
 /// [`crate::error`], so `e.into()` also carries each typed `Display`
 /// rendering verbatim — the structured figures ride the message string or
-/// not at all (`PlatformWalletFFIResult` is ABI-frozen at code + message).
+/// not at all (`PlatformWalletFFIResult` has no per-error value fields).
 ///
 /// - `AssetLockAlreadyConsumed` -> `ErrorAssetLockAlreadyConsumed` (24). The
 ///   wallet retains nonterminal consumption-unknown state; the host must not

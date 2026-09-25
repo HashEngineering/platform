@@ -174,6 +174,18 @@ impl MockDashPlatformSdk {
                 "GetContractGroupsForContractRequest" => load_expectation::<
                     proto::GetContractGroupsForContractRequest,
                 >(&mut dapi, filename)?,
+                "GetContractModerationStatusRequest" => load_expectation::<
+                    proto::GetContractModerationStatusRequest,
+                >(&mut dapi, filename)?,
+                "GetContractModerationEntriesRequest" => load_expectation::<
+                    proto::GetContractModerationEntriesRequest,
+                >(&mut dapi, filename)?,
+                "GetContractDocumentRemovalsRequest" => load_expectation::<
+                    proto::GetContractDocumentRemovalsRequest,
+                >(&mut dapi, filename)?,
+                "GetContractFeePotsRequest" => {
+                    load_expectation::<proto::GetContractFeePotsRequest>(&mut dapi, filename)?
+                }
                 "GetDocumentHistoryRequest" => {
                     load_expectation::<proto::GetDocumentHistoryRequest>(&mut dapi, filename)?
                 }

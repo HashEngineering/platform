@@ -38,6 +38,14 @@ sealed class DashSdkError(
      */
     open val userMessage: String get() = message.orEmpty()
 
+    /**
+     * The consensus error Platform rejected the operation with, when the
+     * native layer reported one; `null` for every other failure. Branch on
+     * its code instead of matching [message].
+     */
+    val consensusError: PlatformConsensusError?
+        get() = (cause as? DashSDKException)?.consensusError
+
     class InvalidParameter(message: String, cause: Throwable? = null) :
         DashSdkError(message, cause)
 
@@ -211,8 +219,8 @@ sealed class DashSdkError(
          * Distinct from [CoreInsufficientFunds] (22), which is the atomic
          * Core-send selector rather than the asset-lock builder. The shortfall
          * figures travel in [message] as `available {n} duffs, required {n}
-         * duffs` — the native result is ABI-frozen to code + message, so there
-         * are no structured fields to read.
+         * duffs`: the native result has no fields for them, so there is
+         * nothing structured to read.
          *
          * Raised by
          * [shieldedFundFromCoinJoinDrain][org.dashfoundation.dashsdk.wallet.PlatformWalletManager.shieldedFundFromCoinJoinDrain]
@@ -668,7 +676,7 @@ sealed class DashSdkError(
         }
 
         /**
-         * `ErrorShieldedClaimUnconfirmed` (native code 58,
+         * `ErrorShieldedClaimUnconfirmed` (native code 59,
          * dashpay/platform#4313). A panic was caught inside the
          * one-time-key (shielded invitation) claim, so the outcome is
          * AMBIGUOUS: the panic can strike after the Type-20 transition
@@ -913,9 +921,11 @@ sealed class DashSdkError(
             // the one-time-key claim: outcome ambiguous (the transition may
             // already be on chain), retryable as a RESUME of the retained
             // recovery record once the claim lease expires. Preserve the
-            // identity slot. 48 is from the registry frontier (46 merged
-            // ErrorMasternodeListUnavailable, 47 reserved for #4356).
-            58 -> PlatformWallet.ShieldedClaimUnconfirmed(message, cause)
+            // identity slot. 59 is the third claim: 48 shipped upstream as
+            // ErrorAssetLockInputContested, then 58 went to
+            // ErrorIdentityBalanceUnavailable (#4799), which has no Kotlin
+            // mapping yet and so falls through to Generic below.
+            59 -> PlatformWallet.ShieldedClaimUnconfirmed(message, cause)
             else ->
                 // @Deprecated fallback — see the code-6 arm; code 31 is the
                 // real discriminator.

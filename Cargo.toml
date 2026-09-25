@@ -37,6 +37,8 @@ members = [
     "packages/token-history-contract",
     "packages/document-history-contract",
     "packages/keyword-search-contract",
+    "packages/app-connect-contract",
+    "packages/moderation-charters-contract",
     "packages/rs-sdk-ffi",
     "packages/wasm-drive-verify",
     "packages/dash-platform-balance-checker",
@@ -56,6 +58,7 @@ members = [
 bincode = { package = "grovedb-bincode", version = "=2.1.0" }
 grovedb = { git = "https://github.com/dashpay/grovedb", rev = "74818ceb95805f56f141d24ca41f58b75c031a7f", default-features = false }
 grovedb-costs = { git = "https://github.com/dashpay/grovedb", rev = "74818ceb95805f56f141d24ca41f58b75c031a7f" }
+grovedb-merk = { git = "https://github.com/dashpay/grovedb", rev = "74818ceb95805f56f141d24ca41f58b75c031a7f", default-features = false }
 grovedb-path = { git = "https://github.com/dashpay/grovedb", rev = "74818ceb95805f56f141d24ca41f58b75c031a7f" }
 grovedb-query = { git = "https://github.com/dashpay/grovedb", rev = "74818ceb95805f56f141d24ca41f58b75c031a7f" }
 grovedb-storage = { git = "https://github.com/dashpay/grovedb", rev = "74818ceb95805f56f141d24ca41f58b75c031a7f" }
@@ -155,5 +158,5 @@ opt-level = 3
 
 [workspace.package]
 
-version = "4.2.0-beta.2"
+version = "4.2.0-beta.4"
 rust-version = "1.98"

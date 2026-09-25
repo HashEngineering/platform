@@ -34,12 +34,20 @@
 @class GetContestedResourceVotersForIdentityResponse;
 @class GetContestedResourcesRequest;
 @class GetContestedResourcesResponse;
+@class GetContractDocumentRemovalsRequest;
+@class GetContractDocumentRemovalsResponse;
+@class GetContractFeePotsRequest;
+@class GetContractFeePotsResponse;
 @class GetContractGroupInfoRequest;
 @class GetContractGroupInfoResponse;
 @class GetContractGroupMembersRequest;
 @class GetContractGroupMembersResponse;
 @class GetContractGroupsForContractRequest;
 @class GetContractGroupsForContractResponse;
+@class GetContractModerationEntriesRequest;
+@class GetContractModerationEntriesResponse;
+@class GetContractModerationStatusRequest;
+@class GetContractModerationStatusResponse;
 @class GetCurrentQuorumsInfoRequest;
 @class GetCurrentQuorumsInfoResponse;
 @class GetDataContractHistoryRequest;
@@ -256,6 +264,22 @@ NS_ASSUME_NONNULL_BEGIN
 #pragma mark getContractGroupsForContract(GetContractGroupsForContractRequest) returns (GetContractGroupsForContractResponse)
 
 - (GRPCUnaryProtoCall *)getContractGroupsForContractWithMessage:(GetContractGroupsForContractRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
+
+#pragma mark getContractModerationStatus(GetContractModerationStatusRequest) returns (GetContractModerationStatusResponse)
+
+- (GRPCUnaryProtoCall *)getContractModerationStatusWithMessage:(GetContractModerationStatusRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
+
+#pragma mark getContractModerationEntries(GetContractModerationEntriesRequest) returns (GetContractModerationEntriesResponse)
+
+- (GRPCUnaryProtoCall *)getContractModerationEntriesWithMessage:(GetContractModerationEntriesRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
+
+#pragma mark getContractDocumentRemovals(GetContractDocumentRemovalsRequest) returns (GetContractDocumentRemovalsResponse)
+
+- (GRPCUnaryProtoCall *)getContractDocumentRemovalsWithMessage:(GetContractDocumentRemovalsRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
+
+#pragma mark getContractFeePots(GetContractFeePotsRequest) returns (GetContractFeePotsResponse)
+
+- (GRPCUnaryProtoCall *)getContractFeePotsWithMessage:(GetContractFeePotsRequest *)message responseHandler:(id<GRPCProtoResponseHandler>)handler callOptions:(GRPCCallOptions *_Nullable)callOptions;
 
 #pragma mark getDocumentHistory(GetDocumentHistoryRequest) returns (GetDocumentHistoryResponse)
 
@@ -615,6 +639,34 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)getContractGroupsForContractWithRequest:(GetContractGroupsForContractRequest *)request handler:(void(^)(GetContractGroupsForContractResponse *_Nullable response, NSError *_Nullable error))handler;
 
 - (GRPCProtoCall *)RPCTogetContractGroupsForContractWithRequest:(GetContractGroupsForContractRequest *)request handler:(void(^)(GetContractGroupsForContractResponse *_Nullable response, NSError *_Nullable error))handler;
+
+
+#pragma mark getContractModerationStatus(GetContractModerationStatusRequest) returns (GetContractModerationStatusResponse)
+
+- (void)getContractModerationStatusWithRequest:(GetContractModerationStatusRequest *)request handler:(void(^)(GetContractModerationStatusResponse *_Nullable response, NSError *_Nullable error))handler;
+
+- (GRPCProtoCall *)RPCTogetContractModerationStatusWithRequest:(GetContractModerationStatusRequest *)request handler:(void(^)(GetContractModerationStatusResponse *_Nullable response, NSError *_Nullable error))handler;
+
+
+#pragma mark getContractModerationEntries(GetContractModerationEntriesRequest) returns (GetContractModerationEntriesResponse)
+
+- (void)getContractModerationEntriesWithRequest:(GetContractModerationEntriesRequest *)request handler:(void(^)(GetContractModerationEntriesResponse *_Nullable response, NSError *_Nullable error))handler;
+
+- (GRPCProtoCall *)RPCTogetContractModerationEntriesWithRequest:(GetContractModerationEntriesRequest *)request handler:(void(^)(GetContractModerationEntriesResponse *_Nullable response, NSError *_Nullable error))handler;
+
+
+#pragma mark getContractDocumentRemovals(GetContractDocumentRemovalsRequest) returns (GetContractDocumentRemovalsResponse)
+
+- (void)getContractDocumentRemovalsWithRequest:(GetContractDocumentRemovalsRequest *)request handler:(void(^)(GetContractDocumentRemovalsResponse *_Nullable response, NSError *_Nullable error))handler;
+
+- (GRPCProtoCall *)RPCTogetContractDocumentRemovalsWithRequest:(GetContractDocumentRemovalsRequest *)request handler:(void(^)(GetContractDocumentRemovalsResponse *_Nullable response, NSError *_Nullable error))handler;
+
+
+#pragma mark getContractFeePots(GetContractFeePotsRequest) returns (GetContractFeePotsResponse)
+
+- (void)getContractFeePotsWithRequest:(GetContractFeePotsRequest *)request handler:(void(^)(GetContractFeePotsResponse *_Nullable response, NSError *_Nullable error))handler;
+
+- (GRPCProtoCall *)RPCTogetContractFeePotsWithRequest:(GetContractFeePotsRequest *)request handler:(void(^)(GetContractFeePotsResponse *_Nullable response, NSError *_Nullable error))handler;
 
 
 #pragma mark getDocumentHistory(GetDocumentHistoryRequest) returns (GetDocumentHistoryResponse)

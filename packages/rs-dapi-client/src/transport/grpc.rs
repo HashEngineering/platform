@@ -303,6 +303,42 @@ impl_transport_request_grpc!(
     get_contract_group_info
 );
 
+// rpc getContractModerationStatus(GetContractModerationStatusRequest) returns (GetContractModerationStatusResponse);
+impl_transport_request_grpc!(
+    platform_proto::GetContractModerationStatusRequest,
+    platform_proto::GetContractModerationStatusResponse,
+    PlatformGrpcClient,
+    RequestSettings::default(),
+    get_contract_moderation_status
+);
+
+// rpc getContractModerationEntries(GetContractModerationEntriesRequest) returns (GetContractModerationEntriesResponse);
+impl_transport_request_grpc!(
+    platform_proto::GetContractModerationEntriesRequest,
+    platform_proto::GetContractModerationEntriesResponse,
+    PlatformGrpcClient,
+    RequestSettings::default(),
+    get_contract_moderation_entries
+);
+
+// rpc getContractDocumentRemovals(GetContractDocumentRemovalsRequest) returns (GetContractDocumentRemovalsResponse);
+impl_transport_request_grpc!(
+    platform_proto::GetContractDocumentRemovalsRequest,
+    platform_proto::GetContractDocumentRemovalsResponse,
+    PlatformGrpcClient,
+    RequestSettings::default(),
+    get_contract_document_removals
+);
+
+// rpc getContractFeePots(GetContractFeePotsRequest) returns (GetContractFeePotsResponse);
+impl_transport_request_grpc!(
+    platform_proto::GetContractFeePotsRequest,
+    platform_proto::GetContractFeePotsResponse,
+    PlatformGrpcClient,
+    RequestSettings::default(),
+    get_contract_fee_pots
+);
+
 // rpc getContractGroupMembers(GetContractGroupMembersRequest) returns (GetContractGroupMembersResponse);
 impl_transport_request_grpc!(
     platform_proto::GetContractGroupMembersRequest,

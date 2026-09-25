@@ -340,6 +340,235 @@ mod tests {
     }
 
     #[test]
+    fn should_accept_contract_requirements_on_a_contract_refers_to_in_v3_document_schema() {
+        for requirements in [
+            json!({ "moderation": "elected" }),
+            json!({ "moderation": "electionOpen" }),
+            json!({ "minimumAgeSeconds": 1 }),
+            json!({ "minimumAgeSeconds": 4294967295u64 }),
+            json!({ "minimumSecondsSinceUpdate": 86400 }),
+            json!({ "moderation": "elected", "minimumAgeSeconds": 604800, "minimumSecondsSinceUpdate": 86400 }),
+            json!({ "owner": "self" }),
+            json!({ "owner": "other" }),
+            json!({ "moderation": "elected", "owner": "other" }),
+            json!({ "readonly": true }),
+            json!({ "keepsHistory": true }),
+            json!({ "ownerProtected": true }),
+            json!({ "ownerProtected": false }),
+            json!({ "moderation": "elected", "owner": "other", "readonly": true, "keepsHistory": true, "ownerProtected": false }),
+        ] {
+            let schema = document_schema_with_refers_to(json!({
+                "type": "contract",
+                "contractRequirements": requirements
+            }));
+
+            assert!(
+                DOCUMENT_META_SCHEMA_V3.validate(&schema).is_ok(),
+                "expected contractRequirements {requirements} to be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn should_reject_malformed_contract_requirements_in_v3_document_schema() {
+        for refers_to in [
+            json!({ "type": "contract", "contractRequirements": {} }),
+            json!({ "type": "contract", "contractRequirements": { "moderation": "appointed" } }),
+            json!({ "type": "contract", "contractRequirements": { "minimumAgeSeconds": 0 } }),
+            json!({ "type": "contract", "contractRequirements": { "minimumAgeSeconds": 4294967296u64 } }),
+            json!({ "type": "contract", "contractRequirements": { "minimumAgeSeconds": "3600" } }),
+            json!({ "type": "contract", "contractRequirements": { "minimumAgeSeconds": 1.5 } }),
+            json!({ "type": "contract", "contractRequirements": { "minimumSecondsSinceUpdate": 0 } }),
+            json!({ "type": "contract", "contractRequirements": { "minimumSecondsSinceUpdate": "60" } }),
+            json!({ "type": "contract", "contractRequirements": { "tokens": "any" } }),
+            json!({ "type": "contract", "contractRequirements": { "owner": "anyone" } }),
+            json!({ "type": "contract", "contractRequirements": { "owner": true } }),
+            json!({ "type": "identity", "contractRequirements": { "minimumAgeSeconds": 3600 } }),
+            json!({ "type": "identity", "contractRequirements": { "owner": "self" } }),
+            json!({ "type": "contract", "contractRequirements": { "readonly": false } }),
+            json!({ "type": "contract", "contractRequirements": { "readonly": "true" } }),
+            json!({ "type": "contract", "contractRequirements": { "readonly": 1 } }),
+            json!({ "type": "contract", "contractRequirements": { "keepsHistory": false } }),
+            json!({ "type": "contract", "contractRequirements": { "keepsHistory": "true" } }),
+            json!({ "type": "contract", "contractRequirements": { "ownerProtected": "true" } }),
+            json!({ "type": "contract", "contractRequirements": { "ownerProtected": 1 } }),
+            json!({ "type": "contract", "contractRequirements": { "ownerProtected": null } }),
+            json!({ "type": "identity", "contractRequirements": { "readonly": true } }),
+        ] {
+            let schema = document_schema_with_refers_to(refers_to.clone());
+
+            assert!(
+                DOCUMENT_META_SCHEMA_V3.validate(&schema).is_err(),
+                "expected refersTo {refers_to} to be invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn should_accept_key_requirements_on_an_identity_public_key_refers_to_in_v3_document_schema() {
+        for requirements in [
+            json!({ "purpose": "decryption" }),
+            json!({ "purpose": "authentication" }),
+            json!({ "purpose": "owner" }),
+            json!({ "boundTo": "submittedCharter" }),
+            json!({ "purpose": "decryption", "boundTo": "submittedCharter" }),
+        ] {
+            let schema = document_schema_with_refers_to(json!({
+                "type": "identityPublicKey",
+                "keyIdProperty": "recipientKeyId",
+                "keyRequirements": requirements
+            }));
+
+            assert!(
+                DOCUMENT_META_SCHEMA_V3.validate(&schema).is_ok(),
+                "expected keyRequirements {requirements} to be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn should_reject_malformed_key_requirements_in_v3_document_schema() {
+        for refers_to in [
+            json!({ "type": "identityPublicKey", "keyIdProperty": "recipientKeyId", "keyRequirements": {} }),
+            json!({ "type": "identityPublicKey", "keyIdProperty": "recipientKeyId", "keyRequirements": { "purpose": "system" } }),
+            json!({ "type": "identityPublicKey", "keyIdProperty": "recipientKeyId", "keyRequirements": { "purpose": "DECRYPTION" } }),
+            json!({ "type": "identityPublicKey", "keyIdProperty": "recipientKeyId", "keyRequirements": { "purpose": 2 } }),
+            json!({ "type": "identityPublicKey", "keyIdProperty": "recipientKeyId", "keyRequirements": { "boundTo": "" } }),
+            json!({ "type": "identityPublicKey", "keyIdProperty": "recipientKeyId", "keyRequirements": { "boundTo": "a.b" } }),
+            json!({ "type": "identityPublicKey", "keyIdProperty": "recipientKeyId", "keyRequirements": { "boundTo": "a-b" } }),
+            json!({ "type": "identityPublicKey", "keyIdProperty": "recipientKeyId", "keyRequirements": { "securityLevel": "high" } }),
+            json!({ "type": "identity", "keyRequirements": { "purpose": "decryption" } }),
+            json!({ "type": "contract", "keyRequirements": { "purpose": "decryption" } }),
+        ] {
+            let schema = document_schema_with_refers_to(refers_to.clone());
+
+            assert!(
+                DOCUMENT_META_SCHEMA_V3.validate(&schema).is_err(),
+                "expected refersTo {refers_to} to be invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn should_accept_a_lookup_on_a_document_refers_to_in_v3_document_schema() {
+        for reference_type in ["permanentDocument", "deletableDocument"] {
+            for keys in [
+                json!({ "submittedCharterId": "submittedCharterId", "$ownerId": "." }),
+                json!({ "submittedCharterId": ".", "$ownerId": "$ownerId" }),
+                json!({ "meta.charterId": "meta.charterId", "$ownerId": "." }),
+            ] {
+                let schema = document_schema_with_refers_to(json!({
+                    "type": reference_type,
+                    "documentType": "joinRequest",
+                    "lookup": { "index": "bySubmittedCharter", "keys": keys }
+                }));
+
+                assert!(
+                    DOCUMENT_META_SCHEMA_V3.validate(&schema).is_ok(),
+                    "expected a {reference_type} lookup with keys {keys} to be valid"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn should_reject_malformed_or_misplaced_lookups_in_v3_document_schema() {
+        let keys = json!({ "$ownerId": "." });
+        for refers_to in [
+            json!({ "type": "identity", "lookup": { "index": "byOwner", "keys": keys } }),
+            json!({ "type": "contract", "lookup": { "index": "byOwner", "keys": keys } }),
+            json!({ "type": "token", "lookup": { "index": "byOwner", "keys": keys } }),
+            json!({ "type": "identityPublicKey", "keyIdProperty": "keyId", "lookup": { "index": "byOwner", "keys": keys } }),
+            json!({ "type": "permanentDocument", "documentType": "note", "lookup": { "keys": keys } }),
+            json!({ "type": "deletableDocument", "documentType": "note", "lookup": { "index": "byOwner" } }),
+            json!({ "type": "permanentDocument", "documentType": "note", "lookup": { "index": "byOwner" } }),
+            json!({ "type": "permanentDocument", "documentType": "note", "lookup": { "index": "", "keys": keys } }),
+            json!({ "type": "permanentDocument", "documentType": "note", "lookup": { "index": "x".repeat(33), "keys": keys } }),
+            json!({ "type": "permanentDocument", "documentType": "note", "lookup": { "index": "byOwner", "keys": {} } }),
+            json!({ "type": "permanentDocument", "documentType": "note", "lookup": { "index": "byOwner", "keys": { "$ownerId": 1 } } }),
+            json!({ "type": "permanentDocument", "documentType": "note", "lookup": { "index": "byOwner", "keys": { "$ownerId": "$createdAt" } } }),
+            json!({ "type": "permanentDocument", "documentType": "note", "lookup": { "index": "byOwner", "keys": { "$ownerId": "bad-name" } } }),
+            json!({ "type": "permanentDocument", "documentType": "note", "lookup": { "index": "byOwner", "keys": keys, "extra": 1 } }),
+        ] {
+            let schema = document_schema_with_refers_to(refers_to.clone());
+
+            assert!(
+                DOCUMENT_META_SCHEMA_V3.validate(&schema).is_err(),
+                "expected refersTo {refers_to} to be invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn should_accept_a_list_element_refers_to_in_v3_document_schema() {
+        for (property_agreement, in_list) in [
+            (json!({ "electedCharterId": "$id" }), "members"),
+            (
+                json!({ "meta.charterId": "$id", "charterTitle": "title" }),
+                "seats.members",
+            ),
+        ] {
+            let schema = document_schema_with_refers_to(json!({
+                "type": "listElement",
+                "documentType": "electedCharter",
+                "propertyAgreement": property_agreement,
+                "inList": in_list
+            }));
+
+            assert!(
+                DOCUMENT_META_SCHEMA_V3.validate(&schema).is_ok(),
+                "expected a listElement agreeing on {property_agreement} into {in_list} to be valid"
+            );
+        }
+
+        // With a contract id, and as a leaf of a reference expression
+        for refers_to in [
+            json!({
+                "type": "listElement",
+                "contractId": "4uAB6wAdt6FJ7djwjYrLnooVhYeQpzgkssBmgmvZ9WnM",
+                "documentType": "electedCharter",
+                "propertyAgreement": { "electedCharterId": "$id" },
+                "inList": "members"
+            }),
+            json!({ "anyOf": [
+                { "type": "listElement", "documentType": "electedCharter", "propertyAgreement": { "electedCharterId": "$id" }, "inList": "members" },
+                { "type": "permanentDocument", "documentType": "electedCharter" }
+            ] }),
+        ] {
+            let schema = document_schema_with_refers_to(refers_to.clone());
+            assert!(
+                DOCUMENT_META_SCHEMA_V3.validate(&schema).is_ok(),
+                "expected refersTo {refers_to} to be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn should_reject_malformed_or_misplaced_list_element_keywords_in_v3_document_schema() {
+        for refers_to in [
+            // Every listElement keyword is required
+            json!({ "type": "listElement", "propertyAgreement": { "electedCharterId": "$id" }, "inList": "members" }),
+            json!({ "type": "listElement", "documentType": "electedCharter", "inList": "members" }),
+            json!({ "type": "listElement", "documentType": "electedCharter", "propertyAgreement": { "electedCharterId": "$id" } }),
+            json!({ "type": "listElement", "documentType": "electedCharter", "propertyAgreement": { "electedCharterId": "$id" }, "inList": "members", "lookup": { "index": "byOwner", "keys": { "$ownerId": "." } } }),
+            json!({ "type": "listElement", "documentType": "electedCharter", "propertyAgreement": { "electedCharterId": "$id" }, "inList": "bad-name" }),
+            json!({ "type": "listElement", "documentType": "electedCharter", "propertyAgreement": { "electedCharterId": "$id" }, "inList": "" }),
+            json!({ "type": "listElement", "documentType": "electedCharter", "propertyAgreement": { "electedCharterId": "$documentId" }, "inList": "members" }),
+            // inList belongs to listElement alone
+            json!({ "type": "identity", "inList": "members" }),
+            json!({ "type": "permanentDocument", "documentType": "electedCharter", "inList": "members" }),
+            json!({ "type": "deletableDocument", "documentType": "electedCharter", "inList": "members" }),
+        ] {
+            let schema = document_schema_with_refers_to(refers_to.clone());
+
+            assert!(
+                DOCUMENT_META_SCHEMA_V3.validate(&schema).is_err(),
+                "expected refersTo {refers_to} to be invalid"
+            );
+        }
+    }
+
+    #[test]
     fn should_accept_permanent_document_refers_to_in_v3_document_schema() {
         let schema = document_schema_with_refers_to(json!({
             "type": "permanentDocument",
@@ -458,7 +687,7 @@ mod tests {
 
     #[test]
     fn should_accept_referenced_system_identifiers_in_property_agreement() {
-        for referenced in ["$ownerId", "$creatorId"] {
+        for referenced in ["$ownerId", "$creatorId", "$id"] {
             let schema = document_schema_with_agreement(json!({ "authorId": referenced }));
 
             assert!(
@@ -470,7 +699,8 @@ mod tests {
 
     #[test]
     fn should_reject_other_system_properties_on_the_referenced_side_of_an_agreement() {
-        for referenced in ["$id", "$createdAt", "$revision", "$owner"] {
+        // `$id`, `$ownerId` and `$creatorId` are the referenced side's system names
+        for referenced in ["$createdAt", "$revision", "$owner", "$documentId"] {
             let schema = document_schema_with_agreement(json!({ "authorId": referenced }));
 
             assert!(

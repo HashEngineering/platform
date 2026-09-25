@@ -121,6 +121,18 @@ impl DocumentReplaceTransitionActionAccessorsV0 for DocumentReplaceTransitionAct
         }
     }
 
+    fn removed_identifier_fields(&self) -> &BTreeMap<String, Identifier> {
+        match self {
+            DocumentReplaceTransitionAction::V0(v0) => &v0.removed_identifier_fields,
+        }
+    }
+
+    fn stored_changed_values(&self) -> &BTreeMap<String, Value> {
+        match self {
+            DocumentReplaceTransitionAction::V0(v0) => &v0.stored_changed_values,
+        }
+    }
+
     fn data_owned(self) -> BTreeMap<String, Value> {
         match self {
             DocumentReplaceTransitionAction::V0(v0) => v0.data,
