@@ -559,13 +559,62 @@ class DashDatabaseMigrationTest {
         db.close()
     }
 
+    /**
+     * v13 -> v14 adds the DashPay backfill record columns on `wallets`
+     * (`dashPayBackfillFloor`, `dashPayBackfillRewoundFrom`,
+     * `dashPayBackfillCovered`), all nullable and additive. A pre-migration
+     * wallet reads back with no record — native then rewinds once, as it did
+     * before the record existed — and a row written afterwards keeps all
+     * three, so a restored wallet resumes its backfill instead of restarting
+     * it (dashpay/platform#4302).
+     */
+    @Test
+    fun migrate13To14AddsDashPayBackfillColumns() {
+        helper.createDatabase(dbName, 13).apply {
+            execSQL(
+                "INSERT INTO wallets (walletId, walletGroupId, networkRaw, name, birthHeight, " +
+                    "syncedHeight, lastSynced, isImported, createdAt, lastUpdated) " +
+                    "VALUES (x'01', x'02', 1, 'w', 0, 2309809, 0, 0, 0, 0)",
+            )
+            close()
+        }
+
+        val db = helper.runMigrationsAndValidate(dbName, 14, true, DashDatabase.MIGRATION_13_14)
+
+        db.query(
+            "SELECT dashPayBackfillFloor, dashPayBackfillRewoundFrom, dashPayBackfillCovered, " +
+                "syncedHeight FROM wallets WHERE walletId = x'01'",
+        ).use { c ->
+            assertTrue(c.moveToFirst())
+            assertTrue("pre-migration wallets have no backfill record", c.isNull(0))
+            assertTrue(c.isNull(1))
+            assertTrue(c.isNull(2))
+            assertEquals("the cursor itself is untouched", 2_309_809, c.getInt(3))
+        }
+        db.execSQL(
+            "UPDATE wallets SET dashPayBackfillFloor = 2167092, " +
+                "dashPayBackfillRewoundFrom = 2537092, dashPayBackfillCovered = x'AABB' " +
+                "WHERE walletId = x'01'",
+        )
+        db.query(
+            "SELECT dashPayBackfillFloor, dashPayBackfillRewoundFrom, dashPayBackfillCovered " +
+                "FROM wallets WHERE walletId = x'01'",
+        ).use { c ->
+            assertTrue(c.moveToFirst())
+            assertEquals(2_167_092, c.getInt(0))
+            assertEquals(2_537_092, c.getInt(1))
+            assertTrue(byteArrayOf(0xAA.toByte(), 0xBB.toByte()).contentEquals(c.getBlob(2)))
+        }
+        db.close()
+    }
+
     /** The requested contiguous path from the pre-u64 v4 schema to latest. */
     @Test
     fun migrate4ToLatest() {
         helper.createDatabase(dbName, 4).close()
         helper.runMigrationsAndValidate(
             dbName,
-            13,
+            14,
             true,
             DashDatabase.MIGRATION_4_5,
             DashDatabase.MIGRATION_5_6,
@@ -576,16 +625,17 @@ class DashDatabaseMigrationTest {
             DashDatabase.MIGRATION_10_11,
             DashDatabase.MIGRATION_11_12,
             DashDatabase.MIGRATION_12_13,
+            DashDatabase.MIGRATION_13_14,
         ).close()
     }
 
-    /** The full chain from v1 must also land on a valid v13 schema. */
+    /** The full chain from v1 must also land on a valid v14 schema. */
     @Test
     fun migrateAllTheWayFrom1() {
         helper.createDatabase(dbName, 1).close()
         helper.runMigrationsAndValidate(
             dbName,
-            13,
+            14,
             true,
             DashDatabase.MIGRATION_1_2,
             DashDatabase.MIGRATION_2_3,
@@ -599,6 +649,7 @@ class DashDatabaseMigrationTest {
             DashDatabase.MIGRATION_10_11,
             DashDatabase.MIGRATION_11_12,
             DashDatabase.MIGRATION_12_13,
+            DashDatabase.MIGRATION_13_14,
         ).close()
     }
 }
