@@ -54,19 +54,53 @@ pub(super) fn contact_scan_checkpoint(
         .max(birth_checkpoint)
 }
 
-fn add_managed_contact_account(
+/// Insert the managed account for a **receival** (`DashpayReceivingFunds`)
+/// contact account and rewind the filter-scan cursor to `scan_checkpoint`
+/// when it sits below the cursor, so blocks scanned before this account's
+/// addresses were watched get re-matched.
+///
+/// Upstream `add_managed_account` bumps the scanner generation and rewinds to
+/// wallet birth; under this same manager write lock the cursor is restored to
+/// `min(previous, scan_checkpoint)` — only the range this account actually
+/// needs, while a deeper pending scan is kept. Returns the height the cursor
+/// was lowered to, or `None` when it did not move.
+fn add_managed_receival_account(
     info: &mut crate::wallet::PlatformWalletInfo,
     wallet: &key_wallet::Wallet,
     account_type: AccountType,
     scan_checkpoint: u32,
+) -> key_wallet::Result<Option<u32>> {
+    let previous_checkpoint = info.core_wallet.synced_height();
+    info.add_managed_account(wallet, account_type)?;
+    let target = previous_checkpoint.min(scan_checkpoint);
+    info.core_wallet.update_synced_height(target);
+    Ok((target < previous_checkpoint).then_some(target))
+}
+
+/// Insert a managed DashPay contact account **without** moving the
+/// filter-scan cursor.
+///
+/// Used for the outbound `DashpayExternalAccount` (the contact's addresses we
+/// pay to — watch-only, never receives, so there is nothing below the cursor
+/// to find on its keys) and for a receival account the wallet's persisted
+/// backfill record already covers. Upstream `add_managed_account` still bumps
+/// the scanner generation and rewinds to wallet birth; the cursor is put back
+/// where it was under the same write lock, so the only cost is that an
+/// in-flight filter batch cannot certify the wallet and is re-scanned.
+///
+/// Before this split every contact-account insert rewound the cursor, and the
+/// outbound account is torn down and rebuilt on every cold start whose host
+/// did not persist `EstablishedContact::external_account_reference` — which
+/// re-walked every filter from the earliest contact's request height on every
+/// launch (dashpay/platform#4302).
+fn add_managed_contact_account_without_rescan(
+    info: &mut crate::wallet::PlatformWalletInfo,
+    wallet: &key_wallet::Wallet,
+    account_type: AccountType,
 ) -> key_wallet::Result<()> {
     let previous_checkpoint = info.core_wallet.synced_height();
-    // Upstream adds the account, bumps the scanner generation, and rewinds to
-    // wallet birth. Under this same manager write lock, restore only the range
-    // certified for the new account while preserving any deeper pending scan.
     info.add_managed_account(wallet, account_type)?;
-    info.core_wallet
-        .update_synced_height(previous_checkpoint.min(scan_checkpoint));
+    info.core_wallet.update_synced_height(previous_checkpoint);
     Ok(())
 }
 
@@ -284,6 +318,15 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
             .get_wallet_mut_and_info_mut(&self.wallet_id)
             .ok_or_else(|| PlatformWalletError::WalletNotFound(hex::encode(self.wallet_id)))?;
         let scan_checkpoint = contact_scan_checkpoint(info, our_identity_id, contact_identity_id);
+        let previous_checkpoint = info.core_wallet.synced_height();
+        // The durable half of the rescan guard: a previous process already
+        // rewound for this contact from a checkpoint no higher than today's,
+        // and the persisted cursor tracked that scan with the account's
+        // addresses watched. Rebuilding the account (restore, or a host that
+        // re-registers on every launch) must then not rewind again.
+        let covered =
+            info.dashpay_backfill
+                .covers(our_identity_id, contact_identity_id, scan_checkpoint);
 
         // Mirror the restored shape: the immutable `wallet.accounts`
         // collection holds the Account (like `build_wallet_start_state`
@@ -296,11 +339,74 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
                     "Failed to add contact account to wallet: {e}"
                 ))
             })?;
-        add_managed_contact_account(info, wallet, account_type, scan_checkpoint).map_err(|e| {
-            PlatformWalletError::InvalidIdentityData(format!(
-                "Failed to register contact account: {e}"
-            ))
-        })?;
+        let lowered_to = if covered {
+            add_managed_contact_account_without_rescan(info, wallet, account_type).map_err(
+                |e| {
+                    PlatformWalletError::InvalidIdentityData(format!(
+                        "Failed to register contact account: {e}"
+                    ))
+                },
+            )?;
+            None
+        } else {
+            add_managed_receival_account(info, wallet, account_type, scan_checkpoint).map_err(
+                |e| {
+                    PlatformWalletError::InvalidIdentityData(format!(
+                        "Failed to register contact account: {e}"
+                    ))
+                },
+            )?
+        };
+        if covered {
+            tracing::info!(
+                our_identity = %our_identity_id,
+                contact = %contact_identity_id,
+                scan_checkpoint,
+                synced_height = previous_checkpoint,
+                "DashPay receival account rebuilt for a contact the persisted backfill record \
+                 covers; the scan cursor stays where it was"
+            );
+        } else {
+            // Record the coverage this registration just established — on the
+            // SAME persistence round as the lowered cursor, so a host that
+            // stores the record has stored the cursor it vouches for. A
+            // forward-covered contact (checkpoint at or above the cursor) is
+            // recorded without a cursor write.
+            info.dashpay_backfill.record_pass(
+                previous_checkpoint,
+                lowered_to,
+                [(*our_identity_id, *contact_identity_id, scan_checkpoint)],
+            );
+            let changeset = crate::changeset::PlatformWalletChangeSet {
+                core: lowered_to.map(|floor| crate::changeset::CoreChangeSet {
+                    synced_height: Some(floor),
+                    ..crate::changeset::CoreChangeSet::default()
+                }),
+                dashpay_backfill: Some(info.dashpay_backfill.clone()),
+                ..crate::changeset::PlatformWalletChangeSet::default()
+            };
+            if let Err(e) = self.persister.store(changeset) {
+                // The in-memory cursor is lowered regardless; the next launch
+                // re-runs this backfill, which is the pre-record behaviour.
+                tracing::warn!(
+                    our_identity = %our_identity_id,
+                    contact = %contact_identity_id,
+                    error = %e,
+                    "Failed to persist the DashPay backfill record for a receival account \
+                     registration; the next launch will re-run this backfill"
+                );
+            }
+            if let Some(floor) = lowered_to {
+                tracing::info!(
+                    our_identity = %our_identity_id,
+                    contact = %contact_identity_id,
+                    floor,
+                    rewound_from = previous_checkpoint,
+                    "DashPay receival account registered: lowered SPV synced_height to backfill \
+                     historical contact payments"
+                );
+            }
+        }
         if let Some(managed) = info.identity_manager.managed_identity_mut(our_identity_id) {
             if managed
                 .dashpay()
@@ -628,8 +734,6 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
                     self.wallet_id,
                 )))
             })?;
-        let scan_checkpoint = contact_scan_checkpoint(info, our_identity_id, &contact_identity_id);
-
         // (a) Insert Account into the immutable wallet account collection so the
         //     xpub is accessible by `send_payment`.
         wallet
@@ -641,8 +745,12 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
                 )))
             })?;
 
-        // (b) Insert the managed account and invalidate prior filter coverage.
-        add_managed_contact_account(info, wallet, account_type, scan_checkpoint).map_err(|e| {
+        // (b) Insert the managed account. The outbound account is watch-only
+        //     and never receives, so the filter-scan cursor stays put: nothing
+        //     below it can be found on these keys, and rewinding here re-walked
+        //     every filter from the earliest contact's request height on every
+        //     cold start that rebuilt the account (dashpay/platform#4302).
+        add_managed_contact_account_without_rescan(info, wallet, account_type).map_err(|e| {
             Transient(PlatformWalletError::InvalidIdentityData(format!(
                 "Failed to register external contact account: {}",
                 e
