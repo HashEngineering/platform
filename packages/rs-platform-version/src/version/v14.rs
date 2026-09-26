@@ -1151,6 +1151,85 @@ pub const PROTOCOL_VERSION_14: ProtocolVersion = 14;
 ///     a second write replaced the first and two credits to an indebted
 ///     identity repaid its debt twice.
 ///
+/// 43. **The end-date cleanup of ended contested vote polls**: a block ends at
+///     most `maximum_vote_polls_to_process` vote polls, the earliest end date
+///     first, and removes their entries from the end-date queries.
+///     `remove_contested_resource_vote_poll_end_date_query_operations` 2
+///     (`DRIVE_VOTE_METHOD_VERSIONS_V3`) removes an end date only once none of
+///     its vote polls remain: it reads the entries under the date and keeps the
+///     date while any of them is not removed in the same batch, so the polls
+///     left end in a later block.
+///
+/// 44. **The total supply ceiling bounds every mint and direct purchase**: a
+///     token's total supply is stored in a sum item, so it can never pass
+///     `i64::MAX`. Token mint and token direct purchase state validation 1
+///     treat `i64::MAX` as the max supply when the token configures none (and
+///     cap a configured one there), refusing a mint or purchase past it with
+///     `TokenMintPastMaxSupplyError`, as a paid consensus error. State
+///     validation 0 checked only a configured max supply, so such a transition
+///     failed in execution as an internal error instead. Both now read the
+///     total supply on every mint and purchase, and pay for that read.
+///
+/// 45. **A masternode vote towards an identity names a contender**: a
+///     `ResourceVoteChoice::TowardsIdentity` vote for an identity that is not a
+///     contender of the poll is refused, unpaid, with
+///     `VoteChoiceNotAllowedForVotePollError` (40307) by `validate_state` 1 of
+///     the masternode vote, which reads the contender's document reference
+///     under the poll. The reserved keys of the poll's stored info, abstain
+///     tree and lock tree are refused before that read. Before, a vote for an
+///     unknown identity failed with an internal error, and a vote towards a
+///     reserved key was counted as Lock or Abstain. `check_for_ended_vote_polls`
+///     1 also ignores the lock tally of a contest resolved without locking. No
+///     table moves: both generations are selected by this version alone.
+///
+/// 46. **A raw state transition is exactly one encoded transition**:
+///     `decode_raw_state_transitions` 1 (`DRIVE_ABCI_METHOD_VERSIONS_V10`)
+///     decodes with `StateTransition::deserialize_from_bytes_untrusted_exact_in_version`,
+///     so bytes left over after the transition are an invalid encoding
+///     (`SerializedObjectParsingError`, 10002), refused unpaid in `check_tx` and
+///     in block processing. Version 0 ignored them, so the transition with
+///     anything appended executed as the original under another transaction
+///     hash. Version 1 also reports a transition whose version is not active
+///     as `StateTransitionNotActiveError` (10603) instead of a decode failure.
+///
+/// 47. **A storage refund is clawed back from the epochs it was priced for**:
+///     removing data in epoch E refunds its owner the shares of epochs E+1
+///     onward, and the refund waits for the next epoch change to be taken out of
+///     the epoch storage pools. `add_distribute_storage_fee_to_epochs_operations`
+///     1 (`DRIVE_ABCI_METHOD_VERSIONS_V10`) restores and subtracts it from the
+///     epoch after the previous block's epoch, the one every pending refund was
+///     priced in, so each of those epochs gives back its own share. The shares
+///     of epochs that closed before the current one, skipped by a halt, and the
+///     rounding leftovers come out of the current epoch. Version 0 started from
+///     the epoch after the current one, so the current epoch kept most of its
+///     refunded share and the later epochs gave back more than theirs. The
+///     total taken out equals the refund in both.
+///
+/// 48. **An evonode's token claim covers only the epochs it read**: an
+///     `EvonodesByParticipation` perpetual distribution weighs each cycle by the
+///     claimant's share of the blocks proposed in the epochs it spans, from their
+///     finalized epoch infos. Up to v13 the claim read at most
+///     `drive_abci.query.max_returned_elements` (100) of them but evaluated its
+///     whole range, up to 128 cycles (32,767 for a fixed amount), from the last
+///     paid moment or, on a first claim, from the start of the distribution. An
+///     evonode more than 100 epochs behind (about 2.5 years on mainnet, 4 days on
+///     testnet) had every claim of a function other than a fixed amount fail as an
+///     internal error, with its last paid moment never advancing, while a fixed
+///     amount applied the share of the epochs read to the whole range. A claim
+///     reaching an epoch whose info the fee distribution of the block had not
+///     written yet (the previous epoch, in the first block of an epoch) failed or
+///     was weighed the same way. `evonode_participation_rewards` 1
+///     (`DRIVE_TOKEN_METHOD_VERSIONS_V2`) reads the epochs after the cycle start of
+///     the last paid moment, at most `SYSTEM_LIMITS_V4.max_evonode_reward_claim_epochs`
+///     (100, backfilled into the earlier tables) or one whole cycle when a cycle is
+///     longer, and pays through the last whole cycle it read, which the claim stores
+///     as the last paid moment, so an evonode that is behind is paid over several
+///     claims. An epoch without finalized info before the last one read, one in which
+///     no block was produced, counts as an epoch without blocks, and a claim that
+///     read no whole cycle is refused, paid, with `InvalidTokenClaimNoCurrentRewards`.
+///     `get_finalized_epoch_infos` now takes its limit from the caller; every other
+///     caller passes the query bound it read before.
+///
 /// The app-connect system contract (`SystemDataContract::AppConnect`, schema v1)
 /// carries only the wallet's `loginKeyResponse`: a flat indexOnly entry keyed by
 /// the app's ephemeral key hash and the responding identity, with the wallet's
@@ -1215,7 +1294,7 @@ pub const PROTOCOL_VERSION_14: ProtocolVersion = 14;
 /// its gates on; Drive identity methods v2 rewrite the key and raise the remaining budget).
 pub const PLATFORM_V14: PlatformVersion = PlatformVersion {
     protocol_version: PROTOCOL_VERSION_14,
-    drive: DRIVE_VERSION_V9, // changed: drive document method versions v4 — v2 index walkers (shared-prefix aggregate indexes become insertable) + the detect_ranked_mode slot; contract method versions v4: the moderation list trees, the document removal record trees and the moderation method table; apply_drive_operations 1 (a moderator's document deletion refunds nobody; every write of one identity balance, fee pot or prefunded specialized balance in a batch merged into one; a batch writing one token balance or supply twice refused; repaid identity debt credited to the processing fee pool); index uniqueness gains validate_restored_document_uniqueness (a moderator's document restore)
+    drive: DRIVE_VERSION_V9, // changed: drive document method versions v4 — v2 index walkers (shared-prefix aggregate indexes become insertable) + the detect_ranked_mode slot; contract method versions v4: the moderation list trees, the document removal record trees and the moderation method table; apply_drive_operations 1 (a moderator's document deletion refunds nobody; every write of one identity balance, fee pot or prefunded specialized balance in a batch merged into one; a batch writing one token balance or supply twice refused; repaid identity debt credited to the processing fee pool); index uniqueness gains validate_restored_document_uniqueness (a moderator's document restore); vote method versions v3: the end-date cleanup of ended contested vote polls removes an end date only once none of its polls remain; token method versions v2: evonode_participation_rewards 1 (an evonode's token claim covers only the epochs it read)
     drive_abci: DriveAbciVersion {
         structs: DRIVE_ABCI_STRUCTURE_VERSIONS_V2, // changed: saved platform state structure 1 keeps masternodes and validator sets as one aux entry each
         methods: DRIVE_ABCI_METHOD_VERSIONS_V10, // changed: records the per-block total credits history for the daily withdrawal limit
