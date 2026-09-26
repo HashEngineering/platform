@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 14,
-    "identityHash": "123aac37240702728721123d707de096",
+    "identityHash": "6c090bbd3c40ecd568fa49fde3b661e7",
     "entities": [
       {
         "tableName": "wallets",
@@ -1536,7 +1536,7 @@
       },
       {
         "tableName": "dashpay_contact_requests",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`networkRaw` INTEGER NOT NULL, `ownerIdentityId` BLOB NOT NULL, `contactIdentityId` BLOB NOT NULL, `isOutgoing` INTEGER NOT NULL, `senderKeyIndex` INTEGER NOT NULL, `recipientKeyIndex` INTEGER NOT NULL, `accountReference` INTEGER NOT NULL, `encryptedPublicKey` BLOB NOT NULL, `encryptedAccountLabel` BLOB, `autoAcceptProof` BLOB, `coreHeightCreatedAt` INTEGER NOT NULL, `createdAtMillis` INTEGER NOT NULL, `paymentChannelBroken` INTEGER NOT NULL DEFAULT 0, `contactAlias` TEXT, `contactNote` TEXT, `contactHidden` INTEGER NOT NULL DEFAULT 0, `contactAccountLabel` TEXT, `contactAcceptedAccounts` BLOB, `createdAt` INTEGER NOT NULL, `lastUpdated` INTEGER NOT NULL, PRIMARY KEY(`networkRaw`, `ownerIdentityId`, `contactIdentityId`, `isOutgoing`), FOREIGN KEY(`ownerIdentityId`) REFERENCES `identities`(`identityId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`networkRaw` INTEGER NOT NULL, `ownerIdentityId` BLOB NOT NULL, `contactIdentityId` BLOB NOT NULL, `isOutgoing` INTEGER NOT NULL, `senderKeyIndex` INTEGER NOT NULL, `recipientKeyIndex` INTEGER NOT NULL, `accountReference` INTEGER NOT NULL, `encryptedPublicKey` BLOB NOT NULL, `encryptedAccountLabel` BLOB, `autoAcceptProof` BLOB, `coreHeightCreatedAt` INTEGER NOT NULL, `createdAtMillis` INTEGER NOT NULL, `paymentChannelBroken` INTEGER NOT NULL DEFAULT 0, `contactAlias` TEXT, `contactNote` TEXT, `contactHidden` INTEGER NOT NULL DEFAULT 0, `contactAccountLabel` TEXT, `contactAcceptedAccounts` BLOB, `externalAccountReference` INTEGER, `createdAt` INTEGER NOT NULL, `lastUpdated` INTEGER NOT NULL, PRIMARY KEY(`networkRaw`, `ownerIdentityId`, `contactIdentityId`, `isOutgoing`), FOREIGN KEY(`ownerIdentityId`) REFERENCES `identities`(`identityId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
         "fields": [
           {
             "fieldPath": "networkRaw",
@@ -1641,6 +1641,11 @@
             "fieldPath": "contactAcceptedAccounts",
             "columnName": "contactAcceptedAccounts",
             "affinity": "BLOB"
+          },
+          {
+            "fieldPath": "externalAccountReference",
+            "columnName": "externalAccountReference",
+            "affinity": "INTEGER"
           },
           {
             "fieldPath": "createdAt",
@@ -4186,7 +4191,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '123aac37240702728721123d707de096')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '6c090bbd3c40ecd568fa49fde3b661e7')"
     ]
   }
 }
