@@ -160,9 +160,10 @@ import org.dashfoundation.dashsdk.persistence.entities.WalletManagerMetadataEnti
  * adds the nullable `tokens.oncePerIdentityDistribution` column holding the
  * contract's `oncePerIdentityDistribution` block as JSON, so the claim
  * screen can offer the third distribution kind. NULL for every pre-existing
- * row; the next contract materialization fills it in. The same version
- * (durable DashPay backfill, dashpay/platform#4302; folded in before any
- * field install reached 14) adds the nullable `wallets.dashPayBackfillFloor`, `wallets.dashPayBackfillRewoundFrom`
+ * row; the next contract materialization fills it in.
+ *
+ * Version 15 (durable DashPay backfill, dashpay/platform#4302): adds the
+ * nullable `wallets.dashPayBackfillFloor`, `wallets.dashPayBackfillRewoundFrom`
  * and `wallets.dashPayBackfillCovered` columns — the record native writes
  * through `onWalletChangesetDashPayBackfill` on the same round as the lowered
  * `syncedHeight` it belongs with, and reads back on `loadWalletList`. The
@@ -180,7 +181,7 @@ import org.dashfoundation.dashsdk.persistence.entities.WalletManagerMetadataEnti
  * native rebuilds once, stamps it, and never again.
  */
 @Database(
-    version = 14,
+    version = 15,
     exportSchema = true,
     entities = [
         WalletEntity::class,
@@ -684,23 +685,28 @@ abstract class DashDatabase : RoomDatabase() {
         }
 
         /**
-         * v13 -> v14: additive nullable `tokens.oncePerIdentityDistribution`
-         * plus the DashPay backfill columns (`wallets.dashPayBackfillFloor` /
-         * `dashPayBackfillRewoundFrom` / `dashPayBackfillCovered`,
-         * `dashpay_contact_requests.externalAccountReference`), see the
-         * version-14 class doc above. NULL for every pre-existing row;
-         * `TokenMaterializer` fills the token block on the next contract parse.
+         * v13 -> v14: additive nullable `tokens.oncePerIdentityDistribution`,
+         * see the version-14 class doc above. NULL for every pre-existing
+         * row; `TokenMaterializer` fills it on the next contract parse.
          */
         val MIGRATION_13_14: Migration = object : Migration(13, 14) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL(
                     "ALTER TABLE `tokens` ADD COLUMN `oncePerIdentityDistribution` TEXT",
                 )
-                // Durable DashPay backfill (dashpay/platform#4302): the wallet's
-                // backfill record and the outbound contact-account marker, all
-                // nullable. NULL for every pre-existing row — no record on file
-                // and no marker, so the next sweep rebuilds the outbound account
-                // once, rescans once, and writes both.
+            }
+        }
+
+        /**
+         * v14 -> v15: additive nullable `wallets.dashPayBackfillFloor`,
+         * `wallets.dashPayBackfillRewoundFrom`, `wallets.dashPayBackfillCovered`
+         * and `dashpay_contact_requests.externalAccountReference`, see the
+         * version-15 class doc above. NULL for every pre-existing row — no
+         * record on file and no marker, so the next sweep rebuilds the
+         * outbound account once, rescans once, and writes both.
+         */
+        val MIGRATION_14_15: Migration = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE `wallets` ADD COLUMN `dashPayBackfillFloor` INTEGER")
                 db.execSQL("ALTER TABLE `wallets` ADD COLUMN `dashPayBackfillRewoundFrom` INTEGER")
                 db.execSQL("ALTER TABLE `wallets` ADD COLUMN `dashPayBackfillCovered` BLOB")
@@ -732,6 +738,7 @@ abstract class DashDatabase : RoomDatabase() {
                     MIGRATION_11_12,
                     MIGRATION_12_13,
                     MIGRATION_13_14,
+                    MIGRATION_14_15,
                 )
                 .build()
 
