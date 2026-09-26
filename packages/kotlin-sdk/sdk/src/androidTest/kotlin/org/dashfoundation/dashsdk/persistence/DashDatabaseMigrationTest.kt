@@ -614,7 +614,7 @@ class DashDatabaseMigrationTest {
     }
 
     /**
-     * v14 -> v15 adds the DashPay backfill record columns on `wallets`
+     * v13 -> v14 also adds the DashPay backfill record columns on `wallets`
      * (`dashPayBackfillFloor`, `dashPayBackfillRewoundFrom`,
      * `dashPayBackfillCovered`), all nullable and additive. A pre-migration
      * wallet reads back with no record — native then rewinds once, as it did
@@ -623,8 +623,8 @@ class DashDatabaseMigrationTest {
      * it (dashpay/platform#4302).
      */
     @Test
-    fun migrate14To15AddsDashPayBackfillColumns() {
-        helper.createDatabase(dbName, 14).apply {
+    fun migrate13To14AddsDashPayBackfillAndMarkerColumns() {
+        helper.createDatabase(dbName, 13).apply {
             execSQL(
                 "INSERT INTO wallets (walletId, walletGroupId, networkRaw, name, birthHeight, " +
                     "syncedHeight, lastSynced, isImported, createdAt, lastUpdated) " +
@@ -645,7 +645,7 @@ class DashDatabaseMigrationTest {
             close()
         }
 
-        val db = helper.runMigrationsAndValidate(dbName, 15, true, DashDatabase.MIGRATION_14_15)
+        val db = helper.runMigrationsAndValidate(dbName, 14, true, DashDatabase.MIGRATION_13_14)
 
         db.query(
             "SELECT externalAccountReference FROM dashpay_contact_requests WHERE ownerIdentityId = x'0A'",
@@ -696,7 +696,7 @@ class DashDatabaseMigrationTest {
         helper.createDatabase(dbName, 4).close()
         helper.runMigrationsAndValidate(
             dbName,
-            15,
+            14,
             true,
             DashDatabase.MIGRATION_4_5,
             DashDatabase.MIGRATION_5_6,
@@ -708,17 +708,16 @@ class DashDatabaseMigrationTest {
             DashDatabase.MIGRATION_11_12,
             DashDatabase.MIGRATION_12_13,
             DashDatabase.MIGRATION_13_14,
-            DashDatabase.MIGRATION_14_15,
         ).close()
     }
 
-    /** The full chain from v1 must also land on a valid v15 schema. */
+    /** The full chain from v1 must also land on a valid v14 schema. */
     @Test
     fun migrateAllTheWayFrom1() {
         helper.createDatabase(dbName, 1).close()
         helper.runMigrationsAndValidate(
             dbName,
-            15,
+            14,
             true,
             DashDatabase.MIGRATION_1_2,
             DashDatabase.MIGRATION_2_3,
@@ -733,7 +732,6 @@ class DashDatabaseMigrationTest {
             DashDatabase.MIGRATION_11_12,
             DashDatabase.MIGRATION_12_13,
             DashDatabase.MIGRATION_13_14,
-            DashDatabase.MIGRATION_14_15,
         ).close()
     }
 }
