@@ -104,6 +104,81 @@ fn add_managed_contact_account_without_rescan(
     Ok(())
 }
 
+impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
+    /// Store the wallet's backfill record together with the cursor it
+    /// vouches for, keeping the two paired on disk whatever happens to the
+    /// round (dashpay/platform#4302 review).
+    ///
+    /// `info.dashpay_backfill` already holds the updated record;
+    /// `previous` is the record before this pass. `cursor_this_pass` is the
+    /// floor this pass rewound to (`None` when it rewound nothing) and
+    /// `cursor_now` the in-memory cursor after it. The round carries the
+    /// floor, or failing that a cursor an earlier failed round still owes, so
+    /// coverage is never stored beside a durable cursor the in-memory rewind
+    /// left behind. On failure — or while the manager's persistence fault is
+    /// latched, when the adapter is holding the durable cursor back at the
+    /// last fully persisted height and a cursor written from here could
+    /// advance it past rows that never landed — the record is put back, the
+    /// contacts in `unmark` lose their in-memory mark so the next pass
+    /// re-attempts, and the cursor this round owed is remembered for that
+    /// retry. Returns whether the round reached the persister.
+    pub(super) fn store_backfill_record(
+        &self,
+        info: &mut PlatformWalletInfo,
+        previous: crate::changeset::DashPayBackfillRecord,
+        cursor_this_pass: Option<u32>,
+        cursor_now: u32,
+        unmark: &[(Identifier, Identifier)],
+        what: &'static str,
+    ) -> bool {
+        let owed = info.dashpay_backfill.unpersisted_cursor.take();
+        let cursor_to_write = match (cursor_this_pass, owed) {
+            (Some(floor), Some(owed)) => Some(floor.min(owed)),
+            (Some(floor), None) => Some(floor),
+            (None, owed) => owed,
+        };
+        let faulted = self.sync_fault.load(std::sync::atomic::Ordering::Relaxed);
+        let stored = if faulted {
+            Err(None)
+        } else {
+            let changeset = PlatformWalletChangeSet {
+                core: cursor_to_write.map(|cursor| crate::changeset::CoreChangeSet {
+                    synced_height: Some(cursor),
+                    ..crate::changeset::CoreChangeSet::default()
+                }),
+                dashpay_backfill: Some(info.dashpay_backfill.clone()),
+                ..PlatformWalletChangeSet::default()
+            };
+            self.persister.store(changeset).map_err(Some)
+        };
+        let Err(error) = stored else {
+            return true;
+        };
+        match error {
+            Some(error) => tracing::warn!(
+                wallet_id = %hex::encode(self.wallet_id),
+                error = %error,
+                "{what}: failed to persist the backfill record; the next pass retries and the \
+                 next launch re-runs this backfill"
+            ),
+            None => tracing::warn!(
+                wallet_id = %hex::encode(self.wallet_id),
+                "{what}: persistence fault latched; not recording backfill coverage over a \
+                 held-back cursor — the next launch re-runs this backfill"
+            ),
+        }
+        info.dashpay_backfill = previous;
+        info.dashpay_backfill.unpersisted_cursor =
+            Some(cursor_to_write.map_or(cursor_now, |cursor| cursor.min(cursor_now)));
+        for (owner, contact) in unmark {
+            if let Some(managed) = info.identity_manager.managed_identity_mut(owner) {
+                managed.dashpay_rescan_triggered_mut().remove(contact);
+            }
+        }
+        false
+    }
+}
+
 /// Build the persistence round for a newly registered DashPay account
 /// (`DashpayReceivingFunds` / `DashpayExternalAccount`): the
 /// [`AccountRegistrationEntry`] plus the account's initial address-pool
@@ -372,30 +447,23 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
             // stores the record has stored the cursor it vouches for. A
             // forward-covered contact (checkpoint at or above the cursor) is
             // recorded without a cursor write.
+            let previous_record = info.dashpay_backfill.clone();
             info.dashpay_backfill.record_pass(
                 previous_checkpoint,
                 lowered_to,
                 [(*our_identity_id, *contact_identity_id, scan_checkpoint)],
             );
-            let changeset = crate::changeset::PlatformWalletChangeSet {
-                core: lowered_to.map(|floor| crate::changeset::CoreChangeSet {
-                    synced_height: Some(floor),
-                    ..crate::changeset::CoreChangeSet::default()
-                }),
-                dashpay_backfill: Some(info.dashpay_backfill.clone()),
-                ..crate::changeset::PlatformWalletChangeSet::default()
-            };
-            if let Err(e) = self.persister.store(changeset) {
-                // The in-memory cursor is lowered regardless; the next launch
-                // re-runs this backfill, which is the pre-record behaviour.
-                tracing::warn!(
-                    our_identity = %our_identity_id,
-                    contact = %contact_identity_id,
-                    error = %e,
-                    "Failed to persist the DashPay backfill record for a receival account \
-                     registration; the next launch will re-run this backfill"
-                );
-            }
+            // The in-memory cursor is lowered regardless; if the round does
+            // not land, the reconcile's next pass re-attempts with the cursor
+            // this round owed.
+            self.store_backfill_record(
+                info,
+                previous_record,
+                lowered_to,
+                lowered_to.unwrap_or(previous_checkpoint),
+                &[],
+                "DashPay receival account registration",
+            );
             if let Some(floor) = lowered_to {
                 tracing::info!(
                     our_identity = %our_identity_id,
