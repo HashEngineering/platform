@@ -3546,11 +3546,14 @@ class PlatformWalletPersistenceHandler(
                         unresolvedAssetLockTxRecords = unresolvedAssetLockTxRecords,
                         providerSpecialTxs = providerSpecialTxs,
                         lastAppliedChainLockBytes = lastAppliedChainLockBytes,
-                        hasDashPayBackfill = hasBackfill,
-                        dashPayBackfillFloor = if (hasBackfill) backfillFloor!! else 0,
-                        dashPayBackfillRewoundFrom = if (hasBackfill) backfillRewoundFrom!! else 0,
-                        dashPayBackfillCovered = if (hasBackfill) backfillCovered!! else ByteArray(0),
-                    ),
+                    ).apply {
+                        if (hasBackfill) {
+                            hasDashPayBackfill = true
+                            dashPayBackfillFloor = backfillFloor!!
+                            dashPayBackfillRewoundFrom = backfillRewoundFrom!!
+                            dashPayBackfillCovered = backfillCovered!!
+                        }
+                    },
                 )
             }
             out.toTypedArray()
@@ -3791,9 +3794,12 @@ class PlatformWalletPersistenceHandler(
                         isHidden = c.contactHidden,
                         contactAccountLabel = c.contactAccountLabel,
                         acceptedAccounts = decodeAcceptedAccounts(c.contactAcceptedAccounts),
-                        hasExternalAccountReference = c.externalAccountReference != null,
-                        externalAccountReference = c.externalAccountReference ?: 0,
-                    )
+                    ).apply {
+                        c.externalAccountReference?.let { reference ->
+                            hasExternalAccountReference = true
+                            externalAccountReference = reference
+                        }
+                    }
                 }.toTypedArray()
             // Ignored senders (per-sender mute) — restores the Rust
             // `ignored_senders` set so a previously-ignored sender doesn't
