@@ -145,6 +145,21 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
         let Some(info) = wm.get_wallet_info_mut(&self.wallet_id) else {
             return Ok(None);
         };
+        let durable = durable_cursors.get(&self.wallet_id).copied();
+        // A cursor owed since an in-memory lowering is paid once the host
+        // has accepted a scan advance from the lowering's epoch or later: the
+        // host then tracks the scan that restarted from the lowered cursor.
+        // Writing the old height after that would only drag the host back
+        // below the scan (dashpay/platform#4302 device check).
+        if info
+            .dashpay_backfill
+            .settle_owed_cursor(durable.and_then(|durable| durable.advance_epoch))
+        {
+            tracing::debug!(
+                wallet_id = %hex::encode(self.wallet_id),
+                "DashPay rescan: the host has caught up past the owed cursor; dropping the debt"
+            );
+        }
 
         // A zero checkpoint already requests a scan from genesis; candidates are
         // still processed so they are marked as covered and do not trigger a
@@ -3212,7 +3227,7 @@ mod tests {
             .expect("info")
             .core_wallet
             .update_synced_height(height);
-        durable.insert(wallet_id, height);
+        durable.insert(wallet_id, crate::changeset::DurableCursor::at(height));
     }
 
     /// The wallet's [`RewindBarrier`](crate::changeset::core_bridge::RewindBarrier)
@@ -4725,7 +4740,7 @@ mod tests {
                 .lock()
                 .await
                 .get(&wallet_id)
-                .copied(),
+                .map(|cursor| cursor.height),
             Some(1_000),
             "the durable cursor is the host's, not the built one"
         );
@@ -4947,7 +4962,7 @@ mod tests {
                     .lock()
                     .await
                     .get(&wallet_id)
-                    .copied(),
+                    .map(|cursor| cursor.height),
                 Some(1_000),
                 "the host still holds its high-water"
             );
@@ -5235,7 +5250,7 @@ mod tests {
                 .lock()
                 .await
                 .get(&wallet_id)
-                .copied(),
+                .map(|cursor| cursor.height),
             Some(100),
             "the recorded durable cursor is still what the host holds"
         );
@@ -5291,6 +5306,124 @@ mod tests {
                 .covered_from(&owner, &contact, 0),
             Some(200)
         );
+    }
+
+    /// Reset the cursor to `from` the way the app's "rescan blockchain"
+    /// does, then model the rescan climbing back to `to` with the adapter
+    /// committing an advance from rewind epoch `host_epoch`.
+    async fn reset_then_climb(
+        manager: &Arc<PlatformWalletManager<RecordingPersister>>,
+        wallet_id: WalletId,
+        from: u32,
+        to: u32,
+        host_epoch: u64,
+    ) {
+        use key_wallet::wallet::managed_wallet_info::wallet_info_interface::WalletInfoInterface;
+        {
+            let manager = Arc::clone(manager);
+            tokio::task::spawn_blocking(move || {
+                assert!(manager.spv_rescan_filters_blocking(&wallet_id, from));
+            })
+            .await
+            .expect("manual rescan");
+        }
+        let mut durable = manager.durable_cursors.lock().await;
+        let mut wm = manager.wallet_manager.write().await;
+        wm.get_wallet_info_mut(&wallet_id)
+            .expect("info")
+            .core_wallet
+            .update_synced_height(to);
+        durable.insert(
+            wallet_id,
+            crate::changeset::DurableCursor {
+                height: to,
+                advance_epoch: Some(host_epoch),
+            },
+        );
+    }
+
+    /// dashpay/platform#4302 device check: a manual reset owes the host the
+    /// reset height, but the adapter persists the rescan's own advances as it
+    /// climbs, so once the host has accepted one from the reset's epoch the
+    /// debt is paid. A record round after the climb must not write the old
+    /// reset height — that dragged the host back to it until the next block
+    /// advance, and a kill in that window re-scanned from it.
+    #[tokio::test]
+    async fn an_owed_cursor_the_host_has_climbed_past_is_dropped_not_written() {
+        let (manager, persister, wallet_id) = make_wallet().await;
+        let owner = Identifier::from([0xAA; 32]);
+        let contact = Identifier::from([0xBB; 32]);
+        set_synced_height(&manager, wallet_id, 1_000).await;
+        reset_then_climb(&manager, wallet_id, 100, 1_000, 1).await;
+        assert_eq!(rewind_epoch(&manager, wallet_id).await, 1);
+
+        establish_receival_contact(
+            &manager, &persister, wallet_id, owner, contact, 1_200, 1_200,
+        )
+        .await;
+        persister.stores.lock().unwrap().clear();
+        let wallet = manager.get_wallet(&wallet_id).await.expect("wallet");
+        assert_eq!(
+            wallet
+                .identity()
+                .dashpay()
+                .reconcile_dashpay_rescan()
+                .await
+                .expect("reconcile"),
+            None
+        );
+        {
+            let stores = persister.stores.lock().unwrap();
+            let round = last_stored_record(&stores).expect("the contact is recorded");
+            assert!(
+                round.core.is_none(),
+                "no stale reset cursor rides the round: {:?}",
+                round.core.as_ref().and_then(|core| core.synced_height)
+            );
+        }
+        let wm = manager.wallet_manager.read().await;
+        let record = &wm
+            .get_wallet_info(&wallet_id)
+            .expect("info")
+            .dashpay_backfill;
+        assert_eq!(record.unpersisted_cursor, None, "the paid debt is gone");
+        assert_eq!(record.covered_from(&owner, &contact, 0), Some(1_200));
+    }
+
+    /// The other side: an advance the host accepted from BEFORE the reset
+    /// says nothing about the range the reset re-opened, so the debt stands
+    /// and rides the next record round.
+    #[tokio::test]
+    async fn an_owed_cursor_is_still_paid_when_the_host_only_advanced_before_the_reset() {
+        let (manager, persister, wallet_id) = make_wallet().await;
+        let owner = Identifier::from([0xAA; 32]);
+        let contact = Identifier::from([0xBB; 32]);
+        set_synced_height(&manager, wallet_id, 1_000).await;
+        // The host's last accepted advance is from epoch 0, before the reset
+        // (epoch 1); memory has not moved since the reset.
+        reset_then_climb(&manager, wallet_id, 100, 100, 0).await;
+        manager
+            .durable_cursors
+            .lock()
+            .await
+            .get_mut(&wallet_id)
+            .expect("seeded")
+            .height = 1_000;
+
+        establish_receival_contact(&manager, &persister, wallet_id, owner, contact, 200, 200).await;
+        persister.stores.lock().unwrap().clear();
+        let wallet = manager.get_wallet(&wallet_id).await.expect("wallet");
+        wallet
+            .identity()
+            .dashpay()
+            .reconcile_dashpay_rescan()
+            .await
+            .expect("reconcile");
+        let stores = persister.stores.lock().unwrap();
+        let round = last_stored_record(&stores).expect("the record is stored");
+        let core = round.core.as_ref().expect("the owed reset rides the round");
+        assert_eq!(core.synced_height, Some(100));
+        assert!(core.synced_height_is_rewind);
     }
 
     async fn synced_height_of(

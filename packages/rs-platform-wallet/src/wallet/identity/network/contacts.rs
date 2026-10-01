@@ -146,7 +146,7 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
         info: &mut PlatformWalletInfo,
         durable_cursors: &mut std::collections::BTreeMap<
             crate::wallet::platform_wallet::WalletId,
-            u32,
+            crate::changeset::DurableCursor,
         >,
         mut staged: crate::changeset::DashPayBackfillRecord,
         synced_height_before: u32,
@@ -155,6 +155,15 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
         marks: &[(Identifier, Identifier)],
         what: &'static str,
     ) -> bool {
+        let durable = durable_cursors.get(&self.wallet_id).copied();
+        // A cursor owed since an in-memory lowering is paid once the host has
+        // accepted a scan advance from the lowering's epoch or later; writing
+        // it after that would only drag the host back below the scan
+        // (dashpay/platform#4302 device check). Both the live record and the
+        // staged copy drop it.
+        let host_epoch = durable.and_then(|durable| durable.advance_epoch);
+        info.dashpay_backfill.settle_owed_cursor(host_epoch);
+        staged.settle_owed_cursor(host_epoch);
         // This pass's extent, widened by one a failed earlier round still owes.
         let extent = match (
             floor.map(|floor| (floor, synced_height_before)),
@@ -170,6 +179,7 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
             None => staged.record_pass(synced_height_before, None, entries.iter().copied()),
         };
         let owed = staged.unpersisted_cursor.take();
+        staged.unpersisted_cursor_epoch = None;
         let needed_cursor = match (floor, owed) {
             (Some(floor), Some(owed)) => Some(floor.min(owed)),
             (Some(floor), None) => Some(floor),
@@ -178,13 +188,13 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
         // Never write a cursor at or above the one the host already holds:
         // coverage is safe beside any lower durable cursor, and writing a
         // higher one would claim rows the adapter has not persisted yet.
-        let durable = durable_cursors.get(&self.wallet_id).copied();
         let cursor_to_write =
-            needed_cursor.filter(|cursor| durable.is_none_or(|durable| *cursor < durable));
+            needed_cursor.filter(|cursor| durable.is_none_or(|durable| *cursor < durable.height));
         let cursor_now = floor.unwrap_or(synced_height_before);
         // The debt, recorded before the store so no way out of it loses it.
         info.dashpay_backfill.unpersisted_cursor =
             Some(needed_cursor.map_or(cursor_now, |cursor| cursor.min(cursor_now)));
+        info.dashpay_backfill.unpersisted_cursor_epoch = Some(info.rewind_barrier.epoch());
         info.dashpay_backfill.unpersisted_extent = extent;
         let faulted = self.sync_fault.load(std::sync::atomic::Ordering::Relaxed);
         let stored = if faulted {
@@ -205,7 +215,8 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
             Ok(()) => {
                 info.dashpay_backfill = staged;
                 if let Some(cursor) = cursor_to_write {
-                    durable_cursors.insert(self.wallet_id, cursor);
+                    durable_cursors
+                        .insert(self.wallet_id, crate::changeset::DurableCursor::at(cursor));
                 }
                 for (owner, contact) in marks {
                     if let Some(managed) = info.identity_manager.managed_identity_mut(owner) {
