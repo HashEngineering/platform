@@ -447,9 +447,10 @@ abstract class NativePersistenceBridge {
      * stored. Descriptor `([BII[BI)I`.
      *
      * Whole-record semantics: replace what the wallet row holds, never
-     * merge. [covered] is ONE flat `byte[]` of `68 * coveredCount` bytes —
-     * per contact the owner identity id (32), the contact identity id (32)
-     * and the height it is covered from (u32, little-endian) — the same
+     * merge. [covered] is ONE flat `byte[]` of `72 * coveredCount` bytes —
+     * per receival account the owner identity id (32), the contact identity
+     * id (32), the account index (u32) and the height it is covered from
+     * (u32), both little-endian — the same
      * packing the sweep slot uses for its txids. Store it as an opaque blob
      * and hand it back unchanged on [WalletRestoreData.dashPayBackfillCovered];
      * only native reads it.
@@ -1047,6 +1048,14 @@ class WalletRestoreData(
      * `loadWalletList`.
      */
     @JvmField val lastAppliedChainLockBytes: ByteArray,
+) {
+    // The DashPay backfill record rides as body properties, not constructor
+    // parameters, so this class keeps exactly the JVM constructors it had
+    // before the record existed: a bridge compiled against the older SDK —
+    // Java, or Kotlin using the defaulted `providerSpecialTxs` — still links
+    // (dashpay/platform#4302 review). Set them with `apply { … }`; native
+    // reads them by field name either way.
+
     /**
      * Whether the wallet row holds a DashPay coreHeight backfill record
      * (dashpay/platform#4302). `false` for a wallet that never rewound for a
@@ -1055,22 +1064,25 @@ class WalletRestoreData(
      * it always did and writes one. Mirror of
      * `WalletRestoreEntryFFI.has_dashpay_backfill`.
      */
-    @JvmField val hasDashPayBackfill: Boolean = false,
+    @JvmField var hasDashPayBackfill: Boolean = false
+
     /** Lowest height the backfill rewound the cursor to. */
-    @JvmField val dashPayBackfillFloor: Int = 0,
+    @JvmField var dashPayBackfillFloor: Int = 0
+
     /**
      * Highest cursor the backfill rewound from — the height the scan climbs
      * back to for the backfill to be complete.
      */
-    @JvmField val dashPayBackfillRewoundFrom: Int = 0,
+    @JvmField var dashPayBackfillRewoundFrom: Int = 0
+
     /**
      * The record's cover set, exactly as [NativePersistenceBridge.onWalletChangesetDashPayBackfill]
-     * delivered it: `68` bytes per covered contact. Native re-packs it into
+     * delivered it: `72` bytes per covered receival account. Native re-packs it into
      * a `DashPayBackfillCoveredContactFFI` array; a blob that is not a whole
      * number of entries is read as no record.
      */
-    @JvmField val dashPayBackfillCovered: ByteArray = ByteArray(0),
-)
+    @JvmField var dashPayBackfillCovered: ByteArray = ByteArray(0)
+}
 
 /**
  * Kotlin staging row for the unchanged `ProviderSpecialTxRestoreEntryFFI`.
@@ -1360,15 +1372,21 @@ class ContactRequestRestoreData(
     @JvmField val isHidden: Boolean,
     @JvmField val contactAccountLabel: String?,
     @JvmField val acceptedAccounts: IntArray,
+) {
+    // Body properties, not constructor parameters, for the same reason as
+    // [WalletRestoreData]'s backfill fields: the class keeps the JVM
+    // constructor it had before the marker existed.
+
     /**
      * `EstablishedContact::external_account_reference` as a `(present,
      * value)` pair, exactly as [NativePersistenceBridge.onPersistContactUpsert]
      * delivered it. `false` restores `None`, which makes native rebuild the
      * outbound account once on the next sweep.
      */
-    @JvmField val hasExternalAccountReference: Boolean = false,
-    @JvmField val externalAccountReference: Int = 0,
-)
+    @JvmField var hasExternalAccountReference: Boolean = false
+
+    @JvmField var externalAccountReference: Int = 0
+}
 
 /**
  * One flat identity-public-key row — mirror of `IdentityKeyRestoreFFI`.

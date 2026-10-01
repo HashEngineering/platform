@@ -1889,6 +1889,13 @@ impl PlatformWalletPersistence for FFIPersister {
             }
         }
         let mut outcome = RoundOutcome::default();
+        // Whether this round's `synced_height` reached the host. A backfill
+        // record rides the round that lowers the cursor it vouches for, and
+        // must not reach the host when that cursor did not: a host without
+        // atomic rounds would keep the coverage over its old cursor, and no
+        // rollback on this side can take it back (dashpay/platform#4302
+        // review).
+        let mut cursor_delivered = false;
 
         // Wallet-registration metadata. Fires at most once per round
         // (registration emits the entry; subsequent rounds carry
@@ -2158,6 +2165,8 @@ impl PlatformWalletPersistence for FFIPersister {
                         result
                     );
                     outcome.record(result);
+                } else if core_cs.synced_height.is_some() {
+                    cursor_delivered = true;
                 }
             }
 
@@ -2226,7 +2235,34 @@ impl PlatformWalletPersistence for FFIPersister {
         // after the core changeset callback so the lowered cursor a rescan
         // round carries is staged before the record that vouches for it.
         // Whole-record semantics: the host replaces what it holds.
-        if let Some(record) = changeset.dashpay_backfill.as_ref() {
+        //
+        // A host that registered no changeset callback stores no cursor at
+        // all, so no record can vouch for one it holds: it never receives
+        // the record, not even on a record-only round. Withholding only the
+        // cursor-bearing round is not enough — that round still returns
+        // `Ok`, the reconcile records its cursor as durable, and a later
+        // record-only round would then deliver coverage beside a host cursor
+        // that never moved.
+        //
+        // Nor does a host whose rounds are not atomic: callbacks that run
+        // after this one (identities, payments, tokens, shielded) can still
+        // fail the round, and such a host would keep the cursor and the
+        // coverage from a round Rust reports as failed — coverage that then
+        // suppresses the rescan on the next launch. Only a host attesting
+        // `ATOMIC_CHANGESETS` rolls the whole round back, record included.
+        let host_stores_cursors = self.callbacks.on_persist_wallet_changeset_fn.is_some()
+            && self
+                .persistence_capabilities()
+                .contains(PersistenceCapabilities::ATOMIC_CHANGESETS);
+        let backfill_cursor_owed = changeset
+            .core
+            .as_ref()
+            .is_some_and(|core| core.synced_height.is_some());
+        if let Some(record) = changeset
+            .dashpay_backfill
+            .as_ref()
+            .filter(|_| host_stores_cursors && (!backfill_cursor_owed || cursor_delivered))
+        {
             if let Some(cb) = self.wallet_dashpay_backfill_callback {
                 let covered = build_dashpay_backfill_covered_for_callback(record);
                 let result = unsafe {
@@ -5407,17 +5443,21 @@ fn decode_dashpay_backfill(
         .map(|c| DashPayBackfillCoveredContact {
             owner: Identifier::from(c.owner_identity_id),
             contact: Identifier::from(c.contact_identity_id),
+            account_index: c.account_index,
             covered_from: c.covered_from,
         })
         .collect();
-    // Canonical order and one entry per pair, whatever the host stored.
-    covered.sort_by_key(|entry| (entry.owner, entry.contact));
-    covered.dedup_by(|a, b| (a.owner, a.contact) == (b.owner, b.contact));
+    // Canonical order and one entry per account, whatever the host stored.
+    // A duplicated account keeps its HIGHEST `covered_from`, so an ambiguous
+    // record fails closed.
+    covered.sort_by_key(|entry| (entry.key(), std::cmp::Reverse(entry.covered_from)));
+    covered.dedup_by(|a, b| a.key() == b.key());
     DashPayBackfillRecord {
         floor: entry.dashpay_backfill_floor,
         rewound_from: entry.dashpay_backfill_rewound_from,
         covered,
         unpersisted_cursor: None,
+        unpersisted_extent: None,
     }
 }
 
@@ -8493,12 +8533,14 @@ mod tests {
         let sink = Sink::default();
         let callbacks = PersistenceCallbacks {
             context: &sink as *const Sink as *mut c_void,
+            on_changeset_begin_fn: Some(noop_begin),
+            on_changeset_end_fn: Some(noop_end),
             on_persist_wallet_changeset_fn: Some(record_changeset),
             ..PersistenceCallbacks::default()
         };
         let persister = FFIPersister::new_with_persistence_capabilities_and_extensions(
             callbacks,
-            PersistenceCapabilities::NONE,
+            PersistenceCapabilities::ATOMIC_CHANGESETS,
             PersistenceExtensionCallbacks {
                 wallet_dashpay_backfill: Some(record_backfill),
                 ..Default::default()
@@ -8532,11 +8574,13 @@ mod tests {
                 (
                     dpp::prelude::Identifier::from([9u8; 32]),
                     dpp::prelude::Identifier::from([2u8; 32]),
+                    0,
                     2_300_000,
                 ),
                 (
                     dpp::prelude::Identifier::from([1u8; 32]),
                     dpp::prelude::Identifier::from([3u8; 32]),
+                    0,
                     2_167_092,
                 ),
             ],
@@ -8606,6 +8650,140 @@ mod tests {
         drop(persister);
     }
 
+    /// A backfill record rides the round that lowers the cursor it vouches
+    /// for, and must not reach the host when that cursor did not — a host
+    /// without atomic rounds would keep the coverage over its old cursor
+    /// (dashpay/platform#4302 review). Withheld when the changeset callback
+    /// fails for a round that carries a cursor, and on every round —
+    /// record-only ones included — for a host with no changeset callback,
+    /// which holds no cursor a record could vouch for, or whose rounds are
+    /// not atomic, so a later callback's failure could not roll the record
+    /// back. Delivered for a record-only round on an atomic host that stores
+    /// cursors.
+    #[test]
+    fn a_backfill_record_is_withheld_when_its_cursor_did_not_reach_the_host() {
+        use platform_wallet::changeset::{CoreChangeSet, DashPayBackfillRecord};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct Sink {
+            backfills: AtomicUsize,
+        }
+        unsafe extern "C" fn reject_changeset(
+            _ctx: *mut c_void,
+            _wallet_id: *const u8,
+            _changeset: *const WalletChangeSetFFI,
+        ) -> i32 {
+            1
+        }
+        unsafe extern "C" fn accept_changeset(
+            _ctx: *mut c_void,
+            _wallet_id: *const u8,
+            _changeset: *const WalletChangeSetFFI,
+        ) -> i32 {
+            0
+        }
+        unsafe extern "C" fn count_backfill(
+            ctx: *mut c_void,
+            _wallet_id: *const u8,
+            _floor: u32,
+            _rewound_from: u32,
+            _covered: *const DashPayBackfillCoveredContactFFI,
+            _covered_count: usize,
+        ) -> i32 {
+            (*(ctx as *const Sink))
+                .backfills
+                .fetch_add(1, Ordering::SeqCst);
+            0
+        }
+        fn persister_with(
+            sink: &Sink,
+            changeset: Option<PersistWalletChangesetFnForTest>,
+            atomic: bool,
+        ) -> FFIPersister {
+            FFIPersister::new_with_persistence_capabilities_and_extensions(
+                PersistenceCallbacks {
+                    context: sink as *const Sink as *mut c_void,
+                    on_changeset_begin_fn: atomic.then_some(noop_begin as _),
+                    on_changeset_end_fn: atomic.then_some(noop_end as _),
+                    on_persist_wallet_changeset_fn: changeset,
+                    ..PersistenceCallbacks::default()
+                },
+                if atomic {
+                    PersistenceCapabilities::ATOMIC_CHANGESETS
+                } else {
+                    PersistenceCapabilities::NONE
+                },
+                PersistenceExtensionCallbacks {
+                    wallet_dashpay_backfill: Some(count_backfill),
+                    ..Default::default()
+                },
+            )
+        }
+        let persister = |sink: &Sink, changeset: Option<PersistWalletChangesetFnForTest>| {
+            persister_with(sink, changeset, true)
+        };
+        type PersistWalletChangesetFnForTest =
+            unsafe extern "C" fn(*mut c_void, *const u8, *const WalletChangeSetFFI) -> i32;
+        let rewind_round = || PlatformWalletChangeSet {
+            core: Some(CoreChangeSet {
+                synced_height: Some(100),
+                synced_height_is_rewind: true,
+                ..CoreChangeSet::default()
+            }),
+            dashpay_backfill: Some(DashPayBackfillRecord::default()),
+            ..PlatformWalletChangeSet::default()
+        };
+
+        // The host rejected the cursor: the record must not follow it.
+        let sink = Sink::default();
+        let rejected = persister(&sink, Some(reject_changeset));
+        assert!(rejected.store([1u8; 32], rewind_round()).is_err());
+        assert_eq!(sink.backfills.load(Ordering::SeqCst), 0);
+
+        let record_only_round = || PlatformWalletChangeSet {
+            dashpay_backfill: Some(DashPayBackfillRecord::default()),
+            ..PlatformWalletChangeSet::default()
+        };
+
+        // The host takes no cursors at all: a record over one is meaningless,
+        // on the rewind round and on every record-only round after it.
+        let sink = Sink::default();
+        let cursorless = persister(&sink, None);
+        cursorless
+            .store([1u8; 32], rewind_round())
+            .expect("nothing failed");
+        cursorless
+            .store([1u8; 32], record_only_round())
+            .expect("record-only round");
+        assert_eq!(sink.backfills.load(Ordering::SeqCst), 0);
+
+        // A host that stores cursors gets the record with its cursor, and a
+        // record-only round (no cursor to pair with) on its own.
+        let sink = Sink::default();
+        let accepting = persister(&sink, Some(accept_changeset));
+        accepting
+            .store([1u8; 32], rewind_round())
+            .expect("rewind round");
+        accepting
+            .store([1u8; 32], record_only_round())
+            .expect("record-only round");
+        assert_eq!(sink.backfills.load(Ordering::SeqCst), 2);
+
+        // A host whose rounds are not atomic cannot roll back a cursor and a
+        // record whose round a later callback failed: it gets neither round's
+        // record.
+        let sink = Sink::default();
+        let non_atomic = persister_with(&sink, Some(accept_changeset), false);
+        non_atomic
+            .store([1u8; 32], rewind_round())
+            .expect("rewind round");
+        non_atomic
+            .store([1u8; 32], record_only_round())
+            .expect("record-only round");
+        assert_eq!(sink.backfills.load(Ordering::SeqCst), 0);
+    }
+
     /// The restore side of dashpay/platform#4302: a wallet-restore entry
     /// carrying the record decodes into the start state's
     /// `dashpay_backfill` in canonical form, and an entry without it — the
@@ -8632,21 +8810,25 @@ mod tests {
         assert_eq!((decoded.floor, decoded.rewound_from), (10, 20));
 
         // Out of order and duplicated, as a host might hand it back: the
-        // decoded record is sorted with one entry per pair.
+        // decoded record is sorted with one entry per account, the highest
+        // height of a duplicate kept.
         let covered = [
             DashPayBackfillCoveredContactFFI {
                 owner_identity_id: [9u8; 32],
                 contact_identity_id: [2u8; 32],
+                account_index: 0,
                 covered_from: 2_300_000,
             },
             DashPayBackfillCoveredContactFFI {
                 owner_identity_id: [1u8; 32],
                 contact_identity_id: [3u8; 32],
+                account_index: 0,
                 covered_from: 2_167_092,
             },
             DashPayBackfillCoveredContactFFI {
                 owner_identity_id: [9u8; 32],
                 contact_identity_id: [2u8; 32],
+                account_index: 0,
                 covered_from: 2_999_999,
             },
         ];
@@ -8667,12 +8849,14 @@ mod tests {
                 (
                     dpp::prelude::Identifier::from([1u8; 32]),
                     dpp::prelude::Identifier::from([3u8; 32]),
+                    0,
                     2_167_092,
                 ),
                 (
                     dpp::prelude::Identifier::from([9u8; 32]),
                     dpp::prelude::Identifier::from([2u8; 32]),
-                    2_300_000,
+                    0,
+                    2_999_999,
                 ),
             ],
         );
@@ -8680,10 +8864,11 @@ mod tests {
         assert_eq!(
             decoded.covered_from(
                 &dpp::prelude::Identifier::from([9u8; 32]),
-                &dpp::prelude::Identifier::from([2u8; 32])
+                &dpp::prelude::Identifier::from([2u8; 32]),
+                0
             ),
-            Some(2_300_000),
-            "the first of a duplicated pair wins"
+            Some(2_999_999),
+            "a duplicated account keeps its highest height, so the record fails closed"
         );
     }
 

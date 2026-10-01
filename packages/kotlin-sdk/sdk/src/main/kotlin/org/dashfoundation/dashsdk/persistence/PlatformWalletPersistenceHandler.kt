@@ -3546,11 +3546,14 @@ class PlatformWalletPersistenceHandler(
                         unresolvedAssetLockTxRecords = unresolvedAssetLockTxRecords,
                         providerSpecialTxs = providerSpecialTxs,
                         lastAppliedChainLockBytes = lastAppliedChainLockBytes,
-                        hasDashPayBackfill = hasBackfill,
-                        dashPayBackfillFloor = if (hasBackfill) backfillFloor!! else 0,
-                        dashPayBackfillRewoundFrom = if (hasBackfill) backfillRewoundFrom!! else 0,
-                        dashPayBackfillCovered = if (hasBackfill) backfillCovered!! else ByteArray(0),
-                    ),
+                    ).apply {
+                        if (hasBackfill) {
+                            hasDashPayBackfill = true
+                            dashPayBackfillFloor = backfillFloor!!
+                            dashPayBackfillRewoundFrom = backfillRewoundFrom!!
+                            dashPayBackfillCovered = backfillCovered!!
+                        }
+                    },
                 )
             }
             out.toTypedArray()
@@ -3791,9 +3794,12 @@ class PlatformWalletPersistenceHandler(
                         isHidden = c.contactHidden,
                         contactAccountLabel = c.contactAccountLabel,
                         acceptedAccounts = decodeAcceptedAccounts(c.contactAcceptedAccounts),
-                        hasExternalAccountReference = c.externalAccountReference != null,
-                        externalAccountReference = c.externalAccountReference ?: 0,
-                    )
+                    ).apply {
+                        c.externalAccountReference?.let { reference ->
+                            hasExternalAccountReference = true
+                            externalAccountReference = reference
+                        }
+                    }
                 }.toTypedArray()
             // Ignored senders (per-sender mute) — restores the Rust
             // `ignored_senders` set so a previously-ignored sender doesn't
@@ -4925,11 +4931,11 @@ class PlatformWalletPersistenceHandler(
         internal const val CAPABILITY_DPNS_NAME_STATES: Long = 0x100
         internal const val CAPABILITY_TRACKED_ASSET_LOCKS: Long = 0x200
         /**
-         * Bytes per contact in the opaque cover set
+         * Bytes per receival account in the opaque cover set
          * [onWalletChangesetDashPayBackfill] delivers: owner id (32),
-         * contact id (32), covered-from height (4).
+         * contact id (32), account index (4), covered-from height (4).
          */
-        internal const val DASHPAY_BACKFILL_COVERED_ENTRY_SIZE: Int = 32 + 32 + 4
+        internal const val DASHPAY_BACKFILL_COVERED_ENTRY_SIZE: Int = 32 + 32 + 4 + 4
 
         internal const val CAPABILITY_CORE_SWEEP_REMOVAL: Long =
             NativePersistenceBridge.CAPABILITY_CORE_SWEEP_REMOVAL
