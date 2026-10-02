@@ -233,16 +233,16 @@ class DashDatabaseTest {
     }
 
     @Test
-    fun schemaIsAtVersion15WithTheSweepHoldIndexes() = runTest {
+    fun schemaIsAtVersion14WithTheSweepHoldIndexes() = runTest {
         // The sweep-hold columns land in ONE migration (10 → 11), with the
         // two `pending_inputs` indexes the sweep's claimed-row lookup
         // (`spendingTxid`) and the end-of-round collector
         // (`walletId, isSweptTombstone, winnerMinedHeight`) rely on.
         // 11 → 12 adds the identity key usage limits columns on top,
-        // 12 → 13 the contract bounds kind, 13 → 14 the token
-        // once-per-identity distribution block, and 14 → 15 the DashPay
-        // backfill record columns on `wallets`.
-        assertEquals(15, db.openHelper.readableDatabase.version)
+        // 12 → 13 the contract bounds kind, and 13 → 14 the token
+        // once-per-identity distribution block plus the DashPay backfill
+        // record columns on `wallets` and the contact-row marker.
+        assertEquals(14, db.openHelper.readableDatabase.version)
         val indexes = mutableSetOf<String>()
         db.openHelper.readableDatabase.query("PRAGMA index_list('pending_inputs')").use { c ->
             val nameColumn = c.getColumnIndexOrThrow("name")
@@ -296,7 +296,7 @@ class DashDatabaseTest {
 
     @Test
     fun shouldHaveNullableDashPayBackfillColumnsOnWallets() = runTest {
-        // Version 15 (14 → 15): all three nullable with no default, so a
+        // Version 14 (13 → 14): all three nullable with no default, so a
         // legacy row reads back as "no record" and native rewinds once.
         val expected = mapOf(
             "dashPayBackfillFloor" to "INTEGER",
