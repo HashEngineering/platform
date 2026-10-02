@@ -371,7 +371,6 @@ impl<P: PlatformWalletPersistence + 'static> PlatformWalletManager<P> {
                 Arc::clone(&self.lock_notify),
                 Arc::clone(&persister_dyn),
                 broadcaster,
-                Arc::clone(&self.sync_fault),
             );
 
             // Initialize the platform-address provider. If the snapshot
