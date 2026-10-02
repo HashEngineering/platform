@@ -664,7 +664,6 @@ mod tests {
             identity_manager: IdentityManager::new(),
             tracked_asset_locks: BTreeMap::new(),
             dpns_name_states: BTreeMap::new(),
-            dashpay_backfill: Default::default(),
         };
         assert_eq!(
             funding_account_index(&info, &txid),

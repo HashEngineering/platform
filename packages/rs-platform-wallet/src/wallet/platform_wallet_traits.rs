@@ -42,7 +42,6 @@ impl WalletInfoInterface for PlatformWalletInfo {
             tracked_asset_locks: std::collections::BTreeMap::new(),
             observed_input_conflicts: Default::default(),
             dpns_name_states: std::collections::BTreeMap::new(),
-            dashpay_backfill: Default::default(),
         }
     }
 
@@ -57,7 +56,6 @@ impl WalletInfoInterface for PlatformWalletInfo {
             tracked_asset_locks: std::collections::BTreeMap::new(),
             observed_input_conflicts: Default::default(),
             dpns_name_states: std::collections::BTreeMap::new(),
-            dashpay_backfill: Default::default(),
         }
     }
 
