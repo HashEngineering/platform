@@ -1447,6 +1447,25 @@ mod tests {
                 enqueued_at_ms: 0,
             },
         );
+        // The request the build is for: a receiving build is only ever queued
+        // for a contact that holds a request we sent (one-way or established),
+        // and the rescan sweep handles a receival account from that request's
+        // height — a contact with no request on record is not a candidate.
+        managed
+            .add_sent_contact_request(
+                crate::wallet::identity::ContactRequest::new(
+                    Identifier::from([1u8; 32]),
+                    Identifier::from([2u8; 32]),
+                    0,
+                    0,
+                    0,
+                    vec![0u8; 96],
+                    100,
+                    0,
+                ),
+                &persister,
+            )
+            .expect("sent request persists");
         drop(wm);
 
         (manager, wallet_id)
