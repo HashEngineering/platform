@@ -404,7 +404,6 @@ impl<P: PlatformWalletPersistence + 'static> PlatformWalletManager<P> {
             tracked_asset_locks: std::collections::BTreeMap::new(),
             dpns_name_states: std::collections::BTreeMap::new(),
             dashpay_backfill: Default::default(),
-            rewind_barrier: Default::default(),
         };
 
         wallet.downgrade_to_external_signable();
@@ -447,38 +446,12 @@ impl<P: PlatformWalletPersistence + 'static> PlatformWalletManager<P> {
         // than sliced here: the authoritative id is the one that call returns,
         // and it is deliberately not assumed equal to `registration_wallet_id`
         // (see the divergence branch below).
-        //
-        // The same read also yields what the host holds for every persisted
-        // wallet: a registration that recreates a wallet the host already has
-        // must measure durable writes against the host's cursor, not the one
-        // it just built, and must keep the host's DashPay backfill record
-        // rather than start from an empty one that re-arms every covered
-        // contact (see the seed below).
         let load_persister: Arc<dyn PlatformWalletPersistence> = Arc::clone(&self.persister) as _;
-        let (mut persisted_platform_addresses, mut host_wallets) =
+        let mut persisted_platform_addresses =
             match super::run_blocking_load(move || load_persister.load()).await {
                 Ok(crate::changeset::ClientStartState {
-                    platform_addresses,
-                    wallets,
-                    ..
-                }) => (
-                    platform_addresses,
-                    wallets
-                        .into_iter()
-                        .map(|(id, state)| {
-                            (
-                                id,
-                                (
-                                    state.wallet_info.metadata.synced_height,
-                                    state.dashpay_backfill,
-                                ),
-                            )
-                        })
-                        .collect::<std::collections::BTreeMap<
-                            WalletId,
-                            (u32, crate::changeset::DashPayBackfillRecord),
-                        >>(),
-                ),
+                    platform_addresses, ..
+                }) => platform_addresses,
                 Err(e) => {
                     tracing::error!(
                         wallet_id = %hex::encode(registration_wallet_id),
@@ -497,54 +470,16 @@ impl<P: PlatformWalletPersistence + 'static> PlatformWalletManager<P> {
         // treat re-registering an existing wallet as a benign no-op
         // instead of substring-matching the error text. Everything else
         // stays `WalletCreation`.
-        //
-        // The durable cursor is seeded in the same scope as the insert, under
-        // the cursor lock taken first (its order: cursor lock, then manager).
-        // The insert makes the wallet visible to the scanner and the event
-        // adapter; seeding after it would let an adapter commit or a
-        // reconcile record a newer durable height first, only for the seed to
-        // overwrite it with the creation one. An entry a removed or
-        // rolled-back registration left behind is overwritten here the same
-        // way, so it is never read against a live wallet.
-        //
-        // A registration can recreate a wallet the host already holds (the
-        // same seed added again on a fresh manager). The host keeps that
-        // row's cursor — registration writes no core cursor, and a host
-        // preserves `syncedHeight` on the metadata upsert — so the seed is
-        // the host's cursor, not the freshly built one. When the built cursor
-        // is lower, the wallet is in effect reset in memory only: that
-        // reset is owed to the host like any other, and the next DashPay
-        // backfill record round carries it, so coverage never reaches disk
-        // beside the host's higher cursor (dashpay/platform#4302 review).
-        let created_cursor = platform_info.core_wallet.metadata.synced_height;
         let wallet_id = {
-            let mut durable_cursors = self.durable_cursors.lock().await;
             let mut wm = self.wallet_manager.write().await;
-            let wallet_id = wm
-                .insert_wallet(wallet, platform_info)
+            wm.insert_wallet(wallet, platform_info)
                 .map_err(|e| match e {
                     key_wallet_manager::WalletError::WalletExists(id) => already_registered(id),
                     other => PlatformWalletError::WalletCreation(format!(
                         "Failed to register wallet in WalletManager: {}",
                         other
                     )),
-                })?;
-            let (host_cursor, host_backfill) = host_wallets
-                .remove(&wallet_id)
-                .unwrap_or((created_cursor, Default::default()));
-            if let Some(info) = wm.get_wallet_info_mut(&wallet_id) {
-                // The host's record vouches for `[covered_from, host_cursor]`
-                // per account; the recreated wallet scans from no higher than
-                // that, so the coverage stays true.
-                info.dashpay_backfill = host_backfill;
-                if created_cursor < host_cursor {
-                    let owed = &mut info.dashpay_backfill.unpersisted_cursor;
-                    *owed = Some(owed.map_or(created_cursor, |cursor| cursor.min(created_cursor)));
-                }
-            }
-            durable_cursors.insert(wallet_id, host_cursor);
-            self.inherit_rewind_barrier(&mut wm, &wallet_id);
-            wallet_id
+                })?
         };
 
         // `insert_wallet` recomputes the id from the (now external-signable)
@@ -642,7 +577,7 @@ impl<P: PlatformWalletPersistence + 'static> PlatformWalletManager<P> {
                 "failed to persist wallet registration changeset"
             );
             let mut wm = self.wallet_manager.write().await;
-            if let Err(remove_err) = self.remove_from_wallet_manager(&mut wm, &wallet_id) {
+            if let Err(remove_err) = wm.remove_wallet(&wallet_id) {
                 tracing::warn!(
                     wallet_id = %hex::encode(wallet_id),
                     error = %remove_err,
@@ -667,7 +602,6 @@ impl<P: PlatformWalletPersistence + 'static> PlatformWalletManager<P> {
             persister_dyn,
             broadcaster,
             Arc::clone(&self.sync_fault),
-            Arc::clone(&self.durable_cursors),
         );
 
         // Restore the platform-address provider from the slice read above —
@@ -692,7 +626,7 @@ impl<P: PlatformWalletPersistence + 'static> PlatformWalletManager<P> {
                     "failed to restore persisted platform-address state"
                 );
                 let mut wm = self.wallet_manager.write().await;
-                if let Err(remove_err) = self.remove_from_wallet_manager(&mut wm, &wallet_id) {
+                if let Err(remove_err) = wm.remove_wallet(&wallet_id) {
                     tracing::warn!(
                         wallet_id = %hex::encode(wallet_id),
                         error = %remove_err,
@@ -1011,7 +945,7 @@ impl<P: PlatformWalletPersistence + 'static> PlatformWalletManager<P> {
                      their identity-sync rows are left for the next launch to reconcile"
                 );
             }
-            if let Err(e) = self.remove_from_wallet_manager(&mut wm, wallet_id) {
+            if let Err(e) = wm.remove_wallet(wallet_id) {
                 tracing::warn!(
                     wallet_id = %hex::encode(wallet_id),
                     error = %e,
@@ -1369,128 +1303,6 @@ mod register_wallet_duplicate_tests {
         assert!(
             matches!(err, PlatformWalletError::WalletAlreadyExists(_)),
             "duplicate create must map to WalletAlreadyExists, got: {err:?}"
-        );
-    }
-
-    /// Removing a wallet keeps its rewind barrier's in-flight state, and a
-    /// same-id registration inherits it in the critical section that
-    /// publishes it, so advances the removed wallet emitted cannot be stored
-    /// against its successor (dashpay/platform#4302 review).
-    #[tokio::test]
-    async fn a_same_id_registration_inherits_the_removed_wallets_barrier() {
-        let manager = make_manager();
-        let network = Network::Testnet;
-        let mnemonic = Mnemonic::from_phrase(TEST_MNEMONIC).expect("valid test mnemonic");
-        let seed_bytes = mnemonic.to_seed("");
-        let create = |manager: Arc<PlatformWalletManager<NoopPersister>>| async move {
-            manager
-                .create_wallet_from_seed_bytes(
-                    network,
-                    &seed_bytes,
-                    WalletAccountCreationOptions::Default,
-                    Some(0),
-                )
-                .await
-        };
-        let wallet_id = create(Arc::clone(&manager))
-            .await
-            .expect("first create")
-            .wallet_id();
-        {
-            // Three advances emitted and not yet drained by the adapter.
-            let mut wm = manager.wallet_manager.write().await;
-            let barrier = &mut wm
-                .get_wallet_info_mut(&wallet_id)
-                .expect("info")
-                .rewind_barrier;
-            for _ in 0..3 {
-                barrier.note_emitted();
-            }
-            barrier.arm();
-        }
-        manager.remove_wallet(&wallet_id).await.expect("remove");
-
-        create(Arc::clone(&manager)).await.expect("second create");
-        let wm = manager.wallet_manager.read().await;
-        let (in_flight, epoch) = wm
-            .get_wallet_info(&wallet_id)
-            .expect("published")
-            .rewind_barrier
-            .retire();
-        assert_eq!(
-            in_flight, 3,
-            "the predecessor's queued advances are carried"
-        );
-        assert!(epoch > 1, "the epoch moves past the predecessor's");
-    }
-
-    /// The durable cursor is seeded in the critical section that publishes
-    /// the wallet. Published first and seeded after, an adapter commit or a
-    /// reconcile could record a newer durable height in between and the seed
-    /// would overwrite it with the creation one. While the cursor lock is
-    /// held the registration must not publish the wallet at all, and once it
-    /// does, the entry is the created cursor — never one left behind by an
-    /// earlier registration of the same id.
-    #[tokio::test]
-    async fn a_wallet_is_published_and_its_durable_cursor_seeded_in_one_step() {
-        let manager = make_manager();
-        let network = Network::Testnet;
-        let mnemonic = Mnemonic::from_phrase(TEST_MNEMONIC).expect("valid test mnemonic");
-        let seed_bytes = mnemonic.to_seed("");
-        let create = |manager: Arc<PlatformWalletManager<NoopPersister>>| async move {
-            manager
-                .create_wallet_from_seed_bytes(
-                    network,
-                    &seed_bytes,
-                    WalletAccountCreationOptions::Default,
-                    Some(0),
-                )
-                .await
-        };
-
-        let wallet_id = create(Arc::clone(&manager))
-            .await
-            .expect("first create")
-            .wallet_id();
-        manager.remove_wallet(&wallet_id).await.expect("remove");
-
-        let mut gate = manager.durable_cursors.lock().await;
-        // What a removed registration might leave behind.
-        gate.insert(wallet_id, 777);
-        let registering = tokio::spawn(create(Arc::clone(&manager)));
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert!(
-            manager
-                .wallet_manager
-                .read()
-                .await
-                .get_wallet_info(&wallet_id)
-                .is_none(),
-            "no wallet may become visible while the durable-cursor lock is held"
-        );
-        drop(gate);
-
-        registering.await.expect("join").expect("second create");
-        let created_cursor = {
-            use key_wallet::wallet::managed_wallet_info::wallet_info_interface::WalletInfoInterface;
-            manager
-                .wallet_manager
-                .read()
-                .await
-                .get_wallet_info(&wallet_id)
-                .expect("published")
-                .core_wallet
-                .synced_height()
-        };
-        assert_eq!(
-            manager
-                .durable_cursors
-                .lock()
-                .await
-                .get(&wallet_id)
-                .copied(),
-            Some(created_cursor),
-            "the seed is the created cursor, not the leftover entry"
         );
     }
 

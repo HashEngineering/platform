@@ -24,9 +24,7 @@ use tokio_util::sync::CancellationToken;
 
 use key_wallet_manager::WalletManager;
 
-use crate::changeset::{
-    spawn_wallet_event_adapter_with_durable_cursors, DurableCursors, PlatformWalletPersistence,
-};
+use crate::changeset::{spawn_wallet_event_adapter, PlatformWalletPersistence};
 use crate::events::{PlatformEventHandler, PlatformEventManager};
 use crate::manager::dashpay_sync::DashPaySyncManager;
 use crate::manager::dpns_sync::DpnsSyncManager;
@@ -441,15 +439,6 @@ pub struct PlatformWalletManager<P: PlatformWalletPersistence + 'static> {
     /// failed / rescan pending" state rather than re-freezing silently on
     /// the next launch.
     pub(super) sync_fault: Arc<std::sync::atomic::AtomicBool>,
-    /// The durable sync cursor each wallet's host last accepted, shared by
-    /// the wallet-event adapter and the DashPay rescan reconcile — the lock
-    /// that orders their cursor writes. See [`DurableCursors`].
-    pub(super) durable_cursors: DurableCursors,
-    /// The [`RewindBarrier`](crate::changeset::core_bridge::RewindBarrier)
-    /// state of removed wallets, keyed by id, for a successor registered
-    /// under the same id to inherit: the shared event adapter can still hold
-    /// advances the removed wallet emitted (dashpay/platform#4302 review).
-    pub(super) retired_barriers: std::sync::Mutex<std::collections::BTreeMap<WalletId, (u64, u64)>>,
     /// Per-WALLET in-broadcast fence maps, handed to every
     /// [`WalletGeneration`](crate::wallet::core::WalletGeneration) registered
     /// under each id.
@@ -511,18 +500,16 @@ impl<P: PlatformWalletPersistence + 'static> PlatformWalletManager<P> {
         // Host-visible hard sync-fault latch. The
         // adapter raises it the first time it freezes a durable watermark.
         let sync_fault = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let durable_cursors = DurableCursors::default();
 
         // Spawn the wallet-event adapter that translates upstream
         // `WalletEvent`s into `CoreChangeSet`s and forwards them to
         // the persister.
         let event_adapter_cancel = CancellationToken::new();
-        let event_adapter_join = spawn_wallet_event_adapter_with_durable_cursors(
+        let event_adapter_join = spawn_wallet_event_adapter(
             Arc::clone(&wallet_manager),
             Arc::downgrade(&persister),
             event_receiver,
             Arc::clone(&sync_fault),
-            Arc::clone(&durable_cursors),
             event_adapter_cancel.clone(),
         );
 
@@ -620,49 +607,7 @@ impl<P: PlatformWalletPersistence + 'static> PlatformWalletManager<P> {
             event_adapter_join: tokio::sync::Mutex::new(Some(event_adapter_join)),
             registry,
             sync_fault,
-            durable_cursors,
-            retired_barriers: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             in_broadcast_fences: std::sync::Mutex::new(std::collections::BTreeMap::new()),
-        }
-    }
-
-    /// Remove `wallet_id` from the inner manager, keeping its rewind
-    /// barrier's in-flight state for a successor registered under the same
-    /// id (see [`Self::inherit_rewind_barrier`]).
-    pub(super) fn remove_from_wallet_manager(
-        &self,
-        wm: &mut WalletManager<PlatformWalletInfo>,
-        wallet_id: &WalletId,
-    ) -> Result<(), key_wallet_manager::WalletError> {
-        let (_, info) = wm.remove_wallet(wallet_id)?;
-        let (in_flight, epoch) = info.rewind_barrier.retire();
-        let mut retired = self
-            .retired_barriers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let entry = retired.entry(*wallet_id).or_insert((0, 0));
-        entry.0 = entry.0.saturating_add(in_flight);
-        entry.1 = entry.1.max(epoch);
-        Ok(())
-    }
-
-    /// Hand a newly published wallet the barrier state a removed wallet of
-    /// the same id left behind, so advances that wallet emitted — still
-    /// queued in, or already projected by, the shared adapter — are dropped
-    /// rather than stored against the new wallet's scan. Called inside the
-    /// critical section that publishes the wallet.
-    pub(super) fn inherit_rewind_barrier(
-        &self,
-        wm: &mut WalletManager<PlatformWalletInfo>,
-        wallet_id: &WalletId,
-    ) {
-        let retired = self
-            .retired_barriers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(wallet_id);
-        if let (Some(retired), Some(info)) = (retired, wm.get_wallet_info_mut(wallet_id)) {
-            info.rewind_barrier.inherit(retired);
         }
     }
 
@@ -1244,7 +1189,6 @@ mod tests {
             Arc::new(NoopPersister) as Arc<dyn PlatformWalletPersistence>,
             Arc::new(crate::broadcaster::SpvBroadcaster::new(spv)),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            crate::changeset::DurableCursors::default(),
         ));
         mgr.wallets.rcu(|wallets| {
             let mut next = std::collections::BTreeMap::clone(wallets);

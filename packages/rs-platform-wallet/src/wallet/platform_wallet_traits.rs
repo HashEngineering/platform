@@ -43,7 +43,6 @@ impl WalletInfoInterface for PlatformWalletInfo {
             observed_input_conflicts: Default::default(),
             dpns_name_states: std::collections::BTreeMap::new(),
             dashpay_backfill: Default::default(),
-            rewind_barrier: Default::default(),
         }
     }
 
@@ -59,7 +58,6 @@ impl WalletInfoInterface for PlatformWalletInfo {
             observed_input_conflicts: Default::default(),
             dpns_name_states: std::collections::BTreeMap::new(),
             dashpay_backfill: Default::default(),
-            rewind_barrier: Default::default(),
         }
     }
 
@@ -161,14 +159,7 @@ impl WalletInfoInterface for PlatformWalletInfo {
             .update_last_processed_height(current_height);
     }
 
-    /// The engine's only caller is `update_wallet_synced_height`, which emits
-    /// a `SyncHeightAdvanced` straight after this returns, under the same
-    /// manager write lock — so this is where emissions are counted for the
-    /// [`RewindBarrier`](crate::changeset::core_bridge::RewindBarrier).
-    /// Platform code that moves the cursor calls `core_wallet` directly and
-    /// emits nothing.
     fn update_synced_height(&mut self, current_height: u32) {
-        self.rewind_barrier.note_emitted();
         self.core_wallet.update_synced_height(current_height);
     }
 
@@ -254,10 +245,7 @@ impl ManagedAccountOperations for PlatformWalletInfo {
         wallet: &Wallet,
         account_type: AccountType,
     ) -> key_wallet::Result<()> {
-        let before = self.core_wallet.metadata.synced_height;
-        let added = self.core_wallet.add_managed_account(wallet, account_type);
-        self.note_account_add_rewind(before);
-        added
+        self.core_wallet.add_managed_account(wallet, account_type)
     }
 
     fn add_managed_account_from_xpub(
@@ -265,12 +253,8 @@ impl ManagedAccountOperations for PlatformWalletInfo {
         account_type: AccountType,
         account_xpub: ExtendedPubKey,
     ) -> key_wallet::Result<()> {
-        let before = self.core_wallet.metadata.synced_height;
-        let added = self
-            .core_wallet
-            .add_managed_account_from_xpub(account_type, account_xpub);
-        self.note_account_add_rewind(before);
-        added
+        self.core_wallet
+            .add_managed_account_from_xpub(account_type, account_xpub)
     }
 
     #[cfg(feature = "bls")]
@@ -279,12 +263,8 @@ impl ManagedAccountOperations for PlatformWalletInfo {
         wallet: &Wallet,
         account_type: AccountType,
     ) -> key_wallet::Result<()> {
-        let before = self.core_wallet.metadata.synced_height;
-        let added = self
-            .core_wallet
-            .add_managed_bls_account(wallet, account_type);
-        self.note_account_add_rewind(before);
-        added
+        self.core_wallet
+            .add_managed_bls_account(wallet, account_type)
     }
 
     #[cfg(feature = "bls")]
@@ -293,12 +273,8 @@ impl ManagedAccountOperations for PlatformWalletInfo {
         account_type: AccountType,
         bls_public_key: [u8; 48],
     ) -> key_wallet::Result<()> {
-        let before = self.core_wallet.metadata.synced_height;
-        let added = self
-            .core_wallet
-            .add_managed_bls_account_from_public_key(account_type, bls_public_key);
-        self.note_account_add_rewind(before);
-        added
+        self.core_wallet
+            .add_managed_bls_account_from_public_key(account_type, bls_public_key)
     }
 
     #[cfg(feature = "eddsa")]
@@ -307,12 +283,8 @@ impl ManagedAccountOperations for PlatformWalletInfo {
         wallet: &Wallet,
         account_type: AccountType,
     ) -> key_wallet::Result<()> {
-        let before = self.core_wallet.metadata.synced_height;
-        let added = self
-            .core_wallet
-            .add_managed_eddsa_account(wallet, account_type);
-        self.note_account_add_rewind(before);
-        added
+        self.core_wallet
+            .add_managed_eddsa_account(wallet, account_type)
     }
 
     #[cfg(feature = "eddsa")]
@@ -321,31 +293,8 @@ impl ManagedAccountOperations for PlatformWalletInfo {
         account_type: AccountType,
         ed25519_public_key: [u8; 32],
     ) -> key_wallet::Result<()> {
-        let before = self.core_wallet.metadata.synced_height;
-        let added = self
-            .core_wallet
-            .add_managed_eddsa_account_from_public_key(account_type, ed25519_public_key);
-        self.note_account_add_rewind(before);
-        added
-    }
-}
-
-impl PlatformWalletInfo {
-    /// key-wallet's account-add API rewinds the scan cursor to just below
-    /// wallet birth (the new account has no filter coverage). That lowering
-    /// emits nothing and is not persisted here, so treat it like any other
-    /// in-memory rewind: advances queued before it must not be stored after
-    /// it, and the next DashPay backfill record round owes the host the
-    /// lowered cursor — otherwise a record-only round could store coverage
-    /// beside a host cursor that never came down (dashpay/platform#4302
-    /// review).
-    fn note_account_add_rewind(&mut self, before: u32) {
-        let after = self.core_wallet.metadata.synced_height;
-        if after < before {
-            self.rewind_barrier.arm();
-            let owed = &mut self.dashpay_backfill.unpersisted_cursor;
-            *owed = Some(owed.map_or(after, |cursor| cursor.min(after)));
-        }
+        self.core_wallet
+            .add_managed_eddsa_account_from_public_key(account_type, ed25519_public_key)
     }
 }
 
