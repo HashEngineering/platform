@@ -2924,8 +2924,6 @@ class PlatformWalletPersistenceHandler(
         isHidden: Boolean,
         contactAccountLabel: String?,
         acceptedAccounts: IntArray,
-        hasExternalAccountReference: Boolean,
-        externalAccountReference: Int,
     ): Int = guarded {
         stage(walletId) { db ->
             // Owner identity must exist; skip silently otherwise (replayed
@@ -2951,8 +2949,6 @@ class PlatformWalletPersistenceHandler(
                     contactHidden = isHidden,
                     contactAccountLabel = contactAccountLabel,
                     contactAcceptedAccounts = encodeAcceptedAccounts(acceptedAccounts),
-                    externalAccountReference =
-                        if (hasExternalAccountReference) externalAccountReference else null,
                     lastUpdated = now(),
                 ),
             )
@@ -3762,8 +3758,6 @@ class PlatformWalletPersistenceHandler(
                         isHidden = c.contactHidden,
                         contactAccountLabel = c.contactAccountLabel,
                         acceptedAccounts = decodeAcceptedAccounts(c.contactAcceptedAccounts),
-                        hasExternalAccountReference = c.externalAccountReference != null,
-                        externalAccountReference = c.externalAccountReference ?: 0,
                     )
                 }.toTypedArray()
             // Ignored senders (per-sender mute) — restores the Rust
