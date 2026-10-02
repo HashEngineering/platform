@@ -2668,13 +2668,7 @@ fn build_wallet_restore_entry(
         dashpay_backfill_floor,
         dashpay_backfill_rewound_from,
         dashpay_backfill_covered,
-    ) = {
-        let own_identities: Vec<[u8; 32]> = identities
-            .iter()
-            .map(|identity| identity.entry.identity_id)
-            .collect();
-        build_dashpay_backfill_restore(env, holder, &own_identities)?
-    };
+    ) = build_dashpay_backfill_restore(env, holder)?;
 
     let entry = WalletRestoreEntryFFI {
         wallet_id,
@@ -2730,21 +2724,15 @@ fn build_wallet_restore_entry(
     })
 }
 
-/// Bytes per covered entry in the cover-set blob int24–int26 builds wrote,
-/// before coverage was keyed on the account index: owner (32) ‖ contact
-/// (32) ‖ `coveredFrom` (u32, little-endian).
-const DASHPAY_BACKFILL_COVERED_ENTRY_LEN_V1: usize = 32 + 32 + 4;
-
 /// Read the Kotlin `WalletRestoreData.dashPayBackfill*` fields: the presence
-/// flag, the two scalars, and the cover set unpacked from its flat blob into
-/// staged [`DashPayBackfillCoveredContactFFI`] rows (see
-/// [`decode_dashpay_backfill_covered`] for the two layouts it accepts). A
-/// blob it cannot read unambiguously yields `(false, 0, 0, [])` — no record —
-/// and a `warn`, never a partial or guessed cover set.
+/// flag, the two scalars, and the cover set unpacked from its flat
+/// `72·N`-byte blob (see [`DASHPAY_BACKFILL_COVERED_ENTRY_LEN`]) into staged
+/// [`DashPayBackfillCoveredContactFFI`] rows. A blob whose length is not a
+/// whole number of entries yields `(false, 0, 0, [])` — no record — and a
+/// `warn`, never a partial cover set.
 fn build_dashpay_backfill_restore(
     env: &mut JNIEnv,
     holder: &JObject,
-    own_identities: &[[u8; 32]],
 ) -> Result<(bool, u32, u32, Vec<DashPayBackfillCoveredContactFFI>), jni::errors::Error> {
     let present = env.get_field(holder, "hasDashPayBackfill", "Z")?.z()?;
     if !present {
@@ -2755,108 +2743,40 @@ fn build_dashpay_backfill_restore(
         .get_field(holder, "dashPayBackfillRewoundFrom", "I")?
         .i()?;
     let blob = read_bytes_field_vec(env, holder, "dashPayBackfillCovered")?;
-    let covered = (floor >= 0 && rewound_from >= 0)
-        .then(|| decode_dashpay_backfill_covered(&blob, own_identities))
-        .flatten();
-    let Some(covered) = covered else {
+    if floor < 0
+        || rewound_from < 0
+        || !blob
+            .len()
+            .is_multiple_of(DASHPAY_BACKFILL_COVERED_ENTRY_LEN)
+    {
         log::warn!(
-            "load: unreadable DashPay backfill record on the wallet row (floor={floor}, \
+            "load: malformed DashPay backfill record on the wallet row (floor={floor}, \
              rewound_from={rewound_from}, blob_len={}); reading as no record",
             blob.len()
         );
         return Ok((false, 0, 0, Vec::new()));
-    };
-    Ok((true, floor as u32, rewound_from as u32, covered))
-}
-
-/// Decode a stored cover-set blob in either layout, so a device upgraded
-/// from an int24–int26 build keeps the backfill coverage it already earned
-/// instead of re-running the backfill.
-///
-/// - A length that is a whole number of 72-byte entries only: today's layout
-///   ([`DASHPAY_BACKFILL_COVERED_ENTRY_LEN`]).
-/// - A whole number of 68-byte entries only: the earlier layout
-///   ([`DASHPAY_BACKFILL_COVERED_ENTRY_LEN_V1`]), every entry on receival
-///   account index 0 — the only index those builds registered.
-/// - A whole number of both (a multiple of 18 old entries, 1224 bytes each
-///   18): decoded both ways, and the decoding whose every owner is one of
-///   `own_identities` wins. A wrong-layout read lands owner ids on bytes of
-///   other fields, which are not this wallet's identities. If neither or
-///   both pass, the blob is ambiguous and reads as no record — the same
-///   safe fallback as a torn blob, costing one re-run of the backfill.
-/// - Anything else: `None`.
-///
-/// The next record round rewrites the record in today's layout.
-fn decode_dashpay_backfill_covered(
-    blob: &[u8],
-    own_identities: &[[u8; 32]],
-) -> Option<Vec<DashPayBackfillCoveredContactFFI>> {
-    fn current(blob: &[u8]) -> Vec<DashPayBackfillCoveredContactFFI> {
-        let (chunks, _) = blob.as_chunks::<DASHPAY_BACKFILL_COVERED_ENTRY_LEN>();
-        chunks
-            .iter()
-            .map(|chunk| {
-                let mut owner_identity_id = [0u8; 32];
-                let mut contact_identity_id = [0u8; 32];
-                let mut account_index = [0u8; 4];
-                let mut height = [0u8; 4];
-                owner_identity_id.copy_from_slice(&chunk[..32]);
-                contact_identity_id.copy_from_slice(&chunk[32..64]);
-                account_index.copy_from_slice(&chunk[64..68]);
-                height.copy_from_slice(&chunk[68..72]);
-                DashPayBackfillCoveredContactFFI {
-                    owner_identity_id,
-                    contact_identity_id,
-                    account_index: u32::from_le_bytes(account_index),
-                    covered_from: u32::from_le_bytes(height),
-                }
-            })
-            .collect()
     }
-    fn legacy(blob: &[u8]) -> Vec<DashPayBackfillCoveredContactFFI> {
-        let (chunks, _) = blob.as_chunks::<DASHPAY_BACKFILL_COVERED_ENTRY_LEN_V1>();
-        chunks
-            .iter()
-            .map(|chunk| {
-                let mut owner_identity_id = [0u8; 32];
-                let mut contact_identity_id = [0u8; 32];
-                let mut height = [0u8; 4];
-                owner_identity_id.copy_from_slice(&chunk[..32]);
-                contact_identity_id.copy_from_slice(&chunk[32..64]);
-                height.copy_from_slice(&chunk[64..68]);
-                DashPayBackfillCoveredContactFFI {
-                    owner_identity_id,
-                    contact_identity_id,
-                    account_index: 0,
-                    covered_from: u32::from_le_bytes(height),
-                }
-            })
-            .collect()
-    }
-    let owned = |covered: &[DashPayBackfillCoveredContactFFI]| {
-        covered
-            .iter()
-            .all(|entry| own_identities.contains(&entry.owner_identity_id))
-    };
-    match (
-        blob.len()
-            .is_multiple_of(DASHPAY_BACKFILL_COVERED_ENTRY_LEN),
-        blob.len()
-            .is_multiple_of(DASHPAY_BACKFILL_COVERED_ENTRY_LEN_V1),
-    ) {
-        _ if blob.is_empty() => Some(Vec::new()),
-        (true, false) => Some(current(blob)),
-        (false, true) => Some(legacy(blob)),
-        (true, true) => {
-            let (as_current, as_legacy) = (current(blob), legacy(blob));
-            match (owned(&as_current), owned(&as_legacy)) {
-                (true, false) => Some(as_current),
-                (false, true) => Some(as_legacy),
-                _ => None,
+    let (chunks, _) = blob.as_chunks::<DASHPAY_BACKFILL_COVERED_ENTRY_LEN>();
+    let covered = chunks
+        .iter()
+        .map(|chunk| {
+            let mut owner_identity_id = [0u8; 32];
+            let mut contact_identity_id = [0u8; 32];
+            let mut account_index = [0u8; 4];
+            let mut height = [0u8; 4];
+            owner_identity_id.copy_from_slice(&chunk[..32]);
+            contact_identity_id.copy_from_slice(&chunk[32..64]);
+            account_index.copy_from_slice(&chunk[64..68]);
+            height.copy_from_slice(&chunk[68..72]);
+            DashPayBackfillCoveredContactFFI {
+                owner_identity_id,
+                contact_identity_id,
+                account_index: u32::from_le_bytes(account_index),
+                covered_from: u32::from_le_bytes(height),
             }
-        }
-        (false, false) => None,
-    }
+        })
+        .collect();
+    Ok((true, floor as u32, rewound_from as u32, covered))
 }
 
 /// Read the Kotlin `WalletRestoreData.utxos` array into staged
@@ -4912,104 +4832,6 @@ pub extern "system" fn Java_org_dashfoundation_dashsdk_ffi_WalletManagerNative_n
 
 #[cfg(test)]
 mod tests {
-
-    fn covered_entry(owner: u8, contact: u8, account_index: Option<u32>, from: u32) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&[owner; 32]);
-        bytes.extend_from_slice(&[contact; 32]);
-        if let Some(index) = account_index {
-            bytes.extend_from_slice(&index.to_le_bytes());
-        }
-        bytes.extend_from_slice(&from.to_le_bytes());
-        bytes
-    }
-
-    /// Today's 72-byte layout reads as-is, account index included.
-    #[test]
-    fn a_72_byte_cover_set_decodes_as_today() {
-        let mut blob = covered_entry(0xAA, 0xBB, Some(0), 100);
-        blob.extend(covered_entry(0xAA, 0xCC, Some(1), 200));
-        let covered = super::decode_dashpay_backfill_covered(&blob, &[]).expect("72-byte layout");
-        assert_eq!(covered.len(), 2);
-        assert_eq!(covered[1].contact_identity_id, [0xCC; 32]);
-        assert_eq!(covered[1].account_index, 1);
-        assert_eq!(covered[1].covered_from, 200);
-    }
-
-    /// A cover set an int24–int26 build stored (68 bytes per entry, no
-    /// account index) still reads, on receival account index 0, so an
-    /// upgraded device does not re-run the backfill it already completed.
-    #[test]
-    fn a_68_byte_cover_set_from_int24_to_int26_decodes_on_account_index_0() {
-        let mut blob = Vec::new();
-        for contact in 1..=8u8 {
-            blob.extend(covered_entry(
-                0xAA,
-                contact,
-                None,
-                1_226_329 + u32::from(contact),
-            ));
-        }
-        assert_eq!(blob.len(), 8 * 68);
-        let covered = super::decode_dashpay_backfill_covered(&blob, &[]).expect("68-byte layout");
-        assert_eq!(covered.len(), 8);
-        assert!(covered.iter().all(|entry| entry.account_index == 0));
-        assert!(covered
-            .iter()
-            .all(|entry| entry.owner_identity_id == [0xAA; 32]));
-        assert_eq!(covered[7].contact_identity_id, [8; 32]);
-        assert_eq!(covered[7].covered_from, 1_226_337);
-        assert!(super::decode_dashpay_backfill_covered(&blob[..blob.len() - 1], &[]).is_none());
-    }
-
-    /// 18 old entries are 1224 bytes, also a whole number of 17 new ones.
-    /// Each layout is tried and the one whose every owner is this wallet's
-    /// own identity wins; when ownership cannot tell them apart, it reads as
-    /// no record.
-    #[test]
-    fn an_ambiguous_1224_byte_cover_set_is_decided_by_the_wallets_own_identities() {
-        let own = [[0xAA; 32]];
-        let mut legacy = Vec::new();
-        for contact in 1..=18u8 {
-            legacy.extend(covered_entry(
-                0xAA,
-                contact,
-                None,
-                1_000 + u32::from(contact),
-            ));
-        }
-        assert_eq!(legacy.len(), 1224);
-        let covered = super::decode_dashpay_backfill_covered(&legacy, &own).expect("legacy wins");
-        assert_eq!(covered.len(), 18);
-        assert!(covered.iter().all(|entry| entry.account_index == 0));
-        assert_eq!(covered[17].covered_from, 1_018);
-
-        let mut current = Vec::new();
-        for contact in 1..=17u8 {
-            current.extend(covered_entry(
-                0xAA,
-                contact,
-                Some(0),
-                2_000 + u32::from(contact),
-            ));
-        }
-        assert_eq!(current.len(), 1224);
-        let covered = super::decode_dashpay_backfill_covered(&current, &own).expect("current wins");
-        assert_eq!(covered.len(), 17);
-        assert_eq!(covered[16].covered_from, 2_017);
-
-        assert!(
-            super::decode_dashpay_backfill_covered(&legacy, &[]).is_none(),
-            "neither decoding owned by the wallet: no record"
-        );
-        // Every byte the owner's: both layouts read owners that are the
-        // wallet's own.
-        let both = vec![0xAA; 1224];
-        assert!(
-            super::decode_dashpay_backfill_covered(&both, &own).is_none(),
-            "both decodings owned by the wallet: ambiguous, no record"
-        );
-    }
     use dashcore::blockdata::transaction::special_transaction::provider_update_service::ProviderUpdateServicePayload;
     use dashcore::consensus::{deserialize, serialize};
     use dashcore::hashes::Hash;
