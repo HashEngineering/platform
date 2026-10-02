@@ -4382,6 +4382,8 @@ mod contact_watch_only_projection_tests {
         assert!(ctx.check_transaction(&spend, block(2)).await.is_relevant);
 
         let info = PlatformWalletInfo {
+            dashpay_backfill: Default::default(),
+            rewind_barrier: Default::default(),
             core_wallet: ctx.managed_wallet,
             generation: Arc::new(WalletGeneration::new()),
             identity_manager: IdentityManager::new(),

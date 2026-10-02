@@ -5590,7 +5590,6 @@ mod one_way_contact_tests {
                 value: dpp::platform_value::platform_value!(identity_id),
             }],
             time_range_clauses: vec![],
-            integer_range_clauses: vec![],
             sub_queries: vec![],
             group_by: vec![],
             having: vec![],
