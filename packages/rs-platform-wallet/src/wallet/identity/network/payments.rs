@@ -5390,6 +5390,48 @@ mod tests {
         assert_eq!(record.covered_from(&owner, &contact, 0), Some(1_200));
     }
 
+    /// On this line receival registration also pays owed cursors (it stores
+    /// its own record round), so it settles a debt the host has already
+    /// climbed past the same way the reconcile does.
+    #[tokio::test]
+    async fn receival_registration_drops_an_owed_cursor_the_host_has_climbed_past() {
+        use crate::wallet::identity::{ContactRequest, EstablishedContact};
+
+        let (manager, persister, wallet_id) = make_wallet().await;
+        let owner = Identifier::from([0xAA; 32]);
+        let contact = Identifier::from([0xBB; 32]);
+        set_synced_height(&manager, wallet_id, 1_000).await;
+        reset_then_climb(&manager, wallet_id, 100, 1_000, 1).await;
+        let wallet = manager.get_wallet(&wallet_id).await.expect("wallet");
+        let iw = wallet.identity();
+        {
+            let p = WalletPersister::new(wallet_id, Arc::clone(&persister) as _);
+            let mut wm = iw.wallet_manager.write().await;
+            let info = wm.get_wallet_info_mut(&wallet_id).expect("info");
+            info.identity_manager
+                .add_identity(bare_identity(owner.to_buffer()), 0, wallet_id, &p)
+                .expect("add owner");
+            let outgoing = ContactRequest::new(owner, contact, 0, 0, 0, vec![0u8; 96], 1_200, 0);
+            let incoming = ContactRequest::new(contact, owner, 0, 0, 0, vec![0u8; 96], 1_200, 0);
+            info.identity_manager
+                .managed_identity_mut(&owner)
+                .expect("managed")
+                .apply_established_contact(EstablishedContact::new(contact, outgoing, incoming));
+        }
+        persister.stores.lock().unwrap().clear();
+        iw.dashpay()
+            .register_contact_account(&owner, &contact, 0, test_receiving_xpub(&owner, &contact))
+            .await
+            .expect("register");
+        let stores = persister.stores.lock().unwrap();
+        let round = last_stored_record(&stores).expect("registration records the contact");
+        assert!(
+            round.core.is_none(),
+            "no stale reset cursor rides the registration round: {:?}",
+            round.core.as_ref().and_then(|core| core.synced_height)
+        );
+    }
+
     /// The other side: an advance the host accepted from BEFORE the reset
     /// says nothing about the range the reset re-opened, so the debt stands
     /// and rides the next record round.
@@ -5410,8 +5452,8 @@ mod tests {
             .expect("seeded")
             .height = 1_000;
 
-        establish_receival_contact(&manager, &persister, wallet_id, owner, contact, 200, 200).await;
         persister.stores.lock().unwrap().clear();
+        establish_receival_contact(&manager, &persister, wallet_id, owner, contact, 200, 200).await;
         let wallet = manager.get_wallet(&wallet_id).await.expect("wallet");
         wallet
             .identity()
@@ -5420,10 +5462,8 @@ mod tests {
             .await
             .expect("reconcile");
         let stores = persister.stores.lock().unwrap();
-        let round = last_stored_record(&stores).expect("the record is stored");
-        let core = round.core.as_ref().expect("the owed reset rides the round");
-        assert_eq!(core.synced_height, Some(100));
-        assert!(core.synced_height_is_rewind);
+        // On this line the registration's own record round pays the debt.
+        assert_first_record_round_pays(&stores, 100);
     }
 
     async fn synced_height_of(
