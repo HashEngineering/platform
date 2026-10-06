@@ -241,8 +241,6 @@ impl<P: PlatformWalletPersistence + 'static> PlatformWalletManager<P> {
                 &platform_info,
             );
 
-
-
             // The cursor the host just handed back is the durable one; it
             // seeds the shared record of it as the wallet is published below.
             let loaded_cursor = platform_info.core_wallet.metadata.synced_height;
