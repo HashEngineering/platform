@@ -2650,7 +2650,7 @@ mod coinjoin_ownership_tests {
 
     use dashcore::hashes::Hash;
     use dashcore::{BlockHash, OutPoint, ScriptBuf, TxIn, TxOut, Witness};
-    use key_wallet::mnemonic::Mnemonic;
+    use key_wallet::mnemonic::{Language, Mnemonic};
     use key_wallet::transaction_checking::{
         BlockInfo, TransactionContext, WalletTransactionChecker,
     };
@@ -2681,7 +2681,7 @@ mod coinjoin_ownership_tests {
     }
 
     fn test_seed() -> [u8; 64] {
-        Mnemonic::from_phrase(TEST_MNEMONIC)
+        Mnemonic::from_phrase(TEST_MNEMONIC, Language::English)
             .expect("valid test mnemonic")
             .to_seed("")
     }
