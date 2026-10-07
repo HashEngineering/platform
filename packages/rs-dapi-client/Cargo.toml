@@ -69,7 +69,11 @@ chrono = { version = "0.4.38", features = ["serde"] }
 ferment-macro = { git = "https://github.com/dashpay/ferment", tag = "v0.2.3", package = "ferment-macro" }
 
 [dev-dependencies]
-tokio = { version = "1.40", features = ["macros"] }
+tokio = { version = "1.40", features = ["macros", "rt", "test-util", "io-util"] }
+# In-memory HTTP/2 server and connector for the stalled-response-body tests.
+h2 = "0.4"
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = { version = "0.5", features = ["util"] }
 
 [package.metadata.cargo-machete]
 
