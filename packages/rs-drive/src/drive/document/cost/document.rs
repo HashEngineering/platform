@@ -12,7 +12,7 @@ use dpp::data_contract::document_type::accessors::DocumentTypeV0Getters;
 use dpp::data_contract::document_type::methods::DocumentTypeBasicMethods;
 use dpp::data_contract::document_type::{DocumentProperty, DocumentPropertyType, DocumentTypeRef};
 use dpp::data_contract::DataContract;
-use dpp::document::{Document, DocumentV0};
+use dpp::document::{v0::DocumentV0, Document};
 use dpp::platform_value::btreemap_extensions::BTreeValueMapInsertionPathHelper;
 use dpp::platform_value::{Identifier, Value};
 use dpp::version::PlatformVersion;
