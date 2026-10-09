@@ -1657,6 +1657,12 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
                 self.build_contact_accounts(&identity_id, candidate).await;
             }
 
+            // (3a) Once per launch, give each contact whose channel is marked
+            //      broken one more external-account build. Heals channels a
+            //      dashj-encrypted request broke before the dashj-legacy ECDH
+            //      key fallback existed.
+            self.enqueue_broken_channel_rechecks(&identity_id).await;
+
             // (3b) Our receiving account for every contact holding a request
             //      we sent, reciprocated or not: our xpub is in that request,
             //      so they can already pay us on it. Gated on our side only.
@@ -1871,8 +1877,10 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
 
         let mut out = Vec::new();
         for (contact_id, contact) in managed.dashpay().established_contacts() {
-            // Never retry a permanently-broken channel — wait for a
+            // Never retry a permanently-broken channel here — wait for a
             // superseding request (which clears the flag on re-establish).
+            // The one exception is the once-per-launch re-check in
+            // `enqueue_broken_channel_rechecks`.
             if contact.payment_channel_broken {
                 continue;
             }
@@ -1900,6 +1908,141 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
             });
         }
         out
+    }
+
+    /// Collect the established contacts (for `identity_id`) whose payment
+    /// channel is marked broken, that have no `DashpayExternalAccount`, and
+    /// that have not been re-checked yet this process — the candidates for
+    /// [`Self::enqueue_broken_channel_rechecks`]. Runs under the caller's
+    /// guard; performs no awaits and no lock re-acquisition.
+    pub(super) fn collect_broken_channel_recheck_candidates(
+        info: &crate::wallet::platform_wallet::PlatformWalletInfo,
+        identity_id: &Identifier,
+    ) -> Vec<AccountBuildCandidate> {
+        use key_wallet::account::account_collection::DashpayAccountKey;
+
+        let Some(managed) = info.identity_manager.managed_identity(identity_id) else {
+            return Vec::new();
+        };
+        if managed.identity_index.is_none() {
+            return Vec::new();
+        }
+        let dashpay = managed.dashpay();
+        dashpay
+            .established_contacts()
+            .iter()
+            .filter(|(contact_id, contact)| {
+                if !contact.payment_channel_broken
+                    || dashpay.broken_channel_rechecked.contains(*contact_id)
+                {
+                    return false;
+                }
+                let key = DashpayAccountKey {
+                    index: 0,
+                    user_identity_id: identity_id.to_buffer(),
+                    friend_identity_id: contact_id.to_buffer(),
+                };
+                !info
+                    .core_wallet
+                    .accounts
+                    .dashpay_external_accounts
+                    .contains_key(&key)
+            })
+            .map(|(contact_id, contact)| AccountBuildCandidate {
+                contact_id: *contact_id,
+                encrypted_public_key: contact.incoming_request.encrypted_public_key.clone(),
+                our_decryption_key_index: contact.incoming_request.recipient_key_index,
+                contact_encryption_key_index: contact.incoming_request.sender_key_index,
+            })
+            .collect()
+    }
+
+    /// Queue one `RegisterExternal` re-check for each contact of `identity_id`
+    /// whose payment channel is marked broken — once per contact per launch.
+    ///
+    /// Why: until the dashj-legacy ECDH key fallback, a request dashj
+    /// encrypted for an affected pair (~1 in 512, see
+    /// `platform_encryption::dashj_legacy_shared_key`) failed to decrypt and
+    /// the drain marked the channel broken. The broken flag has no cause
+    /// attached, and [`Self::collect_account_build_candidates`] skips broken
+    /// contacts for good, so those channels would never be tried again.
+    ///
+    /// How it heals: the drain runs the queued entry like any other build. If
+    /// the xpub now decrypts (with either key), the account is built and
+    /// `note_external_account_registered` clears the flag and persists it, so
+    /// the contact is no longer a candidate on any later launch. If it still
+    /// fails, the drain clears the entry and the flag stays set (marking it
+    /// broken again is a no-op).
+    ///
+    /// Bound: the contact is added to the in-memory
+    /// [`DashPayState::broken_channel_rechecked`] set when it is queued, so
+    /// each broken contact costs at most one contact fetch + one ECDH per
+    /// launch. A persisted "re-checked" marker would make it once ever, but
+    /// it would need a new column in every host's contact table; the per-launch
+    /// cost only applies to contacts that are still broken, which are few.
+    ///
+    /// [`DashPayState::broken_channel_rechecked`]: crate::wallet::identity::DashPayState::broken_channel_rechecked
+    pub(super) async fn enqueue_broken_channel_rechecks(&self, identity_id: &Identifier) {
+        use crate::changeset::{
+            upsert_pending_contact_crypto, PendingContactCrypto, PendingContactCryptoOp,
+            PlatformWalletChangeSet,
+        };
+
+        let mut wm = self.wallet_manager.write().await;
+        let Some(info) = wm.get_wallet_info_mut(&self.wallet_id) else {
+            return;
+        };
+        let candidates = Self::collect_broken_channel_recheck_candidates(info, identity_id);
+        if candidates.is_empty() {
+            return;
+        }
+        let Some(managed) = info.identity_manager.managed_identity_mut(identity_id) else {
+            return;
+        };
+
+        let enqueued_at_ms = crate::util::now_ms();
+        let entries: Vec<PendingContactCrypto> = candidates
+            .into_iter()
+            .map(|candidate| PendingContactCrypto {
+                owner_identity_id: *identity_id,
+                contact_id: candidate.contact_id,
+                op: PendingContactCryptoOp::RegisterExternal {
+                    encrypted_public_key: candidate.encrypted_public_key,
+                    our_decryption_key_index: candidate.our_decryption_key_index,
+                    contact_encryption_key_index: candidate.contact_encryption_key_index,
+                },
+                enqueued_at_ms,
+            })
+            .collect();
+        for entry in &entries {
+            managed
+                .dashpay_broken_channel_rechecked_mut()
+                .insert(entry.contact_id);
+            upsert_pending_contact_crypto(
+                managed.dashpay_pending_contact_crypto_mut(),
+                entry.clone(),
+            );
+        }
+
+        tracing::info!(
+            identity = %identity_id,
+            contacts = entries.len(),
+            "Re-checking contacts whose payment channel is marked broken (once this launch; \
+             heals channels broken by the dashj-legacy ECDH key)"
+        );
+
+        // Best-effort, as in `enqueue_deferred_contact_crypto`; the in-memory
+        // queue above already covers this session.
+        let changeset = PlatformWalletChangeSet {
+            pending_contact_crypto_added: entries,
+            ..Default::default()
+        };
+        if let Err(e) = self.persister.store(changeset) {
+            tracing::warn!(
+                identity = %identity_id, error = %e,
+                "failed to persist broken-channel re-check enqueue"
+            );
+        }
     }
 
     /// Collect every contact (for `identity_id`) that holds a contact request
@@ -2425,14 +2568,28 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
                 } => {
                     // Our HD index, for the ECDH derivation path. If the owner
                     // isn't wallet-owned, this op can't be ours — leave queued.
-                    let identity_index = {
+                    //
+                    // `already_broken`: the contact's channel was marked broken
+                    // before this attempt, so this entry is the once-per-launch
+                    // re-check from `enqueue_broken_channel_rechecks`. For it,
+                    // the "leave queued" policy outcomes below clear the entry
+                    // instead: the channel stays broken as it was, and the
+                    // entry does not sit in the queue (and the "waiting to
+                    // finish setup" count) for the rest of the session.
+                    let (identity_index, already_broken) = {
                         let wm = self.wallet_manager.read().await;
-                        wm.get_wallet_info(&self.wallet_id)
-                            .and_then(|info| {
-                                info.identity_manager
-                                    .managed_identity(&entry.owner_identity_id)
-                            })
-                            .and_then(|m| m.identity_index)
+                        let managed = wm.get_wallet_info(&self.wallet_id).and_then(|info| {
+                            info.identity_manager
+                                .managed_identity(&entry.owner_identity_id)
+                        });
+                        (
+                            managed.and_then(|m| m.identity_index),
+                            managed
+                                .and_then(|m| {
+                                    m.dashpay().established_contacts().get(&entry.contact_id)
+                                })
+                                .is_some_and(|c| c.payment_channel_broken),
+                        )
                     };
                     let Some(identity_index) = identity_index else {
                         tracing::warn!(
@@ -2520,6 +2677,7 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
                                 &mut policy_blocked,
                             )
                             .await
+                            || already_broken
                         {
                             cleared.push(entry.key());
                         }
@@ -2581,6 +2739,7 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
                         if self
                             .apply_drain_validation_failure(entry, validation, &mut policy_blocked)
                             .await
+                            || already_broken
                         {
                             cleared.push(entry.key());
                         }
@@ -2733,6 +2892,18 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
                         // a later convention fix able to recover it, and costs
                         // only a retry.
                         Err(e) if e.is_permanent() && accepted_by_legacy_widening => {
+                            if already_broken {
+                                // Re-check of an already-broken channel: done
+                                // for this launch; the flag is left as it was.
+                                tracing::warn!(
+                                    owner = %entry.owner_identity_id, contact = %entry.contact_id,
+                                    error = %e.into_inner(),
+                                    "drain: re-check of a broken legacy-cohort channel failed; \
+                                     it stays broken"
+                                );
+                                cleared.push(entry.key());
+                                continue;
+                            }
                             tracing::warn!(
                                 owner = %entry.owner_identity_id, contact = %entry.contact_id,
                                 error = %e.into_inner(),
@@ -3475,16 +3646,32 @@ impl<B: TransactionBroadcaster + ?Sized> DashPayView<'_, B> {
             None => return,
         };
 
-        let decrypted = match platform_encryption::decrypt_account_label(shared_key, &ciphertext) {
-            Ok(s) => {
-                let trimmed = s.trim();
-                if trimmed.is_empty() || trimmed.chars().any(char::is_control) {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
+        // Standard ECDH key first, then the dashj-legacy key (see
+        // `platform_encryption::dashj_legacy_shared_key`). A plaintext that is
+        // not a printable label counts as a failure so the second key gets its
+        // turn — a wrong key clears PKCS7 ~1 time in 256.
+        let open = |key: &[u8; 32]| -> Result<String, Option<platform_encryption::CryptoError>> {
+            let s = platform_encryption::decrypt_account_label(key, &ciphertext).map_err(Some)?;
+            let trimmed = s.trim();
+            if trimmed.is_empty() || trimmed.chars().any(char::is_control) {
+                Err(None)
+            } else {
+                Ok(trimmed.to_string())
             }
-            Err(e) => {
+        };
+        let decrypted = match platform_encryption::decrypt_with_dashj_fallback(shared_key, open) {
+            Ok((label, variant)) => {
+                if variant == platform_encryption::SharedKeyVariant::DashjLegacy {
+                    tracing::info!(
+                        owner = %identity_id, contact = %contact_id,
+                        "Contact account label decrypted with the dashj-legacy ECDH key"
+                    );
+                }
+                Some(label)
+            }
+            // Decrypted, but not printable text: store nothing rather than garbage.
+            Err(None) => None,
+            Err(Some(e)) => {
                 tracing::debug!(
                     owner = %identity_id, contact = %contact_id, error = %e,
                     "Could not decrypt the contact's account label; leaving it unset"

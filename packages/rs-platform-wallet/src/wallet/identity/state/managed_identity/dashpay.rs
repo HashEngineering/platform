@@ -149,6 +149,23 @@ pub struct DashPayState {
     /// the height it was recorded at.
     pub rescan_triggered: BTreeSet<Identifier>,
 
+    /// Established contacts whose `payment_channel_broken` flag has already
+    /// been re-checked this process lifetime.
+    ///
+    /// Before the dashj-legacy ECDH key fallback existed, a request dashj
+    /// encrypted for an affected pair (~1 in 512) failed to decrypt and the
+    /// channel was marked broken; the account-build sweep then skips broken
+    /// contacts for good. The sweep now queues one external-account rebuild per
+    /// broken contact per launch (`enqueue_broken_channel_rechecks`). A rebuild
+    /// that succeeds clears the flag durably (`note_external_account_registered`),
+    /// so a healed contact never comes back here; one that still fails leaves
+    /// the flag set and is not tried again until the next launch.
+    ///
+    /// In-memory only (never persisted), like `auto_accept_verify_failed`: the
+    /// broken flag carries no cause and hosts have no column for a "re-checked"
+    /// marker, so the bound is one attempt per broken contact per launch.
+    pub broken_channel_rechecked: BTreeSet<Identifier>,
+
     /// DashPay contact-crypto ops the unattended background sweep enqueued for
     /// THIS identity but could not perform because key material was unavailable
     /// (watch-only / signer locked). Drained when a signer is available

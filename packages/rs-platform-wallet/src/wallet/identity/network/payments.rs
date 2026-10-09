@@ -8187,6 +8187,258 @@ mod tests {
         );
     }
 
+    /// A shared key dashj gets wrong (`ff` then a byte >= 0x80), and the
+    /// altered key dashj encrypts with for it.
+    fn dashj_affected_shared_key() -> ([u8; 32], [u8; 32]) {
+        let mut standard = [0x55u8; 32];
+        standard[0] = 0xFF;
+        standard[1] = 0x80;
+        let legacy = platform_encryption::dashj_legacy_shared_key(&standard).expect("affected key");
+        (standard, legacy)
+    }
+
+    /// A valid 69-byte compact xpub for `(owner, contact)` from the test seed.
+    fn test_compact_xpub(owner: &Identifier, contact: &Identifier) -> [u8; 69] {
+        let seed = Mnemonic::from_phrase(TEST_MNEMONIC)
+            .expect("mnemonic")
+            .to_seed("");
+        let w = key_wallet::wallet::Wallet::from_seed_bytes(
+            seed,
+            Network::Testnet,
+            WalletAccountCreationOptions::None,
+        )
+        .expect("seed wallet");
+        crate::wallet::identity::crypto::dip14::derive_contact_xpub(
+            &w,
+            Network::Testnet,
+            0,
+            owner,
+            contact,
+        )
+        .expect("derive a valid compact xpub")
+        .compact
+        .to_bytes()
+    }
+
+    /// A contact xpub dashj encrypted with its altered ECDH key (the ~1/512
+    /// case) is recovered by the dashj-legacy fallback instead of failing as
+    /// "Failed to decrypt contact xpub", and the label rides the same fallback.
+    #[tokio::test]
+    async fn dashj_legacy_key_opens_contact_xpub_and_label() {
+        let (standard, legacy) = dashj_affected_shared_key();
+        let label_ct = platform_encryption::encrypt_account_label(&legacy, &[0x22u8; 16], "Joel");
+        let (manager, wallet_id, owner, contact) =
+            wallet_with_labeled_contact(Some(label_ct), None).await;
+        let wallet = manager.get_wallet(&wallet_id).await.expect("wallet");
+        let dashpay = wallet.identity().dashpay();
+
+        let xpub_ct = platform_encryption::encrypt_extended_public_key(
+            &legacy,
+            &[0x11u8; 16],
+            &test_compact_xpub(&owner, &contact),
+        );
+        let registration = dashpay
+            .register_external_contact_account(
+                &owner,
+                &bare_identity([0x22; 32]),
+                &xpub_ct,
+                zeroize::Zeroizing::new(standard),
+            )
+            .await
+            .expect("the dashj-legacy key must open the xpub");
+        assert_eq!(
+            registration,
+            crate::wallet::identity::network::contacts::ExternalAccountRegistration::Built
+        );
+
+        dashpay
+            .store_contact_account_label(&owner, &contact, &standard)
+            .await;
+        assert_eq!(
+            stored_label(&manager, &wallet_id, &owner, &contact).await,
+            Some("Joel".to_string()),
+            "the label must open with the dashj-legacy key too"
+        );
+    }
+
+    /// When neither key opens the xpub, it is still a permanent failure (so
+    /// the drain marks the channel broken only once BOTH keys failed).
+    #[tokio::test]
+    async fn contact_xpub_wrong_for_both_keys_is_permanent() {
+        let (standard, _legacy) = dashj_affected_shared_key();
+        let (manager, wallet_id, owner, contact) = wallet_with_labeled_contact(None, None).await;
+        let wallet = manager.get_wallet(&wallet_id).await.expect("wallet");
+
+        let xpub_ct = platform_encryption::encrypt_extended_public_key(
+            &[0x99u8; 32],
+            &[0x11u8; 16],
+            &test_compact_xpub(&owner, &contact),
+        );
+        let err = wallet
+            .identity()
+            .dashpay()
+            .register_external_contact_account(
+                &owner,
+                &bare_identity([0x22; 32]),
+                &xpub_ct,
+                zeroize::Zeroizing::new(standard),
+            )
+            .await
+            .expect_err("no key opens it");
+        assert!(err.is_permanent());
+    }
+
+    /// The queued `RegisterExternal` entries for `contact`, its broken flag,
+    /// and how many broken-channel re-check candidates `owner` has now.
+    async fn recheck_state(
+        manager: &PlatformWalletManager<RecordingPersister>,
+        wallet_id: &WalletId,
+        owner: &Identifier,
+        contact: &Identifier,
+    ) -> (Vec<crate::changeset::PendingContactCrypto>, bool, usize) {
+        use crate::changeset::PendingContactCryptoOp;
+        let wallet = manager.get_wallet(wallet_id).await.expect("wallet");
+        let iw = wallet.identity();
+        let wm = iw.wallet_manager.read().await;
+        let info = wm.get_wallet_info(wallet_id).expect("info");
+        let managed = info.identity_manager.managed_identity(owner).expect("m");
+        let queued: Vec<_> = managed
+            .dashpay()
+            .pending_contact_crypto
+            .iter()
+            .filter(|e| {
+                e.contact_id == *contact
+                    && matches!(e.op, PendingContactCryptoOp::RegisterExternal { .. })
+            })
+            .cloned()
+            .collect();
+        let broken = managed.dashpay().established_contacts()[contact].payment_channel_broken;
+        let candidates = crate::wallet::identity::DashPayView::<
+            crate::broadcaster::SpvBroadcaster,
+        >::collect_broken_channel_recheck_candidates(info, owner)
+        .len();
+        (queued, broken, candidates)
+    }
+
+    /// The heal for channels broken before the fallback existed: a broken
+    /// contact is queued for one more external build per launch, the build now
+    /// succeeds with the dashj-legacy key, and the broken flag is cleared.
+    #[tokio::test]
+    async fn broken_channel_is_rechecked_once_per_launch_and_heals() {
+        use crate::changeset::PendingContactCryptoOp;
+
+        let (standard, legacy) = dashj_affected_shared_key();
+        let (manager, wallet_id, owner, contact) = wallet_with_labeled_contact(None, None).await;
+        let wallet = manager.get_wallet(&wallet_id).await.expect("wallet");
+        let iw = wallet.identity();
+        let xpub_ct = platform_encryption::encrypt_extended_public_key(
+            &legacy,
+            &[0x11u8; 16],
+            &test_compact_xpub(&owner, &contact),
+        );
+
+        // State a pre-fix build left behind: the dashj-encrypted request is
+        // established and the channel is marked broken.
+        {
+            let mut wm = iw.wallet_manager.write().await;
+            let info = wm.get_wallet_info_mut(&wallet_id).expect("info");
+            let c = info
+                .identity_manager
+                .managed_identity_mut(&owner)
+                .expect("managed")
+                .established_contact_mut(&contact)
+                .expect("contact");
+            c.incoming_request.encrypted_public_key = xpub_ct.clone();
+            c.payment_channel_broken = true;
+        }
+        // The normal sweep never picks a broken contact.
+        {
+            let wm = iw.wallet_manager.read().await;
+            let info = wm.get_wallet_info(&wallet_id).expect("info");
+            assert!(
+                crate::wallet::identity::DashPayView::<crate::broadcaster::SpvBroadcaster>::collect_account_build_candidates(info, &owner)
+                    .is_empty()
+            );
+        }
+
+        // First pass this launch queues exactly one re-check.
+        iw.dashpay().enqueue_broken_channel_rechecks(&owner).await;
+        let (queued, broken, candidates) =
+            recheck_state(&manager, &wallet_id, &owner, &contact).await;
+        assert_eq!(queued.len(), 1, "one RegisterExternal re-check is queued");
+        assert!(broken);
+        assert_eq!(
+            candidates, 0,
+            "and the contact is not picked again this launch"
+        );
+        match &queued[0].op {
+            PendingContactCryptoOp::RegisterExternal {
+                encrypted_public_key,
+                ..
+            } => assert_eq!(encrypted_public_key, &xpub_ct[..]),
+            other => panic!("unexpected op {other:?}"),
+        }
+
+        // Later passes this launch do not re-queue it once the drain clears it.
+        {
+            let mut wm = iw.wallet_manager.write().await;
+            let info = wm.get_wallet_info_mut(&wallet_id).expect("info");
+            info.identity_manager
+                .managed_identity_mut(&owner)
+                .expect("m")
+                .dashpay_pending_contact_crypto_mut()
+                .clear();
+        }
+        iw.dashpay().enqueue_broken_channel_rechecks(&owner).await;
+        assert!(
+            recheck_state(&manager, &wallet_id, &owner, &contact)
+                .await
+                .0
+                .is_empty(),
+            "once per launch"
+        );
+
+        // What the drain does with the entry: build, then stamp — which
+        // clears the broken flag.
+        let registration = iw
+            .dashpay()
+            .register_external_contact_account(
+                &owner,
+                &bare_identity([0x22; 32]),
+                &xpub_ct,
+                zeroize::Zeroizing::new(standard),
+            )
+            .await
+            .expect("heals with the dashj-legacy key");
+        assert_eq!(
+            registration,
+            crate::wallet::identity::network::contacts::ExternalAccountRegistration::Built
+        );
+        iw.dashpay()
+            .note_external_account_registered(&owner, &contact, &xpub_ct)
+            .await;
+        let (_, broken, _) = recheck_state(&manager, &wallet_id, &owner, &contact).await;
+        assert!(!broken, "a successful re-check clears the broken flag");
+
+        // A fresh launch (empty in-memory set) has nothing to re-check.
+        {
+            let mut wm = iw.wallet_manager.write().await;
+            let info = wm.get_wallet_info_mut(&wallet_id).expect("info");
+            info.identity_manager
+                .managed_identity_mut(&owner)
+                .expect("m")
+                .dashpay_broken_channel_rechecked_mut()
+                .clear();
+        }
+        assert_eq!(
+            recheck_state(&manager, &wallet_id, &owner, &contact)
+                .await
+                .2,
+            0,
+            "healed contacts are never re-checked"
+        );
+    }
+
     /// The label is direction-specific: the surfaced value comes from the
     /// contact's INCOMING request, never our OUTGOING one (which carries a
     /// label *we* chose). Pins that an outgoing label can't win.
