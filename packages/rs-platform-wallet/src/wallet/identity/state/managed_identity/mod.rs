@@ -164,6 +164,16 @@ impl ManagedIdentity {
         &mut self.dashpay.rescan_triggered
     }
 
+    /// Mutable access to the per-session broken-channel re-check set.
+    ///
+    /// In-memory only — never persisted; see
+    /// [`DashPayState::broken_channel_rechecked`].
+    pub fn dashpay_broken_channel_rechecked_mut(
+        &mut self,
+    ) -> &mut std::collections::BTreeSet<dpp::prelude::Identifier> {
+        &mut self.dashpay.broken_channel_rechecked
+    }
+
     /// Mutable access to the deferred contact-crypto queue.
     ///
     /// The queue's dedup invariant (≤ 1 entry per
