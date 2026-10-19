@@ -357,6 +357,7 @@ async fn local_balance_restores_funds_and_durable_pending_reservations_offline()
                     attempts: 0,
                     identity_nonce_finalized: false,
                     identity_user_abandoned: false,
+                    identity_index: None,
                 },
             )
             .unwrap();
@@ -422,7 +423,10 @@ async fn local_balance_restores_funds_and_durable_pending_reservations_offline()
         "another wallet is not restored by this bind"
     );
     drop(store);
-    coordinator.unregister_wallet(wallet).await;
+    coordinator
+        .unregister_wallet(wallet)
+        .await
+        .expect("unregister wallet");
     assert_eq!(
         coordinator.local_balance_snapshot(wallet).await.unwrap(),
         ShieldedLocalBalanceState::Unbound

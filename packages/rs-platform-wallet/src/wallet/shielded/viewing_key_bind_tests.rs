@@ -346,6 +346,7 @@ async fn bind_persists_viewing_keys_and_restart_rebinds_seedlessly() {
                 attempts: 0,
                 identity_nonce_finalized: false,
                 identity_user_abandoned: false,
+                identity_index: None,
             },
         )
         .expect("persist pending reservation");
@@ -473,9 +474,14 @@ async fn bind_after_wallet_removal_is_refused() {
         .expect("first bind succeeds");
     assert_eq!(coordinator.registered_subwallets().await.len(), 1);
 
-    // What `PlatformWalletManager::remove_wallet` does to this handle.
-    wallet.mark_shielded_detached();
-    coordinator.unregister_wallet(wallet.wallet_id()).await;
+    // What `PlatformWalletManager::remove_wallet` does to this handle: the
+    // detach mark runs inside the coordinator's critical section, after
+    // destructive admission is secured and before any registry is cleared
+    // (#4313 review finding coordinator.rs:805).
+    coordinator
+        .unregister_wallet_with(wallet.wallet_id(), || wallet.mark_shielded_detached())
+        .await
+        .expect("no claim holds admission in this test");
     let persisted_before = persister.stored_count();
 
     let err = wallet
@@ -898,6 +904,7 @@ async fn should_keep_wallet_and_coordinator_keys_when_guarded_registration_is_re
                 attempts: 0,
                 identity_nonce_finalized: false,
                 identity_user_abandoned: false,
+                identity_index: None,
             },
         )
         .unwrap();
