@@ -9605,6 +9605,19 @@ mod tests {
             &[0x11u8; 16],
             &test_compact_xpub(&owner, &contact),
         );
+        // Registration only accepts the contact's LIVE incoming payload (a
+        // stale one is `Superseded`), so the fixture's request must carry it.
+        {
+            let mut wm = wallet.identity().wallet_manager.write().await;
+            let info = wm.get_wallet_info_mut(&wallet_id).expect("info");
+            info.identity_manager
+                .managed_identity_mut(&owner)
+                .expect("managed")
+                .established_contact_mut(&contact)
+                .expect("established")
+                .incoming_request
+                .encrypted_public_key = xpub_ct.clone();
+        }
         let registration = dashpay
             .register_external_contact_account(
                 &owner,
