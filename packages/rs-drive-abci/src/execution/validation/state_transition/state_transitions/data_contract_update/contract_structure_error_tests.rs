@@ -2,9 +2,10 @@
 //! through `check_tx` and block processing.
 
 use crate::execution::validation::state_transition::state_transitions::data_contract_common::contract_structure_test_harness::{
-    assert_paid_contract_structure_error, assert_paid_contract_structure_error_in_block,
+    add_ref_dag_document_type, assert_paid_contract_structure_error,
+    assert_paid_contract_structure_error_in_block, assert_paid_ref_cycle_error,
     assert_unpaid_internal_error, check_and_process,
-    expiring_summed_schema, resign_with_schemas, summed_u64_schema,
+    expiring_summed_schema, resign_with_contract, summed_u64_schema,
     terminal_without_index_only_schema, Outcome, EXPIRING_UNBOUNDED_SUM_MESSAGE,
     SUMMED_U64_MESSAGE, TERMINAL_WITHOUT_INDEX_ONLY_MESSAGE,
 };
@@ -18,6 +19,7 @@ use dpp::dash_to_credits;
 use dpp::data_contract::accessors::v0::{DataContractV0Getters, DataContractV0Setters};
 use dpp::data_contract::config::v1::DataContractConfigSettersV1;
 use dpp::data_contract::config::DataContractConfig;
+use dpp::data_contract::serialized_version::DataContractInSerializationFormat;
 use dpp::data_contract::{DataContract, DataContractFactory};
 use dpp::identity::{Identity, IdentityPublicKey};
 use dpp::identity::accessors::IdentityGettersV0;
@@ -29,7 +31,6 @@ use dpp::tests::fixtures::get_data_contract_fixture;
 use drive::util::storage_flags::StorageFlags;
 use platform_version::version::{PlatformVersion, ProtocolVersion};
 use simple_signer::signer::SimpleSigner;
-use std::collections::BTreeMap;
 
 /// The contract nonce the update is signed with.
 const UPDATE_NONCE: u64 = 2;
@@ -37,6 +38,22 @@ const UPDATE_NONCE: u64 = 2;
 /// Updates a stored contract, adding a document type `item` with `schema`.
 async fn update_contract_adding_schema(
     schema: Value,
+    protocol_version: ProtocolVersion,
+) -> Outcome {
+    update_fixture_contract(
+        |contract| {
+            contract
+                .document_schemas_mut()
+                .insert("item".to_string(), schema);
+        },
+        protocol_version,
+    )
+    .await
+}
+
+/// Updates the stored fixture contract with its serialized form edited by `edit_contract`.
+async fn update_fixture_contract(
+    edit_contract: impl FnOnce(&mut DataContractInSerializationFormat),
     protocol_version: ProtocolVersion,
 ) -> Outcome {
     let platform_version =
@@ -57,9 +74,7 @@ async fn update_contract_adding_schema(
         &signer,
         &key,
         &data_contract,
-        |schemas| {
-            schemas.insert("item".to_string(), schema);
-        },
+        edit_contract,
         platform_version,
     )
     .await
@@ -101,23 +116,89 @@ async fn update_expiring_summed_amount(amount: Value) -> Outcome {
         &signer,
         &key,
         &data_contract,
-        |schemas| {
-            schemas.insert("tally".to_string(), expiring_summed_schema(amount));
+        |contract| {
+            contract
+                .document_schemas_mut()
+                .insert("tally".to_string(), expiring_summed_schema(amount));
         },
         platform_version,
     )
     .await
 }
 
-/// Stores `data_contract`, then sends its update to version 2 with its schemas edited by
-/// `edit_schemas`, signed by `identity` with the contract nonce `UPDATE_NONCE`.
+/// An indexOnly `like` whose `tags`, declaring `uniqueItems` as `unique_items` says, a
+/// per-tag index names beside `byPost`, which keeps each like once.
+fn tagged_like_schema(unique_items: bool) -> Value {
+    platform_value!({
+        "type": "object",
+        "indexOnly": true,
+        "documentsMutable": false,
+        "properties": {
+            "postId": { "type": "identifier", "position": 0 },
+            "tags": {
+                "type": "array",
+                "items": { "type": "string", "maxLength": 61 },
+                "maxItems": 4,
+                "uniqueItems": unique_items,
+                "position": 1
+            }
+        },
+        "required": ["postId"],
+        "indices": [
+            { "name": "byPost", "properties": [{ "postId": "asc" }] },
+            { "name": "byTagPost", "properties": [{ "tags": "asc" }, { "postId": "asc" }] }
+        ],
+        "additionalProperties": false
+    })
+}
+
+/// Updates a stored contract whose only document type is the indexOnly `like` of
+/// [`tagged_like_schema`], giving it the schema `like`.
+async fn update_tagged_like(like: Value) -> Outcome {
+    let platform_version = PlatformVersion::latest();
+    let mut platform = TestPlatformBuilder::new()
+        .with_initial_protocol_version(platform_version.protocol_version)
+        .build_with_mock_rpc()
+        .set_genesis_state();
+
+    let (identity, signer, key) = setup_identity(&mut platform, 5080, dash_to_credits!(1.0));
+
+    let data_contract = DataContractFactory::new(platform_version.protocol_version)
+        .expect("expected the factory")
+        .create(
+            identity.id(),
+            1,
+            platform_value!({ "like": tagged_like_schema(true) }),
+            None,
+            None,
+        )
+        .expect("a like indexing its unique tags beside byPost registers")
+        .data_contract_owned();
+    update_stored_contract(
+        &platform,
+        &identity,
+        &signer,
+        &key,
+        &data_contract,
+        |contract| {
+            contract
+                .document_schemas_mut()
+                .insert("like".to_string(), like);
+        },
+        platform_version,
+    )
+    .await
+}
+
+/// Stores `data_contract`, then sends its update to version 2 with its serialized form edited by
+/// `edit_contract`, signed by `identity` with the contract nonce `UPDATE_NONCE`.
 async fn update_stored_contract(
     platform: &TempPlatform<MockCoreRPCLike>,
     identity: &Identity,
     signer: &SimpleSigner,
     key: &IdentityPublicKey,
     data_contract: &DataContract,
-    edit_schemas: impl FnOnce(&mut BTreeMap<String, Value>),
+    edit_contract: impl FnOnce(&mut DataContractInSerializationFormat),
     platform_version: &PlatformVersion,
 ) -> Outcome {
     platform
@@ -148,7 +229,7 @@ async fn update_stored_contract(
     .await
     .expect("expected to create the contract update transition");
     let transition_bytes =
-        resign_with_schemas(&mut state_transition, edit_schemas, key, signer).await;
+        resign_with_contract(&mut state_transition, edit_contract, key, signer).await;
 
     let owner_id = identity.id();
     let contract_id = data_contract.id();
@@ -201,6 +282,21 @@ async fn should_refuse_an_update_adding_a_terminal_outside_an_index_only_type_wi
     );
 }
 
+/// `check_tx` runs the schema depth check before its non-validating parse of an update too, so
+/// it refuses an acyclic `$defs` graph that parse would expand exponentially with the error the
+/// block charges for.
+#[tokio::test]
+async fn should_refuse_an_update_adding_an_exponential_ref_dag_in_check_tx_as_the_block_does() {
+    let outcome = update_fixture_contract(
+        |contract| add_ref_dag_document_type(contract, 12),
+        PlatformVersion::latest().protocol_version,
+    )
+    .await;
+
+    assert_eq!(outcome.nonce_before, None);
+    assert_paid_ref_cycle_error(&outcome, UPDATE_NONCE);
+}
+
 #[tokio::test]
 async fn should_keep_refusing_an_update_adding_a_summed_u64_property_unpaid_at_protocol_version_13()
 {
@@ -239,5 +335,18 @@ async fn should_update_an_expiring_summed_property_keeping_it_never_negative() {
         StateTransitionExecutionResult::SuccessfulExecution { .. },
         "block: {:?}",
         outcome.block
+    );
+}
+
+/// An update can not drop `uniqueItems` from a typed array an index of an indexOnly type
+/// names: every parse of the updated type checks it, `check_tx`'s included.
+#[tokio::test]
+async fn should_refuse_an_update_dropping_unique_items_from_an_index_only_indexed_array() {
+    let outcome = update_tagged_like(tagged_like_schema(false)).await;
+
+    assert_paid_contract_structure_error(
+        &outcome,
+        "must declare `uniqueItems: true`",
+        UPDATE_NONCE,
     );
 }

@@ -9,9 +9,35 @@ use tenderdash_abci::{
 };
 
 use crate::ContextProvider;
+use drive::config::DEFAULT_QUERY_LIMIT;
 use drive::error::proof::ProofError;
 use drive::error::Error as DriveError;
 use drive::verify::grovedb_proof_envelope::require_supported_grovedb_proof_envelope;
+
+/// Verifies the proof of a paged query against the page Drive proved, `verify` running Drive's
+/// verify function for a limit.
+///
+/// A request naming a limit is verified against it. Drive answers a request naming none with
+/// its default page (`default_query_limit`), so a missing limit is verified as the standard
+/// default page, [`DEFAULT_QUERY_LIMIT`], and failing that as no limit:
+/// - checked against no limit, the proof of a full standard page reads as missing the rest of
+///   the range;
+/// - a node whose operator set a larger default proves every result up to it, which checked
+///   against the standard page reads as more data than the limit.
+///
+/// Either way the results are proved: a proof verifying as no limit proves the whole range, and
+/// one verifying as the default page proves its first page. When both fail, the error is the
+/// default page's, the reading of a node left at the default.
+pub(crate) fn verify_page_drive_proves<T>(
+    limit: Option<u16>,
+    verify: impl Fn(Option<u16>) -> Result<T, DriveError>,
+) -> Result<T, DriveError> {
+    match limit {
+        Some(limit) => verify(Some(limit)),
+        None => verify(Some(DEFAULT_QUERY_LIMIT))
+            .or_else(|default_page_error| verify(None).map_err(|_| default_page_error)),
+    }
+}
 
 /// Reject GroveDB proof envelopes older than Drive's
 /// `MINIMUM_GROVEDB_PROOF_ENVELOPE_VERSION` before the bytes reach Drive.
@@ -85,8 +111,14 @@ pub(crate) fn verify_tenderdash_signature(
     // Now, lookup quorum details
     let chain_id = mtd.chain_id.clone();
     let quorum_type = proof.quorum_type;
-    let pubkey_bytes =
-        provider.get_quorum_public_key(quorum_type, quorum_hash, core_locked_height)?;
+    let pubkey_bytes = provider
+        .get_quorum_public_key(quorum_type, quorum_hash, core_locked_height)
+        .map_err(|error| Error::QuorumKeyUnavailable {
+            quorum_type,
+            quorum_hash,
+            core_chain_locked_height: core_locked_height,
+            error,
+        })?;
 
     let state_id = StateId {
         app_version: version,
@@ -534,19 +566,24 @@ mod tests {
     }
 
     /// When the provider fails to return a quorum public key, the error must
-    /// propagate (wrapped into Error::ContextProviderError) rather than panic.
+    /// name the quorum the proof asked for, so the SDK can fetch that key and
+    /// verify the same response again, and keep the provider's message for
+    /// callers that classify errors by their text.
     #[test]
-    fn test_verify_tenderdash_proof_provider_error_propagates() {
+    fn should_report_the_proofs_quorum_when_the_provider_has_no_key() {
         let proof = Proof {
             grovedb_proof: grovedb_proof_bytes(1),
-            quorum_hash: vec![0u8; 32],
+            quorum_hash: vec![0xab; 32],
             signature: vec![0u8; 96],
             round: 1,
             block_id_hash: vec![0u8; 32],
-            quorum_type: 1,
+            quorum_type: 6,
         };
 
-        let metadata = test_metadata();
+        let metadata = ResponseMetadata {
+            core_chain_locked_height: 4321,
+            ..test_metadata()
+        };
         let provider = ErroringProvider;
 
         let result = verify_tenderdash_proof(&proof, &metadata, &[0u8; 32], &provider);
@@ -556,6 +593,19 @@ mod tests {
             err_msg.contains("simulated provider failure"),
             "error should contain provider message, got: {err_msg}"
         );
+        match err {
+            Error::QuorumKeyUnavailable {
+                quorum_type,
+                quorum_hash,
+                core_chain_locked_height,
+                error: ContextProviderError::InvalidQuorum(_),
+            } => {
+                assert_eq!(quorum_type, 6);
+                assert_eq!(quorum_hash, [0xab; 32]);
+                assert_eq!(core_chain_locked_height, metadata.core_chain_locked_height);
+            }
+            other => panic!("expected QuorumKeyUnavailable, got {other:?}"),
+        }
     }
 
     /// A provider that returns 48 zero-bytes as the "public key" causes the
@@ -643,5 +693,132 @@ mod tests {
             err_msg.contains("empty signature"),
             "error should mention empty signature, got: {err_msg}"
         );
+    }
+
+    #[test]
+    fn should_reject_a_verified_result_root_that_differs_from_the_signed_app_hash() {
+        let metadata = test_metadata();
+        let provider = ValidKeyContextProvider::new();
+        let (key, _) = test_keypair();
+        let root = [7; 32];
+        let mut proof = Proof {
+            grovedb_proof: grovedb_proof_bytes(1),
+            quorum_hash: vec![2; 32],
+            signature: vec![],
+            round: 1,
+            block_id_hash: vec![3; 32],
+            quorum_type: 1,
+        };
+        let state_id = StateId {
+            app_version: metadata.protocol_version as u64,
+            core_chain_locked_height: metadata.core_chain_locked_height,
+            time: metadata.time_ms,
+            app_hash: root.to_vec(),
+            height: metadata.height,
+        };
+        let vote = CanonicalVote {
+            r#type: SignedMsgType::Precommit.into(),
+            block_id: proof.block_id_hash.clone(),
+            chain_id: metadata.chain_id.clone(),
+            height: metadata.height as i64,
+            round: proof.round as i64,
+            state_id: state_id
+                .calculate_msg_hash(
+                    &metadata.chain_id,
+                    metadata.height as i64,
+                    proof.round as i32,
+                )
+                .expect("hash signed state"),
+        };
+        let digest = vote
+            .calculate_sign_hash(
+                &metadata.chain_id,
+                proof.quorum_type as u8,
+                &[2; 32],
+                metadata.height as i64,
+                proof.round as i32,
+            )
+            .expect("hash vote");
+        proof.signature = key
+            .sign(bls_signatures::SignatureSchemes::Basic, &digest)
+            .expect("sign vote")
+            .as_raw_value()
+            .to_compressed()
+            .to_vec();
+        verify_tenderdash_proof(&proof, &metadata, &root, &provider)
+            .expect("matching app hash control");
+        let mut different_root = root;
+        different_root[0] ^= 1;
+        assert!(matches!(
+            verify_tenderdash_proof(&proof, &metadata, &different_root, &provider),
+            Err(Error::InvalidSignature { .. })
+        ));
+    }
+
+    mod verify_page_drive_proves {
+        use super::*;
+        use std::cell::RefCell;
+
+        fn refused(reason: &str) -> DriveError {
+            DriveError::Proof(ProofError::CorruptedProof(reason.to_string()))
+        }
+
+        fn is_refused(error: &DriveError, expected: &str) -> bool {
+            matches!(error, DriveError::Proof(ProofError::CorruptedProof(reason)) if reason == expected)
+        }
+
+        #[test]
+        fn should_verify_a_named_limit_only_against_that_limit() {
+            for named in [1, DEFAULT_QUERY_LIMIT, DEFAULT_QUERY_LIMIT + 400] {
+                let tried = RefCell::new(vec![]);
+                let error = verify_page_drive_proves(Some(named), |limit| {
+                    tried.borrow_mut().push(limit);
+                    Err::<(), _>(refused("named limit"))
+                })
+                .expect_err("expected the named limit to be refused");
+                assert!(is_refused(&error, "named limit"), "got {error:?}");
+                assert_eq!(tried.into_inner(), vec![Some(named)]);
+            }
+        }
+
+        #[test]
+        fn should_verify_a_missing_limit_as_the_default_page_first() {
+            let tried = RefCell::new(vec![]);
+            let verified_as = verify_page_drive_proves(None, |limit| {
+                tried.borrow_mut().push(limit);
+                Ok(limit)
+            })
+            .expect("expected the default page to verify");
+            assert_eq!(verified_as, Some(DEFAULT_QUERY_LIMIT));
+            assert_eq!(tried.into_inner(), vec![Some(DEFAULT_QUERY_LIMIT)]);
+        }
+
+        #[test]
+        fn should_verify_a_missing_limit_as_no_limit_when_the_default_page_is_refused() {
+            let tried = RefCell::new(vec![]);
+            let verified_as = verify_page_drive_proves(None, |limit| {
+                tried.borrow_mut().push(limit);
+                match limit {
+                    Some(_) => Err(refused("more data than limit")),
+                    None => Ok(limit),
+                }
+            })
+            .expect("expected no limit to verify");
+            assert_eq!(verified_as, None);
+            assert_eq!(tried.into_inner(), vec![Some(DEFAULT_QUERY_LIMIT), None]);
+        }
+
+        #[test]
+        fn should_return_the_default_page_error_when_both_are_refused() {
+            let error = verify_page_drive_proves(None, |limit| {
+                Err::<(), _>(refused(if limit.is_some() {
+                    "default page"
+                } else {
+                    "no limit"
+                }))
+            })
+            .expect_err("expected both readings to be refused");
+            assert!(is_refused(&error, "default page"), "got {error:?}");
+        }
     }
 }
