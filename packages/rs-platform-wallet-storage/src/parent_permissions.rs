@@ -24,15 +24,18 @@ pub(crate) enum ParentPermissionsError {
 /// correct where it can appear.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InsecureAncestor {
-    /// Group- or other-writable without the sticky bit: any local user can
-    /// replace entries in it, and so replace the `0600` file below it.
+    /// Other-writable, or group-writable by a group outside the trusted set,
+    /// without the sticky bit: a member of that group (or any local user) can
+    /// replace entries in it, and so replace the `0600` file below it. On
+    /// Android the trusted set is `AID_SYSTEM` and the app's own group;
+    /// elsewhere it is empty.
     WritableWithoutSticky {
         /// The offending POSIX mode bits.
         mode: u32,
     },
-    /// Owned by neither the effective user nor a root identity: its owner can
-    /// grant itself write access whenever it likes, so the current mode is not
-    /// a guarantee of anything.
+    /// Owned by neither the effective user nor a root identity (nor, on
+    /// Android, `AID_SYSTEM`): its owner can grant itself write access
+    /// whenever it likes, so the current mode is not a guarantee of anything.
     UntrustedOwner {
         /// The ancestor's owner uid.
         uid: u32,
@@ -110,13 +113,13 @@ fn trusted_groups(_current_uid: u32) -> Vec<u32> {
 
 /// Whether an identity outside the trusted set can replace entries in a
 /// directory with this mode and group: other-writable, or group-writable for a
-/// group outside `trusted_groups`, in both cases without the sticky bit.
+/// group outside `allowed_groups`, in both cases without the sticky bit.
 #[cfg(unix)]
-fn writable_without_sticky(mode: u32, gid: u32, trusted_groups: &[u32]) -> bool {
+fn writable_without_sticky(mode: u32, gid: u32, allowed_groups: &[u32]) -> bool {
     if mode & 0o1000 != 0 {
         return false;
     }
-    mode & 0o002 != 0 || (mode & 0o020 != 0 && !trusted_groups.contains(&gid))
+    mode & 0o002 != 0 || (mode & 0o020 != 0 && !allowed_groups.contains(&gid))
 }
 
 #[cfg(unix)]
@@ -130,10 +133,12 @@ fn effective_uid() -> u32 {
 /// Validate Unix ownership and replacement permissions up to the filesystem root.
 ///
 /// Both the lexical path and its canonical target are walked through `/`, so a
-/// symlink cannot hide unsafe target ancestors. A writable component is
-/// accepted only with the sticky bit, and every component must be owned by the
-/// effective user or a root identity. The filesystem root's owner is treated
-/// as root for user-namespace environments where uid 0 is mapped to another uid.
+/// symlink cannot hide unsafe target ancestors. An other-writable component
+/// is accepted only with the sticky bit, and so is a group-writable one unless
+/// its group is in `trusted_groups` (Android only). Every component must be
+/// owned by the effective user, a root identity or a `PLATFORM_IDS` identity
+/// (Android only). The filesystem root's owner is treated as root for
+/// user-namespace environments where uid 0 is mapped to another uid.
 ///
 /// Both walks classify through here, so neither can report an ownership
 /// rejection as a permission one. Write access is checked first: it is the
@@ -143,11 +148,11 @@ fn reject_ancestor(
     ancestor: &Path,
     uid: u32,
     mode: u32,
-    writable_without_sticky: bool,
+    is_writable_without_sticky: bool,
     current_uid: u32,
     root_uid: u32,
 ) -> Result<(), ParentPermissionsError> {
-    let reason = if writable_without_sticky {
+    let reason = if is_writable_without_sticky {
         InsecureAncestor::WritableWithoutSticky { mode }
     } else if !trusted_owner(uid, current_uid, root_uid, PLATFORM_IDS) {
         InsecureAncestor::UntrustedOwner { uid, current_uid }
@@ -165,7 +170,7 @@ pub(crate) fn check_parent_perms(parent: &Path) -> Result<(), ParentPermissionsE
     use std::os::unix::fs::MetadataExt;
 
     let current_uid = effective_uid();
-    let trusted_groups = trusted_groups(current_uid);
+    let allowed_groups = trusted_groups(current_uid);
     let root_uid = std::fs::metadata("/")
         .map_err(ParentPermissionsError::Io)?
         .uid();
@@ -181,13 +186,13 @@ pub(crate) fn check_parent_perms(parent: &Path) -> Result<(), ParentPermissionsE
     for ancestor in absolute.ancestors() {
         let meta = std::fs::symlink_metadata(ancestor).map_err(ParentPermissionsError::Io)?;
         let mode = meta.mode() & 0o7777;
-        let writable_without_sticky = !meta.file_type().is_symlink()
-            && writable_without_sticky(mode, meta.gid(), &trusted_groups);
+        let is_writable_without_sticky = !meta.file_type().is_symlink()
+            && writable_without_sticky(mode, meta.gid(), &allowed_groups);
         reject_ancestor(
             ancestor,
             meta.uid(),
             mode,
-            writable_without_sticky,
+            is_writable_without_sticky,
             current_uid,
             root_uid,
         )?;
@@ -195,12 +200,12 @@ pub(crate) fn check_parent_perms(parent: &Path) -> Result<(), ParentPermissionsE
     for ancestor in canonical.ancestors() {
         let meta = std::fs::metadata(ancestor).map_err(ParentPermissionsError::Io)?;
         let mode = meta.mode() & 0o7777;
-        let writable_without_sticky = writable_without_sticky(mode, meta.gid(), &trusted_groups);
+        let is_writable_without_sticky = writable_without_sticky(mode, meta.gid(), &allowed_groups);
         reject_ancestor(
             ancestor,
             meta.uid(),
             mode,
-            writable_without_sticky,
+            is_writable_without_sticky,
             current_uid,
             root_uid,
         )?;
@@ -259,6 +264,13 @@ mod tests {
         assert!(writable_without_sticky(0o2771, 20_150, android_app));
         // Other-write is refused even in the app's own group.
         assert!(writable_without_sticky(0o777, 10_150, android_app));
+    }
+
+    #[cfg(target_os = "android")]
+    #[test]
+    fn should_build_android_trusted_groups_from_platform_and_app_uid() {
+        assert_eq!(super::PLATFORM_IDS, &[1000]);
+        assert_eq!(super::trusted_groups(10_150), vec![1000, 10_150]);
     }
 
     #[cfg(not(target_os = "android"))]
