@@ -43,7 +43,10 @@ pub struct EstablishedContact {
     /// retries. Once `true`, the sweep skips this contact until the
     /// underlying request changes, and the FFI/UI surfaces "payment
     /// channel broken — ask the contact to send a new request" instead
-    /// of an unbounded retry loop.
+    /// of an unbounded retry loop. The one retry it does get is a single
+    /// external-account rebuild per launch (`enqueue_broken_channel_rechecks`),
+    /// which clears this flag if the xpub now decrypts — added to heal channels
+    /// broken by dashj's altered ECDH key before the fallback existed.
     ///
     /// Defaults to `false`; a freshly established contact is never broken.
     #[cfg_attr(feature = "serde", serde(default))]
