@@ -45,6 +45,7 @@ mod support;
 mod tokens;
 mod transactions;
 mod tx_decode;
+mod verdict_round_test_hook;
 mod wallet_drain;
 mod wallet_manager;
 
