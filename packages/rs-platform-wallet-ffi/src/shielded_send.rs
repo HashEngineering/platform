@@ -43,6 +43,7 @@ use std::ffi::CStr;
 use std::os::raw::{c_char, c_void};
 
 use dpp::address_funds::{OrchardAddress, PlatformAddress};
+use dpp::prelude::Identifier;
 use dpp::shielded::{
     compute_minimum_shielded_fee, compute_shielded_identity_balance_write_fee,
     compute_shielded_identity_top_up_fee, compute_shielded_unshield_fee,
@@ -51,7 +52,9 @@ use dpp::shielded::{
 use dpp::state_transition::public_key_in_creation::IdentityPublicKeyInCreation;
 use dpp::ProtocolError;
 use platform_wallet::wallet::asset_lock::AssetLockFunding;
-use platform_wallet::wallet::shielded::CachedOrchardProver;
+use platform_wallet::wallet::shielded::{
+    generate_one_time_orchard_key, orchard_address_from_spending_key, CachedOrchardProver,
+};
 use platform_wallet::PlatformWalletError;
 use rs_sdk_ffi::{
     MnemonicResolverCoreSigner, MnemonicResolverHandle, SignerHandle, VTableSigner,
@@ -324,6 +327,36 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_transfer(
     amount: u64,
     memo_text: *const c_char,
 ) -> PlatformWalletFFIResult {
+    // Guarded: a panic (most concretely `block_on_worker`'s `.expect` on a panicking proving
+    // task) must NOT reach this `extern "C"` frame, where it would abort the process instead of
+    // surfacing to the host as a typed error.
+    catch_spend_panic("shielded transfer", || {
+        shielded_transfer_inner(
+            handle,
+            wallet_id_bytes,
+            mnemonic_resolver_handle,
+            account,
+            recipient_raw_43,
+            amount,
+            memo_text,
+        )
+    })
+}
+
+/// Body of [`platform_wallet_manager_shielded_transfer`], as an ordinary Rust function so a
+/// panic unwinds into [`catch_spend_panic`] instead of across the C ABI.
+///
+/// # Safety
+/// Identical contract to the export that calls it.
+unsafe fn shielded_transfer_inner(
+    handle: Handle,
+    wallet_id_bytes: *const u8,
+    mnemonic_resolver_handle: *mut MnemonicResolverHandle,
+    account: u32,
+    recipient_raw_43: *const u8,
+    amount: u64,
+    memo_text: *const c_char,
+) -> PlatformWalletFFIResult {
     check_ptr!(wallet_id_bytes);
     check_ptr!(mnemonic_resolver_handle);
     check_ptr!(recipient_raw_43);
@@ -392,6 +425,241 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_transfer(
     map_spend_result(result, "shielded transfer")
 }
 
+/// Recipient ceiling of a multi-output shielded transfer (Type 16).
+///
+/// Derived from the EFFECTIVE per-transition Orchard action ceiling — the largest bundle that
+/// satisfies BOTH versioned consensus limits: the structural
+/// `max_shielded_transition_actions` cap AND the 20 KiB `max_state_transition_size`, whose byte
+/// prefilter is the binding one at current constants (6 actions ≈ 19.0 KiB on the wire, 7 ≈
+/// 21.7 KiB — see `dpp::shielded::max_shielded_actions_per_transition`). A multi-output
+/// transfer always appends a change output, so recipients = effective actions − 1. Admitting
+/// more would only burn ~30 s of Halo 2 proving per bundle before DAPI's byte prefilter (or the
+/// dpp builder's own pre-proving gate) rejects the transition.
+///
+/// Public so language bridges (the JNI adapter, Swift) can enforce the SAME bound before they
+/// allocate their own caller-sized buffers, rather than duplicating the literal. Pinned against
+/// the dpp derivation by the `max_recipients_matches_the_effective_action_ceiling` test below —
+/// raise it only in lockstep with the versioned limits, together with the Kotlin mirror
+/// (`MAX_SHIELDED_TRANSFER_RECIPIENTS` in `kotlin-sdk`'s `PlatformWalletManager.kt`).
+pub const MAX_SHIELDED_TRANSFER_RECIPIENTS: usize = 5;
+
+/// Post-panic guidance for the note-spending operations (transfer / multi-transfer / unshield /
+/// withdraw / shield / shield-to-recipient). Paired with `ErrorShieldedSpendUnconfirmed` in
+/// [`catch_spend_panic`].
+const SPEND_PANIC_GUIDANCE: &str = "The spend may or may not have been broadcast — do NOT \
+     retry; the next shielded sync reconciles the outcome.";
+
+/// Post-panic guidance for Type 20 identity creation. Paired with the generic
+/// [`PlatformWalletFFIResultCode::ErrorUnknown`] — see the export's guard call site for why no
+/// richer code fits.
+const IDENTITY_CREATE_PANIC_GUIDANCE: &str = "The transition may or may not have been broadcast \
+     and the new identity may already exist on chain — do NOT re-submit and do NOT release the \
+     identity slot; out_identity_id was NOT written. The next shielded sync reconciles the \
+     outcome.";
+
+/// Post-panic guidance for the asset-lock funding operations (fresh fund / resume). Paired with
+/// `ErrorWalletOperation`, the single error code those exports already surface.
+const ASSET_LOCK_FUNDING_PANIC_GUIDANCE: &str = "The funding may have partially executed — an \
+     asset-lock transaction may already be broadcast and tracked. Do NOT blindly re-run (a fresh \
+     call would build and fund a NEW asset lock); check the wallet's tracked asset locks after \
+     the next sync and use the resume entry point to complete an in-flight funding.";
+
+/// Post-panic guidance for the devnet/testnet pool-seeding loop. Paired with
+/// `ErrorWalletOperation`, the single error code that export already surfaces.
+const SEED_POOL_PANIC_GUIDANCE: &str = "Batches that completed before the panic are on chain; \
+     re-running after the next sync resumes seeding toward the target.";
+
+/// [`catch_panic_to_code`] specialized for the note-spending exports.
+///
+/// The panic is mapped to [`PlatformWalletFFIResultCode::ErrorShieldedSpendUnconfirmed`], NOT to
+/// a definitive failure code: a panic can strike after the notes were reserved and even after the
+/// transition was broadcast, so the outcome is genuinely ambiguous. That code's contract is
+/// exactly the conservative one this needs — the host must not auto-retry, the reservation stays
+/// in place, and the next nullifier sync (or an app restart) reconciles whether the spend landed.
+fn catch_spend_panic(
+    operation: &str,
+    body: impl FnOnce() -> PlatformWalletFFIResult,
+) -> PlatformWalletFFIResult {
+    catch_panic_to_code(
+        operation,
+        PlatformWalletFFIResultCode::ErrorShieldedSpendUnconfirmed,
+        SPEND_PANIC_GUIDANCE,
+        body,
+    )
+}
+
+/// Send a shielded → shielded transfer with SEVERAL outputs in one
+/// atomic transition.
+///
+/// Multi-output sibling of
+/// [`platform_wallet_manager_shielded_transfer`]. `recipients_raw_43`
+/// is `num_recipients` raw 43-byte Orchard payment addresses laid out
+/// back to back, and `amounts` is the matching array of
+/// `num_recipients` credit amounts. Each pair becomes its own note.
+///
+/// Repeating the same address is allowed and is the primary use: it
+/// funds one address with several independent notes, so a later spend
+/// of that address spends several REAL notes rather than one real note
+/// plus an Orchard padding dummy (whose nullifier is randomly
+/// generated and so cannot be reproduced offline).
+///
+/// `memo_text` is attached to EVERY recipient note (same encoding and
+/// 32-byte UTF-8 limit as the single-output call). The change note
+/// always carries the empty memo.
+///
+/// A multi-output transfer always emits a change output, so the spent
+/// value must strictly exceed `sum(amounts) + fee`.
+///
+/// `mnemonic_resolver_handle` supplies the per-operation Orchard spend
+/// authority (see `platform_wallet_manager_shielded_transfer`).
+///
+/// # Safety
+/// - `wallet_id_bytes` must point to 32 readable bytes.
+/// - `mnemonic_resolver_handle` must come from
+///   `dash_sdk_mnemonic_resolver_create` and outlive this call; the
+///   caller retains ownership.
+/// - `recipients_raw_43` must point to `num_recipients * 43` readable
+///   bytes and `amounts` to `num_recipients` readable `u64`s.
+/// - `memo_text`, when non-null, must be a valid NUL-terminated UTF-8
+///   C string for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn platform_wallet_manager_shielded_transfer_multi(
+    handle: Handle,
+    wallet_id_bytes: *const u8,
+    mnemonic_resolver_handle: *mut MnemonicResolverHandle,
+    account: u32,
+    recipients_raw_43: *const u8,
+    amounts: *const u64,
+    num_recipients: usize,
+    memo_text: *const c_char,
+) -> PlatformWalletFFIResult {
+    // The whole body runs under `catch_unwind`: a panic (most concretely `block_on_worker`'s
+    // `.expect` on a panicking proving task) must NOT reach this `extern "C"` frame, where it
+    // would abort the process instead of surfacing to the host as a typed error.
+    catch_spend_panic("shielded multi-output transfer", || {
+        shielded_transfer_multi_inner(
+            handle,
+            wallet_id_bytes,
+            mnemonic_resolver_handle,
+            account,
+            recipients_raw_43,
+            amounts,
+            num_recipients,
+            memo_text,
+        )
+    })
+}
+
+/// Body of [`platform_wallet_manager_shielded_transfer_multi`], as an ordinary Rust function so a
+/// panic unwinds into [`catch_spend_panic`] instead of across the C ABI.
+///
+/// # Safety
+/// Identical contract to the export that calls it.
+#[allow(clippy::too_many_arguments)]
+unsafe fn shielded_transfer_multi_inner(
+    handle: Handle,
+    wallet_id_bytes: *const u8,
+    mnemonic_resolver_handle: *mut MnemonicResolverHandle,
+    account: u32,
+    recipients_raw_43: *const u8,
+    amounts: *const u64,
+    num_recipients: usize,
+    memo_text: *const c_char,
+) -> PlatformWalletFFIResult {
+    check_ptr!(wallet_id_bytes);
+    check_ptr!(mnemonic_resolver_handle);
+    check_ptr!(recipients_raw_43);
+    check_ptr!(amounts);
+
+    if num_recipients == 0 {
+        return PlatformWalletFFIResult::err(
+            PlatformWalletFFIResultCode::ErrorInvalidParameter,
+            "num_recipients must be at least 1".to_string(),
+        );
+    }
+    if num_recipients > MAX_SHIELDED_TRANSFER_RECIPIENTS {
+        return PlatformWalletFFIResult::err(
+            PlatformWalletFFIResultCode::ErrorInvalidParameter,
+            format!(
+                "num_recipients {num_recipients} exceeds the maximum of \
+                 {MAX_SHIELDED_TRANSFER_RECIPIENTS}"
+            ),
+        );
+    }
+
+    let mut wallet_id = [0u8; 32];
+    std::ptr::copy_nonoverlapping(wallet_id_bytes, wallet_id.as_mut_ptr(), 32);
+
+    let amount_slice = std::slice::from_raw_parts(amounts, num_recipients);
+    let mut outputs: Vec<([u8; 43], u64)> = Vec::with_capacity(num_recipients);
+    for (index, &amount) in amount_slice.iter().enumerate() {
+        if amount == 0 {
+            return PlatformWalletFFIResult::err(
+                PlatformWalletFFIResultCode::ErrorInvalidParameter,
+                format!("amount at index {index} must be positive"),
+            );
+        }
+        let mut recipient = [0u8; 43];
+        std::ptr::copy_nonoverlapping(
+            recipients_raw_43.add(index * 43),
+            recipient.as_mut_ptr(),
+            43,
+        );
+        outputs.push((recipient, amount));
+    }
+
+    // Decode the optional memo before touching wallet state so a malformed memo fails fast.
+    let memo_str = if memo_text.is_null() {
+        None
+    } else {
+        match CStr::from_ptr(memo_text).to_str() {
+            Ok(s) => Some(s),
+            Err(e) => {
+                return PlatformWalletFFIResult::err(
+                    PlatformWalletFFIResultCode::ErrorUtf8Conversion,
+                    format!("memo_text is not valid UTF-8: {e}"),
+                );
+            }
+        }
+    };
+    let memo = match encode_memo_text(memo_str) {
+        Ok(m) => m,
+        Err(result) => return result,
+    };
+
+    let (wallet, coordinator) = match resolve_wallet_and_coordinator(handle, &wallet_id) {
+        Ok(p) => p,
+        Err(result) => return result,
+    };
+
+    let seed = match crate::identity_keys_from_mnemonic::resolve_seed_from_resolver(
+        mnemonic_resolver_handle,
+        &wallet_id,
+    ) {
+        Ok(seed) => seed,
+        Err(result) => return result,
+    };
+
+    // Prove on a worker thread with an 8 MB stack (see
+    // `platform_wallet_manager_shielded_transfer`).
+    let result = block_on_worker(async move {
+        let prover = CachedOrchardProver::new();
+        let r = wallet
+            .shielded_transfer_multi_to(
+                &coordinator,
+                seed.as_ref(),
+                account,
+                &outputs,
+                memo,
+                &prover,
+            )
+            .await;
+        poke_sync_on_unconfirmed(&r, handle);
+        r
+    });
+    map_spend_result(result, "shielded multi-output transfer")
+}
+
 /// Unshield: spend shielded notes and send `amount` credits to a
 /// platform address.
 ///
@@ -415,6 +683,32 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_transfer(
 ///   C string for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn platform_wallet_manager_shielded_unshield(
+    handle: Handle,
+    wallet_id_bytes: *const u8,
+    mnemonic_resolver_handle: *mut MnemonicResolverHandle,
+    account: u32,
+    to_platform_addr_cstr: *const c_char,
+    amount: u64,
+) -> PlatformWalletFFIResult {
+    // Guarded: a panic must NOT reach this `extern "C"` frame (see `catch_panic_to_code`).
+    catch_spend_panic("shielded unshield", || {
+        shielded_unshield_inner(
+            handle,
+            wallet_id_bytes,
+            mnemonic_resolver_handle,
+            account,
+            to_platform_addr_cstr,
+            amount,
+        )
+    })
+}
+
+/// Body of [`platform_wallet_manager_shielded_unshield`], as an ordinary Rust function so a
+/// panic unwinds into [`catch_spend_panic`] instead of across the C ABI.
+///
+/// # Safety
+/// Identical contract to the export that calls it.
+unsafe fn shielded_unshield_inner(
     handle: Handle,
     wallet_id_bytes: *const u8,
     mnemonic_resolver_handle: *mut MnemonicResolverHandle,
@@ -488,6 +782,34 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_unshield(
 ///   C string for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn platform_wallet_manager_shielded_withdraw(
+    handle: Handle,
+    wallet_id_bytes: *const u8,
+    mnemonic_resolver_handle: *mut MnemonicResolverHandle,
+    account: u32,
+    to_core_address_cstr: *const c_char,
+    amount: u64,
+    core_fee_per_byte: u32,
+) -> PlatformWalletFFIResult {
+    // Guarded: a panic must NOT reach this `extern "C"` frame (see `catch_panic_to_code`).
+    catch_spend_panic("shielded withdraw", || {
+        shielded_withdraw_inner(
+            handle,
+            wallet_id_bytes,
+            mnemonic_resolver_handle,
+            account,
+            to_core_address_cstr,
+            amount,
+            core_fee_per_byte,
+        )
+    })
+}
+
+/// Body of [`platform_wallet_manager_shielded_withdraw`], as an ordinary Rust function so a
+/// panic unwinds into [`catch_spend_panic`] instead of across the C ABI.
+///
+/// # Safety
+/// Identical contract to the export that calls it.
+unsafe fn shielded_withdraw_inner(
     handle: Handle,
     wallet_id_bytes: *const u8,
     mnemonic_resolver_handle: *mut MnemonicResolverHandle,
@@ -681,30 +1003,6 @@ fn is_preserved_signer_key_unavailable(error: &PlatformWalletError) -> bool {
     )
 }
 
-/// Post-panic guidance for the note-spending exports. Paired with
-/// `ErrorShieldedSpendUnconfirmed` in [`catch_spend_panic`].
-const SPEND_PANIC_GUIDANCE: &str = "The spend may or may not have been broadcast — do NOT \
-     retry; the next shielded sync reconciles the outcome.";
-
-/// [`catch_panic_to_code`] specialized for the note-spending exports.
-///
-/// The panic is mapped to [`PlatformWalletFFIResultCode::ErrorShieldedSpendUnconfirmed`], NOT to
-/// a definitive failure code: a panic can strike after the notes were reserved and even after the
-/// transition was broadcast, so the outcome is genuinely ambiguous. That code's contract is
-/// exactly the conservative one this needs — the host must not auto-retry, the reservation stays
-/// in place, and the next nullifier sync (or an app restart) reconciles whether the spend landed.
-fn catch_spend_panic(
-    operation: &str,
-    body: impl FnOnce() -> PlatformWalletFFIResult,
-) -> PlatformWalletFFIResult {
-    catch_panic_to_code(
-        operation,
-        PlatformWalletFFIResultCode::ErrorShieldedSpendUnconfirmed,
-        SPEND_PANIC_GUIDANCE,
-        body,
-    )
-}
-
 /// Post-panic guidance for the asset-lock funding exports. Paired with
 /// `ErrorTransactionBroadcastUnconfirmed` in [`catch_funding_panic`].
 const FUNDING_PANIC_GUIDANCE: &str = "The asset lock may or may not have been broadcast — do \
@@ -731,6 +1029,73 @@ pub(crate) fn catch_funding_panic(
         operation,
         PlatformWalletFFIResultCode::ErrorTransactionBroadcastUnconfirmed,
         FUNDING_PANIC_GUIDANCE,
+        body,
+    )
+}
+
+/// Post-panic guidance for the one-time-key invitation claim. Paired with
+/// [`PlatformWalletFFIResultCode::ErrorShieldedClaimUnconfirmed`] in
+/// [`catch_one_time_claim_panic`] — the prose restates, for humans, the
+/// contract the typed code carries for machines.
+///
+/// Unlike [`SPEND_PANIC_GUIDANCE`], this does NOT say "do not retry": a claim's
+/// durable recovery record is retained until the created identity is durably
+/// registered, and re-running the same claim is exactly how that record is
+/// resumed — it recovers the identity the first attempt created rather than
+/// creating a second one. What it must not do is retry IMMEDIATELY: the panic
+/// unwound past the claim's deterministic lease release, so its admission and
+/// its per-invitation reservation are reclaimed by expiry, and an attempt
+/// before then is refused as busy.
+const ONE_TIME_CLAIM_PANIC_GUIDANCE: &str = "The claim may or may not have been broadcast and \
+     the new identity may already exist on chain — out_identity_id was NOT written, and the \
+     identity slot must NOT be released. The claim's recovery record is retained: re-running \
+     this same invitation claim once its lease expires resumes it and recovers the identity \
+     rather than creating a second one.";
+
+/// [`catch_panic_to_code`] specialized for the one-time-key claim export
+/// (#4313 review findings 945163f6ed5b, 4bf998e99652).
+///
+/// The panic maps to the dedicated
+/// [`PlatformWalletFFIResultCode::ErrorShieldedClaimUnconfirmed`] (48),
+/// deliberately NOT to any of this export's other codes, none of which a panic
+/// can honestly promise:
+///
+/// * `ErrorShieldedBroadcastUnconfirmed` (17) — its ABI contract says
+///   `out_identity_id` IS written on that code, and a panic destroyed the
+///   result, so there is no id to write.
+/// * `ErrorShieldedInviteAlreadyClaimed` (43) — TERMINAL. Reporting it would
+///   tell the claimer the invitation can never be claimed again, which is the
+///   single worst thing to say about an outcome nobody knows.
+/// * `ErrorShieldedScanBudgetExhausted` (44) / `ErrorShieldedLifecycleBusy`
+///   (45) — both promise that nothing was scanned, built, or broadcast. A
+///   panic can strike after the broadcast.
+/// * `ErrorWalletOperation` (6) and `ErrorShieldedBroadcastFailed` (16) —
+///   definitive failures, which this is not.
+/// * `ErrorUnknown` (99) — what this guard used to report. JNI offsets it to
+///   1099, Kotlin's `DashSdkError.fromPlatformWalletNative` has no mapping for
+///   99, so hosts saw a non-retryable `PlatformWallet.Generic` — and a host
+///   following the typed retry contract would release the identity slot or
+///   decline the recovery retry, even though the transition may already be on
+///   chain and the retained row is the only source of its padded identity id.
+///   The recovery instructions embedded in the message are not a
+///   machine-readable replacement for that contract.
+///
+/// Code 48's contract is exactly this outcome's: ambiguous (the transition may
+/// already have executed), `out_identity_id` untouched, and retryable AS A
+/// RESUME — the retained `shielded_pending_spends` row makes a rerun of the
+/// same claim resume the first attempt (`reserve_one_time_claim_key` finds the
+/// row; `recover_executed_one_time_claim` recovers the declared identity), so
+/// the host must preserve the identity slot and retry after the claim lease
+/// expires. [`ONE_TIME_CLAIM_PANIC_GUIDANCE`] restates that contract for
+/// humans in the message.
+fn catch_one_time_claim_panic(
+    operation: &str,
+    body: impl FnOnce() -> PlatformWalletFFIResult,
+) -> PlatformWalletFFIResult {
+    catch_panic_to_code(
+        operation,
+        PlatformWalletFFIResultCode::ErrorShieldedClaimUnconfirmed,
+        ONE_TIME_CLAIM_PANIC_GUIDANCE,
         body,
     )
 }
@@ -896,6 +1261,58 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_identity_create_from_p
     signer_identity_handle: *mut SignerHandle,
     out_identity_id: *mut [u8; 32],
 ) -> PlatformWalletFFIResult {
+    // Guarded: a panic must NOT reach this `extern "C"` frame (see `catch_panic_to_code`).
+    //
+    // The panic code is the generic `ErrorUnknown`, deliberately NOT one of this export's
+    // richer codes: `ErrorShieldedBroadcastUnconfirmed`'s ABI contract says `out_identity_id`
+    // IS written on that code, and a panic destroyed the result so there is no id to write;
+    // `ErrorShieldedSpendUnconfirmed` is documented as scoped to the unshield / transfer /
+    // withdrawal spends; and every other code promises a definitive outcome a panic cannot
+    // promise. No dedicated panic code exists in the (registry-tracked) enum, and allocating
+    // one here would risk the silent cross-branch numeric collisions the codes 28-30 comment
+    // warns about — so the generic internal code carries it, with the do-not-resubmit guidance
+    // in the message.
+    catch_panic_to_code(
+        "shielded identity-create-from-pool",
+        PlatformWalletFFIResultCode::ErrorUnknown,
+        IDENTITY_CREATE_PANIC_GUIDANCE,
+        || {
+            shielded_identity_create_from_pool_inner(
+                handle,
+                wallet_id_bytes,
+                mnemonic_resolver_handle,
+                account,
+                identity_index,
+                identity_pubkeys,
+                identity_pubkeys_count,
+                denomination,
+                send_to_address_on_creation_failure_bytes,
+                signer_identity_handle,
+                out_identity_id,
+            )
+        },
+    )
+}
+
+/// Body of [`platform_wallet_manager_shielded_identity_create_from_pool`], as an ordinary Rust
+/// function so a panic unwinds into [`catch_panic_to_code`] instead of across the C ABI.
+///
+/// # Safety
+/// Identical contract to the export that calls it.
+#[allow(clippy::too_many_arguments)]
+unsafe fn shielded_identity_create_from_pool_inner(
+    handle: Handle,
+    wallet_id_bytes: *const u8,
+    mnemonic_resolver_handle: *mut MnemonicResolverHandle,
+    account: u32,
+    identity_index: u32,
+    identity_pubkeys: *const IdentityPubkeyFFI,
+    identity_pubkeys_count: usize,
+    denomination: u64,
+    send_to_address_on_creation_failure_bytes: *const u8,
+    signer_identity_handle: *mut SignerHandle,
+    out_identity_id: *mut [u8; 32],
+) -> PlatformWalletFFIResult {
     check_ptr!(wallet_id_bytes);
     check_ptr!(mnemonic_resolver_handle);
     check_ptr!(identity_pubkeys);
@@ -1032,6 +1449,304 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_identity_create_from_p
     }
 }
 
+/// Sibling of [`platform_wallet_manager_shielded_identity_create_from_pool`], but
+/// the Orchard spend authority is a foreign one-time spending key rather than the
+/// wallet's own bound `OrchardKeySet`:
+/// - `one_time_sk_bytes` — the invitation's single-use 32-byte Orchard spending
+///   key. The wallet derives its fvk / ivk / ask, transiently scans the network
+///   for the note(s) funded to it, and spends them.
+/// - `change_address_raw43` — the claimer's OWN default Orchard address (43 raw
+///   bytes: 11-byte diversifier + 32-byte pk_d) that receives any over-funding
+///   change note. For a one-time invitation key the change is expected to be
+///   zero, but over-funding is handled.
+/// - `has_funding_birth_height` / `funding_birth_height` — an advisory birth-height
+///   hint (`false` → `None`, following the wallet-create birth-height override
+///   convention). The shielded tree has no height→note-index oracle, so the hint
+///   cannot seed the scan start today; the scan is value-bounded.
+///
+/// Everything else matches the pool sibling: `identity_pubkeys` /
+/// `identity_pubkeys_count` (same [`IdentityPubkeyFFI`] rows), `denomination` (a
+/// member of the versioned exit set), `send_to_address_on_creation_failure_bytes`
+/// (REQUIRED 21-byte `PlatformAddress` fallback bound into the sighash),
+/// `identity_index` (the local registration slot), and `signer_identity_handle`
+/// (the identity PoP signer). Blocks for the ~30 s Halo 2 proof.
+///
+/// On success the 32-byte new identity id is written to `out_identity_id`. As with
+/// the pool sibling, `out_identity_id` is ALSO written on the
+/// [`ErrorShieldedBroadcastUnconfirmed`] result code (the broadcast was accepted
+/// but its execution result couldn't be confirmed — the identity may exist on
+/// chain). On every other error code `out_identity_id` is left untouched.
+///
+/// [`ErrorShieldedBroadcastUnconfirmed`]: crate::error::PlatformWalletFFIResultCode::ErrorShieldedBroadcastUnconfirmed
+///
+/// # Safety
+/// - `wallet_id_bytes` must point to 32 readable bytes.
+/// - `one_time_sk_bytes` must point to exactly 32 readable bytes.
+/// - `change_address_raw43` must point to exactly 43 readable bytes.
+/// - `identity_pubkeys` must point to `identity_pubkeys_count` contiguous
+///   [`IdentityPubkeyFFI`] rows that outlive this call.
+/// - `send_to_address_on_creation_failure_bytes` must point to exactly 21
+///   readable bytes for the duration of this call.
+/// - `signer_identity_handle` must be a valid, non-destroyed `*mut SignerHandle`
+///   (a `VTableSigner` with the callback variant) that outlives this call.
+/// - `out_identity_id` must point to 32 writable bytes. Written on `Success` AND
+///   on `ErrorShieldedBroadcastUnconfirmed` only. A panic inside the claim is
+///   caught by [`catch_one_time_claim_panic`] and reported as the ambiguous,
+///   retryable-as-resume `ErrorShieldedClaimUnconfirmed` (48) with
+///   `out_identity_id` left untouched — the host must preserve the identity
+///   slot and re-run the same claim after the lease expires (the rerun resumes
+///   the retained recovery record rather than creating a second identity).
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn platform_wallet_manager_shielded_identity_create_from_one_time_key(
+    handle: Handle,
+    wallet_id_bytes: *const u8,
+    one_time_sk_bytes: *const u8,
+    has_funding_birth_height: bool,
+    funding_birth_height: u32,
+    change_address_raw43: *const u8,
+    identity_index: u32,
+    identity_pubkeys: *const IdentityPubkeyFFI,
+    identity_pubkeys_count: usize,
+    denomination: u64,
+    send_to_address_on_creation_failure_bytes: *const u8,
+    signer_identity_handle: *mut SignerHandle,
+    out_identity_id: *mut [u8; 32],
+) -> PlatformWalletFFIResult {
+    // Guarded: this export calls `block_on_worker`, which re-panics when its
+    // Tokio task panics, so a panic in the transient scan, proof generation,
+    // signing, wallet bookkeeping, or SDK processing would otherwise reach this
+    // non-unwind `extern "C"` frame and ABORT the host process. The JNI layer's
+    // `support::guard` cannot help — it sits on the far side of this export
+    // (#4313 review finding 945163f6ed5b). See `catch_panic_to_code`.
+    catch_one_time_claim_panic("shielded identity-create-from-one-time-key", || {
+        shielded_identity_create_from_one_time_key_inner(
+            handle,
+            wallet_id_bytes,
+            one_time_sk_bytes,
+            has_funding_birth_height,
+            funding_birth_height,
+            change_address_raw43,
+            identity_index,
+            identity_pubkeys,
+            identity_pubkeys_count,
+            denomination,
+            send_to_address_on_creation_failure_bytes,
+            signer_identity_handle,
+            out_identity_id,
+        )
+    })
+}
+
+/// Body of
+/// [`platform_wallet_manager_shielded_identity_create_from_one_time_key`], as an
+/// ordinary Rust function so a panic unwinds into
+/// [`catch_one_time_claim_panic`] instead of across the C ABI.
+///
+/// `out_identity_id` is written only on this function's own return paths, so a
+/// panic anywhere inside it leaves the caller's buffer exactly as it was.
+///
+/// # Safety
+/// Identical contract to the export that calls it.
+#[allow(clippy::too_many_arguments)]
+unsafe fn shielded_identity_create_from_one_time_key_inner(
+    handle: Handle,
+    wallet_id_bytes: *const u8,
+    one_time_sk_bytes: *const u8,
+    has_funding_birth_height: bool,
+    funding_birth_height: u32,
+    change_address_raw43: *const u8,
+    identity_index: u32,
+    identity_pubkeys: *const IdentityPubkeyFFI,
+    identity_pubkeys_count: usize,
+    denomination: u64,
+    send_to_address_on_creation_failure_bytes: *const u8,
+    signer_identity_handle: *mut SignerHandle,
+    out_identity_id: *mut [u8; 32],
+) -> PlatformWalletFFIResult {
+    check_ptr!(wallet_id_bytes);
+    check_ptr!(one_time_sk_bytes);
+    check_ptr!(change_address_raw43);
+    check_ptr!(identity_pubkeys);
+    check_ptr!(send_to_address_on_creation_failure_bytes);
+    check_ptr!(signer_identity_handle);
+    check_ptr!(out_identity_id);
+    if identity_pubkeys_count == 0 {
+        return PlatformWalletFFIResult::err(
+            PlatformWalletFFIResultCode::ErrorInvalidParameter,
+            "`identity_pubkeys_count` must be >= 1",
+        );
+    }
+
+    // REQUIRED 21-byte fallback PlatformAddress (bound into the sighash).
+    let send_to_address_on_creation_failure = match parse_required_platform_address(
+        send_to_address_on_creation_failure_bytes,
+        "send_to_address_on_creation_failure_bytes",
+    ) {
+        Ok(addr) => addr,
+        Err(result) => return result,
+    };
+
+    // Copy the one-time spending key (32 bytes; the caller's safety contract
+    // guarantees the length — no companion length arg crosses the C ABI).
+    // Bearer spend authority: hold this FFI-layer copy in a `Zeroizing` buffer so
+    // it is scrubbed on drop. It is moved into the wallet layer, which likewise
+    // carries it in `Zeroizing` (#4204 key-hygiene).
+    let mut one_time_sk = zeroize::Zeroizing::new([0u8; 32]);
+    std::ptr::copy_nonoverlapping(one_time_sk_bytes, one_time_sk.as_mut_ptr(), 32);
+
+    // Decode the claimer's own 43-byte default Orchard change address.
+    let mut change_raw = [0u8; 43];
+    std::ptr::copy_nonoverlapping(change_address_raw43, change_raw.as_mut_ptr(), 43);
+    let change_address = match OrchardAddress::from_raw_bytes(&change_raw) {
+        Ok(a) => a,
+        Err(_) => {
+            return PlatformWalletFFIResult::err(
+                PlatformWalletFFIResultCode::ErrorInvalidParameter,
+                "change_address_raw43 is not a valid 43-byte Orchard address",
+            );
+        }
+    };
+
+    let funding_birth_height = if has_funding_birth_height {
+        Some(funding_birth_height)
+    } else {
+        None
+    };
+
+    let mut wallet_id = [0u8; 32];
+    std::ptr::copy_nonoverlapping(wallet_id_bytes, wallet_id.as_mut_ptr(), 32);
+
+    let keys_map = match decode_identity_pubkeys(identity_pubkeys, identity_pubkeys_count) {
+        Ok(m) => m,
+        Err(result) => return result,
+    };
+    let public_keys: Vec<(
+        dpp::identity::IdentityPublicKey,
+        IdentityPublicKeyInCreation,
+    )> = keys_map
+        .into_values()
+        .map(|k| {
+            let in_creation: IdentityPublicKeyInCreation = (&k).into();
+            (k, in_creation)
+        })
+        .collect();
+
+    let (wallet, coordinator) = match resolve_wallet_and_coordinator(handle, &wallet_id) {
+        Ok(p) => p,
+        Err(result) => return result,
+    };
+
+    let signer_identity_addr = signer_identity_handle as usize;
+
+    // Run the proof on a worker thread (8 MB stack) — Halo 2 synthesis recurses
+    // past the iOS dispatch-thread stack.
+    let result = block_on_worker(async move {
+        // SAFETY: re-materialize the borrow under the caller's documented lifetime
+        // contract; valid for the duration of this synchronously-awaited task.
+        let identity_signer: &VTableSigner = &*(signer_identity_addr as *const VTableSigner);
+        let prover = CachedOrchardProver::new();
+        let r = wallet
+            .identity_create_from_one_time_key(
+                &coordinator,
+                one_time_sk,
+                funding_birth_height,
+                change_address,
+                identity_index,
+                public_keys,
+                denomination,
+                send_to_address_on_creation_failure,
+                identity_signer,
+                &prover,
+            )
+            .await;
+        poke_sync_on_unconfirmed(&r, handle);
+        r
+    });
+
+    let (identity_id_to_write, ffi_result) = map_one_time_claim_result(result);
+    if let Some(identity_id) = identity_id_to_write {
+        *out_identity_id = identity_id.to_buffer();
+    }
+    ffi_result
+}
+
+/// Classify a one-time-key claim outcome into its FFI result, plus the identity
+/// id (if any) the entry point must write to `out_identity_id`.
+///
+/// Split out of
+/// [`platform_wallet_manager_shielded_identity_create_from_one_time_key`] so the
+/// code split below is reachable from a unit test without a live manager handle
+/// — the same shape `map_spend_result` uses for the spend entry points. The
+/// `Some(id)` return is the ONLY channel that writes `out_identity_id`, so the
+/// "written on Success and on `ErrorShieldedBroadcastUnconfirmed` only" contract
+/// in that function's safety docs is decided here and nowhere else.
+fn map_one_time_claim_result(
+    result: Result<Identifier, PlatformWalletError>,
+) -> (Option<Identifier>, PlatformWalletFFIResult) {
+    match result {
+        Ok(identity_id) => (Some(identity_id), PlatformWalletFFIResult::ok()),
+        Err(PlatformWalletError::ShieldedBroadcastUnconfirmed {
+            identity_id,
+            ref reason,
+        }) => (
+            Some(identity_id),
+            PlatformWalletFFIResult::err(
+                PlatformWalletFFIResultCode::ErrorShieldedBroadcastUnconfirmed,
+                format!(
+                    "shielded identity-create-from-one-time-key broadcast unconfirmed (identity {identity_id} may exist on chain): {reason}"
+                ),
+            ),
+        ),
+        Err(e @ PlatformWalletError::ShieldedNoRecordedAnchor(_)) => (
+            None,
+            PlatformWalletFFIResult::err(
+                PlatformWalletFFIResultCode::ErrorShieldedNoRecordedAnchor,
+                format!("Wallet is still syncing to a confirmed state — try again shortly. ({e})"),
+            ),
+        ),
+        Err(e @ PlatformWalletError::ShieldedBroadcastFailed(_)) => (
+            None,
+            PlatformWalletFFIResult::err(
+                PlatformWalletFFIResultCode::ErrorShieldedBroadcastFailed,
+                format!("shielded identity-create-from-one-time-key failed: {e}"),
+            ),
+        ),
+        // Every variant that owns a typed code goes through the blanket
+        // `From<PlatformWalletError>` conversion, because the catch-all below
+        // would flatten it to the generic `ErrorWalletOperation` (6) and destroy
+        // the retry-semantics discriminator the host classifies on:
+        //
+        // * `ShieldedInviteAlreadyClaimed` → 43, TERMINAL — the one signal that
+        //   tells a claimer the invitation can never be claimed again
+        //   (#4204 review finding 7be05fde0d09).
+        // * `ShieldedForeignScanBudgetExhausted` → 44, RETRYABLE and cheap —
+        //   the scan simply paused at its per-attempt budget with progress
+        //   checkpointed. Flattened to 6 it reads as a hard failure, which
+        //   strands a genuinely funded claim whose note sits deep in the tree
+        //   (#4313 review finding, this entry point).
+        // * `ShieldedLifecycleBusy` → 45, RETRYABLE — the claim was refused
+        //   admission at the store (a purge holds it, or another claimant owns
+        //   this invitation's claim-record key). Nothing was scanned, built or
+        //   broadcast, so the host should simply retry.
+        //
+        // The blanket conversion is the single source of truth for all three;
+        // this arm only keeps them from reaching the catch-all.
+        Err(
+            e @ (PlatformWalletError::ShieldedInviteAlreadyClaimed { .. }
+            | PlatformWalletError::ShieldedForeignScanBudgetExhausted { .. }
+            | PlatformWalletError::ShieldedLifecycleBusy { .. }),
+        ) => (None, e.into()),
+        Err(e) => (
+            None,
+            PlatformWalletFFIResult::err(
+                PlatformWalletFFIResultCode::ErrorWalletOperation,
+                format!("shielded identity-create-from-one-time-key failed: {e}"),
+            ),
+        ),
+    }
+}
+
 /// Preflight the maximum credits the cached state can shield from one Platform
 /// Payment account.
 ///
@@ -1114,6 +1829,36 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_shield_preflight(
 ///   doesn't satisfy `Signer<PlatformAddress>`).
 #[no_mangle]
 pub unsafe extern "C" fn platform_wallet_manager_shielded_shield(
+    handle: Handle,
+    wallet_id_bytes: *const u8,
+    shielded_account: u32,
+    payment_account: u32,
+    amount: u64,
+    signer_address_handle: *const SignerHandle,
+) -> PlatformWalletFFIResult {
+    // Guarded: a panic must NOT reach this `extern "C"` frame (see `catch_panic_to_code`). A
+    // shield reserves no notes, but the transition may already have been broadcast when the
+    // panic struck, so the same ambiguous spend-unconfirmed contract applies (matching
+    // `map_spend_result`'s mapping for this operation); a later manual retry self-heals through
+    // the address-nonce check.
+    catch_spend_panic("shielded shield", || {
+        shielded_shield_inner(
+            handle,
+            wallet_id_bytes,
+            shielded_account,
+            payment_account,
+            amount,
+            signer_address_handle,
+        )
+    })
+}
+
+/// Body of [`platform_wallet_manager_shielded_shield`], as an ordinary Rust function so a panic
+/// unwinds into [`catch_spend_panic`] instead of across the C ABI.
+///
+/// # Safety
+/// Identical contract to the export that calls it.
+unsafe fn shielded_shield_inner(
     handle: Handle,
     wallet_id_bytes: *const u8,
     shielded_account: u32,
@@ -1562,6 +2307,48 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_fund_from_asset_lock(
     on_asset_lock_built: AssetLockBuiltFn,
     on_asset_lock_built_context: *mut c_void,
 ) -> PlatformWalletFFIResult {
+    // Guarded: a panic must NOT reach this `extern "C"` frame (see `catch_panic_to_code`). The
+    // panic maps to `ErrorWalletOperation` — the single error code this export already surfaces
+    // — with the tracked-lock / resume guidance in the message.
+    catch_panic_to_code(
+        "shielded fund-from-asset-lock",
+        PlatformWalletFFIResultCode::ErrorWalletOperation,
+        ASSET_LOCK_FUNDING_PANIC_GUIDANCE,
+        || {
+            shielded_fund_from_asset_lock_inner(
+                handle,
+                wallet_id_bytes,
+                account_index,
+                amount_duffs,
+                recipient_raw_43,
+                surplus_output_ptr,
+                surplus_output_len,
+                core_signer_handle,
+                on_asset_lock_built,
+                on_asset_lock_built_context,
+            )
+        },
+    )
+}
+
+/// Body of [`platform_wallet_manager_shielded_fund_from_asset_lock`], as an ordinary Rust
+/// function so a panic unwinds into [`catch_panic_to_code`] instead of across the C ABI.
+///
+/// # Safety
+/// Identical contract to the export that calls it.
+#[allow(clippy::too_many_arguments)]
+unsafe fn shielded_fund_from_asset_lock_inner(
+    handle: Handle,
+    wallet_id_bytes: *const u8,
+    account_index: u32,
+    amount_duffs: u64,
+    recipient_raw_43: *const u8,
+    surplus_output_ptr: *const u8,
+    surplus_output_len: usize,
+    core_signer_handle: *mut MnemonicResolverHandle,
+    on_asset_lock_built: AssetLockBuiltFn,
+    on_asset_lock_built_context: *mut c_void,
+) -> PlatformWalletFFIResult {
     check_ptr!(wallet_id_bytes);
     check_ptr!(recipient_raw_43);
     check_ptr!(core_signer_handle);
@@ -1873,6 +2660,42 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_resume_fund_from_asset
     surplus_output_len: usize,
     core_signer_handle: *mut MnemonicResolverHandle,
 ) -> PlatformWalletFFIResult {
+    // Guarded: a panic must NOT reach this `extern "C"` frame (see `catch_panic_to_code`).
+    // Same code + guidance as the fresh-build sibling; a resume of the same outpoint is
+    // additionally protected by the lock's one-shot consumption on Platform.
+    catch_panic_to_code(
+        "shielded resume fund-from-asset-lock",
+        PlatformWalletFFIResultCode::ErrorWalletOperation,
+        ASSET_LOCK_FUNDING_PANIC_GUIDANCE,
+        || {
+            shielded_resume_fund_from_asset_lock_inner(
+                handle,
+                wallet_id_bytes,
+                out_point,
+                recipient_raw_43,
+                surplus_output_ptr,
+                surplus_output_len,
+                core_signer_handle,
+            )
+        },
+    )
+}
+
+/// Body of [`platform_wallet_manager_shielded_resume_fund_from_asset_lock`], as an ordinary
+/// Rust function so a panic unwinds into [`catch_panic_to_code`] instead of across the C ABI.
+///
+/// # Safety
+/// Identical contract to the export that calls it.
+#[allow(clippy::too_many_arguments)]
+unsafe fn shielded_resume_fund_from_asset_lock_inner(
+    handle: Handle,
+    wallet_id_bytes: *const u8,
+    out_point: *const OutPointFFI,
+    recipient_raw_43: *const u8,
+    surplus_output_ptr: *const u8,
+    surplus_output_len: usize,
+    core_signer_handle: *mut MnemonicResolverHandle,
+) -> PlatformWalletFFIResult {
     check_ptr!(wallet_id_bytes);
     check_ptr!(out_point);
     check_ptr!(recipient_raw_43);
@@ -1998,6 +2821,51 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_resume_fund_from_asset
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn platform_wallet_manager_shielded_seed_pool_notes(
+    handle: Handle,
+    wallet_id_bytes: *const u8,
+    account: u32,
+    target_total_notes: u64,
+    funding_account_index: u32,
+    core_signer_handle: *mut MnemonicResolverHandle,
+    progress_fn: Option<
+        unsafe extern "C" fn(
+            context: *mut std::os::raw::c_void,
+            batch_index: u64,
+            batches_total_estimate: u64,
+            pool_notes_now: u64,
+            target: u64,
+        ),
+    >,
+    progress_ctx: *mut std::os::raw::c_void,
+) -> PlatformWalletFFIResult {
+    // Guarded: a panic must NOT reach this `extern "C"` frame (see `catch_panic_to_code`). The
+    // panic maps to `ErrorWalletOperation` — the single error code this export already surfaces.
+    catch_panic_to_code(
+        "shielded seed-pool-notes",
+        PlatformWalletFFIResultCode::ErrorWalletOperation,
+        SEED_POOL_PANIC_GUIDANCE,
+        || {
+            shielded_seed_pool_notes_inner(
+                handle,
+                wallet_id_bytes,
+                account,
+                target_total_notes,
+                funding_account_index,
+                core_signer_handle,
+                progress_fn,
+                progress_ctx,
+            )
+        },
+    )
+}
+
+/// Body of [`platform_wallet_manager_shielded_seed_pool_notes`], as an ordinary Rust function
+/// so a panic unwinds into [`catch_panic_to_code`] instead of across the C ABI.
+///
+/// # Safety
+/// Identical contract to the export that calls it.
+#[allow(clippy::too_many_arguments)]
+unsafe fn shielded_seed_pool_notes_inner(
     handle: Handle,
     wallet_id_bytes: *const u8,
     account: u32,
@@ -2277,6 +3145,115 @@ pub(crate) fn resolve_wallet_and_coordinator(
     Ok((wallet, coordinator))
 }
 
+// ---------------------------------------------------------------------------
+// One-time Orchard key generation (inviter side of L2 shielded invitations)
+// ---------------------------------------------------------------------------
+
+/// Generate a fresh one-time Orchard spending key and its default payment
+/// address — the *inviter* side of an L2 shielded invitation.
+///
+/// Handle-less: a one-time key is process-local Orchard crypto, not bound
+/// to any wallet. Writes the 32-byte spending key to `out_sk_32` and the 43
+/// raw bytes of its default Orchard address (11-byte diversifier + 32-byte
+/// `pk_d`, the same encoding
+/// [`platform_wallet_manager_shielded_default_address`] returns) to
+/// `out_address_43`.
+///
+/// The inviter funds a note to `out_address_43`; a claimer handed the 32
+/// bytes in `out_sk_32` spends it via
+/// [`platform_wallet_manager_shielded_identity_create_from_one_time_key`]
+/// (which accepts exactly these spending-key bytes).
+///
+/// The generator re-rolls until it draws a valid scalar, so an invalid key is
+/// never returned — but the call itself can still fail: an OS entropy failure
+/// in the underlying RNG surfaces as [`ErrorWalletOperation`] (never a panic
+/// across the C ABI). Always check the result code.
+///
+/// [`ErrorWalletOperation`]: crate::error::PlatformWalletFFIResultCode::ErrorWalletOperation
+/// [`platform_wallet_manager_shielded_default_address`]: crate::platform_wallet_manager_shielded_default_address
+///
+/// # Safety
+/// - `out_sk_32` must point at 32 writable bytes.
+/// - `out_address_43` must point at 43 writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn platform_wallet_generate_one_time_orchard_key(
+    out_sk_32: *mut u8,
+    out_address_43: *mut u8,
+) -> PlatformWalletFFIResult {
+    check_ptr!(out_sk_32);
+    check_ptr!(out_address_43);
+
+    // `generate_one_time_orchard_key` uses `try_fill_bytes`, so an OS entropy
+    // failure returns a typed error here rather than panicking. That matters:
+    // this is a `#[no_mangle] extern "C"` export, so a panic would abort the
+    // process across the C ABI before any JNI panic guard could convert it —
+    // an OS RNG failure must surface as a normal error, never a hard abort.
+    // `sk` is a `Zeroizing<[u8; 32]>`: the generator now scrubs every draw it
+    // makes (including rejected ones) and hands the accepted key out still
+    // wrapped, so this native copy is wiped on drop once it has been handed to
+    // the caller's `out_sk_32` buffer — no explicit `zeroize()` needed, and the
+    // scrub also covers the early-return paths (#4204 key-hygiene).
+    let (sk, address) = match generate_one_time_orchard_key() {
+        Ok(pair) => pair,
+        Err(e) => {
+            return PlatformWalletFFIResult::err(
+                PlatformWalletFFIResultCode::ErrorWalletOperation,
+                e.to_string(),
+            );
+        }
+    };
+    std::ptr::copy_nonoverlapping(sk.as_ptr(), out_sk_32, 32);
+    std::ptr::copy_nonoverlapping(address.as_ptr(), out_address_43, 43);
+    PlatformWalletFFIResult::ok()
+}
+
+/// Derive the default raw Orchard payment address (43 bytes) from a 32-byte
+/// Orchard spending key — the RNG-free counterpart of
+/// [`platform_wallet_generate_one_time_orchard_key`].
+///
+/// Handle-less. On success the 43 raw address bytes (11-byte diversifier +
+/// 32-byte `pk_d`) are written to `out_address_43`. Returns
+/// [`ErrorInvalidParameter`] if `sk_bytes_32` is not a valid Orchard
+/// `SpendingKey` scalar. Used for round-trip validation and to recompute
+/// the recipient an inviter must fund for a given one-time key.
+///
+/// [`ErrorInvalidParameter`]: crate::error::PlatformWalletFFIResultCode::ErrorInvalidParameter
+///
+/// # Safety
+/// - `sk_bytes_32` must point at 32 readable bytes.
+/// - `out_address_43` must point at 43 writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn platform_wallet_orchard_address_from_spending_key(
+    sk_bytes_32: *const u8,
+    out_address_43: *mut u8,
+) -> PlatformWalletFFIResult {
+    check_ptr!(sk_bytes_32);
+    check_ptr!(out_address_43);
+
+    // Carry the caller-supplied bearer spending key in `Zeroizing` so THIS
+    // frame's copy is scrubbed on drop, on every return path (#4204 key
+    // hygiene). `orchard_address_from_spending_key` now takes the key BY
+    // REFERENCE and contains its own derived `SpendingKey` in a scrub-on-drop
+    // guard, so no unsanitized copy of the scalar is repeated at this
+    // boundary (#4204 finding 1ee08ba70627).
+    let mut sk = zeroize::Zeroizing::new([0u8; 32]);
+    std::ptr::copy_nonoverlapping(sk_bytes_32, sk.as_mut_ptr(), 32);
+
+    match orchard_address_from_spending_key(&sk) {
+        Ok(address) => {
+            std::ptr::copy_nonoverlapping(address.as_ptr(), out_address_43, 43);
+            PlatformWalletFFIResult::ok()
+        }
+        // An invalid scalar is a bad caller-supplied key, not an internal
+        // fault — surface it as an invalid parameter (the typed
+        // `ShieldedKeyDerivation` message is preserved verbatim).
+        Err(e) => PlatformWalletFFIResult::err(
+            PlatformWalletFFIResultCode::ErrorInvalidParameter,
+            e.to_string(),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2375,6 +3352,7 @@ mod tests {
                     attempts: 0,
                     identity_nonce_finalized: false,
                     identity_user_abandoned: true,
+                    identity_index: None,
                 },
             )
             .expect("seed malformed durable metadata");
@@ -2797,16 +3775,17 @@ mod tests {
     /// A panic inside a shielded-spend export must NOT unwind into the `extern "C"` frame (that
     /// aborts the process). It becomes `ErrorShieldedSpendUnconfirmed` — the conservative
     /// "may have been broadcast, do NOT retry" contract, because a panic can strike after the
-    /// transition is submitted.
+    /// notes are reserved and after the transition is submitted.
     ///
     /// The panic hook is deliberately left alone: it is process-global, `cargo test` runs tests
     /// concurrently, and `take_hook` + restore from two tests can interleave so that one restores
     /// the other's temporary hook last — suppressing panic diagnostics for the rest of the
     /// process, including unrelated concurrent panics. The libtest harness already captures this
-    /// test's output, so the deliberate panic's backtrace does not reach the console anyway.
+    /// test's output, so the deliberate panic's backtrace does not reach the console anyway
+    /// (#4312 review finding 60c26fc233d3).
     #[test]
     fn catch_spend_panic_maps_a_panic_to_the_unconfirmed_contract() {
-        let result = catch_spend_panic("shielded shield to recipient", || {
+        let result = catch_spend_panic("shielded multi-output transfer", || {
             panic!("tokio worker panicked");
         });
 
@@ -2817,13 +3796,79 @@ mod tests {
         );
         let message = message_of(&result);
         assert!(
-            message.contains("shielded shield to recipient panicked")
+            message.contains("shielded multi-output transfer panicked")
                 && message.contains("tokio worker panicked"),
             "the panic payload must survive into the FFI message: {message}"
         );
         assert!(
             message.contains("do NOT retry"),
             "the message must carry the do-not-retry guidance: {message}"
+        );
+    }
+
+    /// The public recipient ceiling must equal the EFFECTIVE per-transition action ceiling
+    /// (derived in dpp from BOTH `max_shielded_transition_actions` and
+    /// `max_state_transition_size`) minus the unconditional change output. If a versioned limit
+    /// moves, this fails and the constant — plus its Kotlin mirror in
+    /// `PlatformWalletManager.kt` — must be raised in lockstep.
+    #[test]
+    fn max_recipients_matches_the_effective_action_ceiling() {
+        let effective = dpp::shielded::max_shielded_actions_per_transition(
+            dpp::version::PlatformVersion::latest(),
+        );
+        assert_eq!(
+            MAX_SHIELDED_TRANSFER_RECIPIENTS + 1,
+            effective,
+            "recipients + the unconditional change output must equal the effective action \
+             ceiling; update MAX_SHIELDED_TRANSFER_RECIPIENTS (and the Kotlin mirror) in \
+             lockstep with the versioned limits"
+        );
+    }
+
+    /// The generalized guard must carry the per-operation code and guidance: identity creation
+    /// maps a panic to the generic `ErrorUnknown` (its richer codes all promise things a panic
+    /// cannot deliver — see the export's call site), and the asset-lock funding exports map it
+    /// to their single existing error code, `ErrorWalletOperation`.
+    ///
+    /// Like the sibling guard test, this leaves the process-global panic hook untouched — see
+    /// `catch_spend_panic_maps_a_panic_to_the_unconfirmed_contract`.
+    #[test]
+    fn catch_panic_to_code_carries_the_per_operation_contract() {
+        let identity = catch_panic_to_code(
+            "shielded identity-create-from-pool",
+            PlatformWalletFFIResultCode::ErrorUnknown,
+            IDENTITY_CREATE_PANIC_GUIDANCE,
+            || panic!("proving task panicked"),
+        );
+        let funding = catch_panic_to_code(
+            "shielded fund-from-asset-lock",
+            PlatformWalletFFIResultCode::ErrorWalletOperation,
+            ASSET_LOCK_FUNDING_PANIC_GUIDANCE,
+            || panic!("proving task panicked"),
+        );
+
+        assert_eq!(
+            identity.code,
+            PlatformWalletFFIResultCode::ErrorUnknown,
+            "identity creation must NOT reuse the spend-scoped unconfirmed code"
+        );
+        let message = message_of(&identity);
+        assert!(
+            message.contains("shielded identity-create-from-pool panicked")
+                && message.contains("do NOT re-submit")
+                && message.contains("out_identity_id was NOT written"),
+            "identity-create guidance must survive into the message: {message}"
+        );
+
+        assert_eq!(
+            funding.code,
+            PlatformWalletFFIResultCode::ErrorWalletOperation,
+            "asset-lock funding must keep its single existing error code"
+        );
+        let message = message_of(&funding);
+        assert!(
+            message.contains("Do NOT blindly re-run") && message.contains("resume"),
+            "funding guidance must survive into the message: {message}"
         );
     }
 
@@ -2853,6 +3898,118 @@ mod tests {
         assert!(
             message.contains("do NOT retry"),
             "the message must carry the do-not-retry guidance: {message}"
+        );
+    }
+
+    /// A panic inside the one-time-key CLAIM export must not unwind into the `extern "C"` frame
+    /// either (#4313 review finding 945163f6ed5b). That export calls `block_on_worker`, which
+    /// re-panics on a panicking Tokio task, so a panic in the transient scan, Halo 2 synthesis,
+    /// signing, or SDK processing reached the C ABI and aborted the host process — the JNI
+    /// `guard` is on the far side of the export and never saw it.
+    ///
+    /// The code must be the dedicated `ErrorShieldedClaimUnconfirmed` (48) — NOT the generic
+    /// `ErrorUnknown`, which Kotlin exposes as a non-retryable `Generic` so a typed host would
+    /// release the identity slot the retained recovery row needs (#4313 review finding
+    /// 4bf998e99652) — and the ambiguity contract must survive: a panic can strike after the
+    /// broadcast, so the message must neither claim the invitation is spent (the terminal 43)
+    /// nor that nothing happened.
+    #[test]
+    fn catch_one_time_claim_panic_keeps_the_claim_ambiguity_contract() {
+        let result =
+            catch_one_time_claim_panic("shielded identity-create-from-one-time-key", || {
+                panic!("halo2 synthesis panicked");
+            });
+
+        assert_eq!(
+            result.code,
+            PlatformWalletFFIResultCode::ErrorShieldedClaimUnconfirmed,
+            "a claim panic must map to the dedicated ambiguous-claim code — every other code \
+             this export uses promises something a panic cannot, and the generic ErrorUnknown \
+             reaches Kotlin as a non-retryable Generic that forfeits the slot"
+        );
+        assert_ne!(
+            result.code,
+            PlatformWalletFFIResultCode::ErrorUnknown,
+            "the pre-fix generic code must be gone — hosts have no typed mapping for it"
+        );
+        assert_ne!(
+            result.code,
+            PlatformWalletFFIResultCode::ErrorShieldedInviteAlreadyClaimed,
+            "a panic must never be reported as the TERMINAL already-claimed outcome"
+        );
+        let message = message_of(&result);
+        assert!(
+            message.contains("shielded identity-create-from-one-time-key panicked")
+                && message.contains("halo2 synthesis panicked"),
+            "the panic payload must survive into the FFI message: {message}"
+        );
+        assert!(
+            message.contains("may or may not have been broadcast"),
+            "the message must preserve the ambiguity: {message}"
+        );
+        assert!(
+            message.contains("out_identity_id was NOT written"),
+            "the message must tell the host its out param is untouched: {message}"
+        );
+        assert!(
+            message.contains("recovery record is retained"),
+            "the message must point at the recovery path that makes this survivable: {message}"
+        );
+    }
+
+    /// The pre-fix shape, side by side with the fixed one, so the difference the guard makes is
+    /// pinned rather than asserted in prose (#4313 review finding 945163f6ed5b).
+    ///
+    /// `block_on_worker` `.expect`s on the Tokio `JoinError`, so a panicking claim task re-panics
+    /// in the export's own frame. UNGUARDED, that unwind leaves the body and reaches the caller —
+    /// which for a `#[no_mangle] extern "C"` function is a non-unwind C ABI frame, i.e. an
+    /// immediate `abort` of the host process, with no result and no Java exception. GUARDED, the
+    /// identical panic becomes a typed result the host can act on.
+    ///
+    /// The export's entire body is now the guard call, and
+    /// `shielded_identity_create_from_one_time_key_inner` is private with exactly that one caller,
+    /// so the wiring cannot be bypassed.
+    #[test]
+    fn an_unguarded_claim_body_lets_the_panic_escape_to_the_c_abi_frame() {
+        // Pre-fix: the body was invoked directly by the export.
+        let escaped = std::panic::catch_unwind(|| -> PlatformWalletFFIResult {
+            panic!("halo2 synthesis panicked");
+        });
+        assert!(
+            escaped.is_err(),
+            "RED: the panic leaves the body and reaches the export frame, where it aborts"
+        );
+
+        // Post-fix: the same panic is contained and typed.
+        let contained =
+            catch_one_time_claim_panic("shielded identity-create-from-one-time-key", || {
+                panic!("halo2 synthesis panicked");
+            });
+        assert_eq!(
+            contained.code,
+            PlatformWalletFFIResultCode::ErrorShieldedClaimUnconfirmed,
+            "GREEN: the guard converts the identical panic into a typed result the host receives"
+        );
+    }
+
+    /// The guard must be transparent to the ordinary outcomes — it wraps the whole export, so a
+    /// bug here would corrupt every non-panicking claim result, including the
+    /// `ErrorShieldedBroadcastUnconfirmed` path whose contract WRITES `out_identity_id`.
+    #[test]
+    fn catch_one_time_claim_panic_passes_results_through() {
+        let ok = catch_one_time_claim_panic("test", PlatformWalletFFIResult::ok);
+        assert_eq!(ok.code, PlatformWalletFFIResultCode::Success);
+
+        let terminal = catch_one_time_claim_panic("test", || {
+            PlatformWalletFFIResult::err(
+                PlatformWalletFFIResultCode::ErrorShieldedInviteAlreadyClaimed,
+                "already claimed",
+            )
+        });
+        assert_eq!(
+            terminal.code,
+            PlatformWalletFFIResultCode::ErrorShieldedInviteAlreadyClaimed,
+            "the guard must not rewrite a real terminal outcome"
         );
     }
 
@@ -3204,6 +4361,83 @@ mod tests {
         assert_eq!(
             map_asset_lock_funding_result(Ok(()), "shielded fund-from-asset-lock").code,
             PlatformWalletFFIResultCode::Success
+        );
+    }
+
+    /// The one-time-key claim entry point must let every typed retry-semantics
+    /// code through — not just the terminal one.
+    ///
+    /// `ShieldedForeignScanBudgetExhausted` has a blanket conversion to code 44
+    /// (`ErrorShieldedScanBudgetExhausted`), which Kotlin maps to the RETRYABLE
+    /// `ShieldedScanBudgetExhausted`. This entry point used to reach it only via
+    /// the catch-all, flattening it to `ErrorWalletOperation` (6) — a
+    /// non-retryable generic — so the host rendered a paused scan as a failed
+    /// claim and stranded a funded invitation whose note sits deep in the tree.
+    /// The polarity is the whole contract, so it is pinned here at the boundary
+    /// the host actually calls, not only at the blanket conversion.
+    #[test]
+    fn map_one_time_claim_result_pins_the_retryable_scan_budget_code() {
+        let (identity_id, result) = map_one_time_claim_result(Err(
+            PlatformWalletError::ShieldedForeignScanBudgetExhausted {
+                scanned_through: 262_144,
+            },
+        ));
+        assert_eq!(
+            result.code,
+            PlatformWalletFFIResultCode::ErrorShieldedScanBudgetExhausted,
+            "a budget-paused claim scan must reach the host as 44, never as the \
+             generic ErrorWalletOperation (6)"
+        );
+        assert!(
+            identity_id.is_none(),
+            "nothing was built or broadcast, so no identity id may be written"
+        );
+        assert!(
+            message_of(&result).contains("262144"),
+            "the checkpointed scan position must survive in the message"
+        );
+    }
+
+    /// The neighbours of the arm above, pinned in the same test so a future
+    /// edit cannot silently re-flatten one of them.
+    #[test]
+    fn map_one_time_claim_result_pins_the_terminal_and_unconfirmed_codes() {
+        let claimed =
+            map_one_time_claim_result(Err(PlatformWalletError::ShieldedInviteAlreadyClaimed {
+                reason: "nullifier already spent".to_string(),
+            }));
+        assert_eq!(
+            claimed.1.code,
+            PlatformWalletFFIResultCode::ErrorShieldedInviteAlreadyClaimed
+        );
+        assert!(
+            claimed.0.is_none(),
+            "a consumed invitation must NOT write an identity id — that is the \
+             false-ownership claim code 43 exists to prevent"
+        );
+
+        // The one code that DOES write `out_identity_id`.
+        let expected = Identifier::from([7u8; 32]);
+        let unconfirmed =
+            map_one_time_claim_result(Err(PlatformWalletError::ShieldedBroadcastUnconfirmed {
+                identity_id: expected,
+                reason: "result proof fetch failed".to_string(),
+            }));
+        assert_eq!(
+            unconfirmed.1.code,
+            PlatformWalletFFIResultCode::ErrorShieldedBroadcastUnconfirmed
+        );
+        assert_eq!(
+            unconfirmed.0,
+            Some(expected),
+            "the unconfirmed code must hand back the derived id so the host can hold the slot"
+        );
+
+        // Anything without a typed code still flattens, deliberately.
+        let generic = map_one_time_claim_result(Err(PlatformWalletError::ShieldedNoUnspentNotes)).1;
+        assert_eq!(
+            generic.code,
+            PlatformWalletFFIResultCode::ErrorWalletOperation
         );
     }
 
