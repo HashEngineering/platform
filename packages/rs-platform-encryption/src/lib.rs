@@ -5,6 +5,8 @@
 //!
 //! The DIP-15 surface is split by concern:
 //! - [`ecdh`] — ECDH shared-secret derivation.
+//! - [`dashj_legacy`] — the altered ECDH key dashj uses for ~1/512 pairs, and a
+//!   decrypt helper that falls back to it.
 //! - [`aes`] — AES-256-CBC primitives shared by the encrypted fields.
 //! - [`compact_xpub`] — the 69-byte compact xpub (`encryptedPublicKey`) + its encryption.
 //! - [`account_label`] — `encryptedAccountLabel`.
@@ -21,6 +23,7 @@ mod account_reference;
 mod aes;
 mod compact_xpub;
 mod contact_info;
+mod dashj_legacy;
 mod ecdh;
 mod error;
 mod private_document_envelope;
@@ -38,6 +41,7 @@ pub use compact_xpub::{
 pub use contact_info::{
     decrypt_enc_to_user_id, decrypt_private_data, encrypt_enc_to_user_id, encrypt_private_data,
 };
+pub use dashj_legacy::{dashj_legacy_shared_key, decrypt_with_dashj_fallback, SharedKeyVariant};
 pub use ecdh::derive_shared_key_ecdh;
 pub use error::CryptoError;
 pub use private_document_envelope::{
