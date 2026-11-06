@@ -231,6 +231,7 @@ fn save_unconfirmed_spend(
                 identity_nonce_finalized: false,
                 identity_user_abandoned: false,
                 anchor_height: Some(5),
+                identity_index: None,
             },
         )
         .expect("save the transition");

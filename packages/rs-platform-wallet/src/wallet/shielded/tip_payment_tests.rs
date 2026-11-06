@@ -140,6 +140,7 @@ fn record_of(
         anchor_height: None,
         identity_nonce_finalized: false,
         identity_user_abandoned: false,
+        identity_index: None,
     }
 }
 

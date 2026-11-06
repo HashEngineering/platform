@@ -460,6 +460,7 @@ async fn should_keep_the_highest_batch_height_before_a_spend_drops_its_record() 
                     identity_nonce_finalized: false,
                     identity_user_abandoned: false,
                     anchor_height: Some(1),
+                    identity_index: None,
                 },
             )
             .unwrap();
@@ -543,6 +544,7 @@ async fn should_mark_nothing_spent_when_the_spend_scan_height_is_not_kept() {
                     identity_nonce_finalized: false,
                     identity_user_abandoned: false,
                     anchor_height: Some(1),
+                    identity_index: None,
                 },
             )
             .unwrap();

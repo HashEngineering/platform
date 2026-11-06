@@ -92,7 +92,10 @@ pub use balance::{
 pub(crate) use contact_address::ContactShieldedAddresses;
 pub use coordinator::NetworkShieldedCoordinator;
 pub use file_store::{FileBackedShieldedStore, FileShieldedStoreError};
-pub use keys::{AccountViewingKeys, OrchardKeySet};
+pub use keys::{
+    generate_one_time_orchard_key, orchard_address_from_spending_key, AccountViewingKeys,
+    OrchardKeySet, ORCHARD_RAW_ADDRESS_LEN,
+};
 pub use note_selection::TokenPoolSpendKind;
 pub use operations::{
     ShieldedTokenPurchaseAvailability, ShieldedTokenPurchaseOutcome, ShieldedTokenSpendOutcome,
