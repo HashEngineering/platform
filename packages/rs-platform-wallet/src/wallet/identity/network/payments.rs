@@ -10879,7 +10879,7 @@ mod tests {
             .expect("mnemonic")
             .to_seed("");
         let w = key_wallet::wallet::Wallet::from_seed_bytes(
-            seed,
+            *seed,
             Network::Testnet,
             WalletAccountCreationOptions::None,
         )
