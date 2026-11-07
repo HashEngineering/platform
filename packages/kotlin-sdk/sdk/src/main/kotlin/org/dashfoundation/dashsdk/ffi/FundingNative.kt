@@ -156,6 +156,23 @@ internal object FundingNative {
     )
 
     /**
+     * Shield from Platform balance to a third-party Orchard address, Type 15
+     * (bridges `platform_wallet_manager_shielded_shield_to_recipient`). See
+     * [org.dashfoundation.dashsdk.wallet.PlatformWalletManager.shieldedShieldToRecipient].
+     * [memoText] null or empty means no memo. Blocks for the ~30s Halo 2 proof.
+     */
+    external fun shieldedShieldToRecipient(
+        managerHandle: Long,
+        walletId: ByteArray,
+        shieldedAccount: Int,
+        paymentAccount: Int,
+        recipientRaw43: ByteArray,
+        amount: Long,
+        memoText: String?,
+        signerAddressHandle: Long,
+    )
+
+    /**
      * Shield from a Platform IDENTITY's balance, Type 21 (bridges
      * `platform_wallet_manager_shielded_shield_from_identity`). Sibling of
      * [shieldedShield] with the identity, rather than the transparent
@@ -177,6 +194,26 @@ internal object FundingNative {
         shieldedAccount: Int,
         identityId: ByteArray,
         amount: Long,
+        signerIdentityHandle: Long,
+    ): Long
+
+    /**
+     * Shield from a Platform IDENTITY's balance to a third-party Orchard
+     * address, Type 21 (bridges
+     * `platform_wallet_manager_shielded_shield_from_identity_to_recipient`).
+     * See
+     * [org.dashfoundation.dashsdk.wallet.PlatformWalletManager.shieldedShieldFromIdentityToRecipient].
+     * [memoText] null or empty means no memo. Blocks for the ~30s Halo 2
+     * proof; returns the identity's proven post-debit credit balance.
+     */
+    external fun shieldedShieldFromIdentityToRecipient(
+        managerHandle: Long,
+        walletId: ByteArray,
+        shieldedAccount: Int,
+        identityId: ByteArray,
+        recipientRaw43: ByteArray,
+        amount: Long,
+        memoText: String?,
         signerIdentityHandle: Long,
     ): Long
 
