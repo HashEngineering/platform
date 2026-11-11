@@ -88,6 +88,16 @@ internal object WalletManagerNative {
         blockHeight: Int,
     )
 
+    /**
+     * The persistence capability bits a manager created with [bridge] would
+     * attest, without creating one: its declaration intersected with the
+     * callbacks JNI wires for it, built exactly as [nativeCreate] builds
+     * them (which methods the bridge overrides decides some of those). The
+     * instrumented suite checks with it that a capability needs every
+     * override it depends on.
+     */
+    external fun nativeEffectivePersistenceCapabilityBits(bridge: NativePersistenceBridge): Long
+
     // ── Wallet creation / restore ─────────────────────────────────────
 
     /**
