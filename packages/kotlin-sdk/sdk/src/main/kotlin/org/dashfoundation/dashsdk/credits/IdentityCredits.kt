@@ -1,15 +1,22 @@
 package org.dashfoundation.dashsdk.credits
 
 import org.dashfoundation.dashsdk.wallet.op
+import org.dashfoundation.dashsdk.wallet.opReturningCompletedResult
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.dashfoundation.dashsdk.errors.mapNativeErrors
 import org.dashfoundation.dashsdk.ffi.CreditsNative
+import org.dashfoundation.dashsdk.ffi.IdentityTopUpNativeResult
 import org.dashfoundation.dashsdk.wallet.TrackedAssetLock
 
-internal fun interface ResumeTopUpNativeCall {
-    fun call(
+/**
+ * The JNI calls behind [IdentityCredits]' top-ups that resume or pay through
+ * an asset lock, as one seam so unit tests can stand in for the native
+ * library, which Robolectric cannot load. Production uses [Jni].
+ */
+internal interface TopUpNative {
+    fun topUpIdentityWithExistingAssetLock(
         walletHandle: Long,
         outpointTxid: ByteArray,
         outpointVout: Int,
@@ -17,6 +24,98 @@ internal fun interface ResumeTopUpNativeCall {
         coreSignerHandle: Long,
         consumeInvitationVoucher: Boolean,
     ): Long
+
+    fun topUpExternalIdentityFromCore(
+        walletHandle: Long,
+        identityId: ByteArray,
+        amountDuffs: Long,
+        accountIndex: Int,
+        coreSignerHandle: Long,
+    ): Long
+
+    fun resumeTopUpToRecordedRecipient(
+        walletHandle: Long,
+        outpointTxid: ByteArray,
+        outpointVout: Int,
+        coreSignerHandle: Long,
+    ): IdentityTopUpNativeResult
+
+    fun assignTopUpRecipient(
+        walletHandle: Long,
+        outpointTxid: ByteArray,
+        outpointVout: Int,
+        identityId: ByteArray,
+    )
+
+    /** [CreditsNative]'s exports. */
+    object Jni : TopUpNative {
+        override fun topUpIdentityWithExistingAssetLock(
+            walletHandle: Long,
+            outpointTxid: ByteArray,
+            outpointVout: Int,
+            identityId: ByteArray,
+            coreSignerHandle: Long,
+            consumeInvitationVoucher: Boolean,
+        ): Long = CreditsNative.topUpIdentityWithExistingAssetLock(
+            walletHandle,
+            outpointTxid,
+            outpointVout,
+            identityId,
+            coreSignerHandle,
+            consumeInvitationVoucher,
+        )
+
+        override fun topUpExternalIdentityFromCore(
+            walletHandle: Long,
+            identityId: ByteArray,
+            amountDuffs: Long,
+            accountIndex: Int,
+            coreSignerHandle: Long,
+        ): Long = CreditsNative.topUpExternalIdentityFromCore(
+            walletHandle,
+            identityId,
+            amountDuffs,
+            accountIndex,
+            coreSignerHandle,
+        )
+
+        override fun resumeTopUpToRecordedRecipient(
+            walletHandle: Long,
+            outpointTxid: ByteArray,
+            outpointVout: Int,
+            coreSignerHandle: Long,
+        ): IdentityTopUpNativeResult = CreditsNative.resumeTopUpToRecordedRecipient(
+            walletHandle,
+            outpointTxid,
+            outpointVout,
+            coreSignerHandle,
+        )
+
+        override fun assignTopUpRecipient(
+            walletHandle: Long,
+            outpointTxid: ByteArray,
+            outpointVout: Int,
+            identityId: ByteArray,
+        ) = CreditsNative.assignTopUpRecipient(walletHandle, outpointTxid, outpointVout, identityId)
+    }
+}
+
+/**
+ * Outcome of [IdentityCredits.resumeTopUpToRecordedRecipient]: the identity the
+ * lock paid (32 bytes; in this wallet or not) and its proved new balance.
+ */
+class IdentityTopUpResult(
+    val identityId: ByteArray,
+    val newBalance: Long,
+) {
+    override fun equals(other: Any?): Boolean =
+        other is IdentityTopUpResult &&
+            identityId.contentEquals(other.identityId) &&
+            newBalance == other.newBalance
+
+    override fun hashCode(): Int = identityId.contentHashCode() * 31 + newBalance.hashCode()
+
+    override fun toString(): String = "IdentityTopUpResult(newBalance=$newBalance)"
 }
 
 /**
@@ -79,8 +178,7 @@ data class FundingInput(
  */
 class IdentityCredits internal constructor(
     private val gate: org.dashfoundation.dashsdk.wallet.TeardownGate? = null,
-    private val resumeTopUpNative: ResumeTopUpNativeCall =
-        ResumeTopUpNativeCall(CreditsNative::topUpIdentityWithExistingAssetLock),
+    private val native: TopUpNative = TopUpNative.Jni,
 ) {
 
     /**
@@ -106,7 +204,7 @@ class IdentityCredits internal constructor(
             "top-up recovery requires funding type 1 or 2, got ${lock.fundingType.raw}"
         }
         mapNativeErrors {
-            resumeTopUpNative.call(
+            native.topUpIdentityWithExistingAssetLock(
                 walletHandle = walletHandle,
                 outpointTxid = lock.outpointTxid,
                 outpointVout = lock.outpointVout,
@@ -154,7 +252,7 @@ class IdentityCredits internal constructor(
         }
         require(outPointVout >= 0) { "outPointVout must be non-negative, got $outPointVout" }
         mapNativeErrors {
-            resumeTopUpNative.call(
+            native.topUpIdentityWithExistingAssetLock(
                 walletHandle = walletHandle,
                 outpointTxid = outPointTxid,
                 outpointVout = outPointVout,
@@ -283,6 +381,120 @@ class IdentityCredits internal constructor(
                 amountDuffs,
                 accountIndex,
                 coreSignerHandle,
+            )
+        }
+    }
+
+    /**
+     * Top up someone else's identity — [identityId] (32 bytes), one this
+     * wallet does not manage — from a new Core asset lock funded by the
+     * wallet's balance. Port of
+     * `platform_wallet_top_up_external_identity_with_funding_signer`
+     * (packages/rs-platform-wallet-ffi/src/identity_top_up.rs): Rust fetches
+     * the identity from Platform, records it on the lock's row before the
+     * broadcast and adds nothing to the wallet. Returns the identity's proved
+     * post-transition balance.
+     *
+     * Refused before anything is built: an amount below Platform's top-up
+     * minimum (native `ErrorInvalidParameter`), an identity Platform does not
+     * know
+     * ([DashSdkError.NotFound][org.dashfoundation.dashsdk.errors.DashSdkError.NotFound]),
+     * and a store that does not keep identity recipients. Once the lock is
+     * built a failure may leave it tracked, recording [identityId]: never
+     * retry with a new lock; resume that one with
+     * [resumeTopUpToRecordedRecipient], or the identity may be paid twice.
+     *
+     * The native call cannot observe cancellation, so a top-up can complete
+     * after the caller was cancelled; its balance is then still returned
+     * ([opReturningCompletedResult][org.dashfoundation.dashsdk.wallet.opReturningCompletedResult]),
+     * so a completed payment is never hidden. Handle it before suspending
+     * again.
+     */
+    suspend fun topUpExternalIdentityFromCore(
+        walletHandle: Long,
+        identityId: ByteArray,
+        amountDuffs: Long,
+        accountIndex: Int,
+        coreSignerHandle: Long,
+    ): Long = gate.opReturningCompletedResult {
+        require(identityId.size == 32) {
+            "identityId must be exactly 32 bytes, got ${identityId.size}"
+        }
+        mapNativeErrors {
+            native.topUpExternalIdentityFromCore(
+                walletHandle,
+                identityId,
+                amountDuffs,
+                accountIndex,
+                coreSignerHandle,
+            )
+        }
+    }
+
+    /**
+     * Resume the interrupted identity top-up [lock] to the identity it pays —
+     * the caller names none, so a recovery cannot pay someone else's top-up
+     * into one of this wallet's identities. Port of
+     * `platform_wallet_resume_identity_top_up_to_recorded_recipient_signer`
+     * (packages/rs-platform-wallet-ffi/src/identity_registration_funded_with_signer.rs):
+     * a bound top-up lock pays the wallet's identity at its registration
+     * index, an unbound one the identity its row recorded
+     * ([TrackedAssetLock.identityRecipient]). Returns the identity paid and
+     * its proved new balance.
+     *
+     * A lock recording no identity ([TrackedAssetLock.identityRecipientUnassigned])
+     * is refused with
+     * [AssetLockRecipientUnknown][org.dashfoundation.dashsdk.errors.DashSdkError.PlatformWallet.AssetLockRecipientUnknown]:
+     * assign it one with [assignTopUpRecipient] first. Rust decides which
+     * locks it resumes; nothing is filtered here.
+     *
+     * Like [topUpExternalIdentityFromCore], a resume that completes after the
+     * caller was cancelled still returns its result.
+     */
+    suspend fun resumeTopUpToRecordedRecipient(
+        walletHandle: Long,
+        lock: TrackedAssetLock,
+        coreSignerHandle: Long,
+    ): IdentityTopUpResult = gate.opReturningCompletedResult {
+        val paid = mapNativeErrors {
+            native.resumeTopUpToRecordedRecipient(
+                walletHandle,
+                lock.outpointTxid,
+                lock.outpointVout,
+                coreSignerHandle,
+            )
+        }
+        IdentityTopUpResult(paid.identityId, paid.newBalance)
+    }
+
+    /**
+     * Assign [identityId] (32 bytes) as the identity the unassigned unbound
+     * top-up [lock] pays, as the user chose it — then resume it with
+     * [resumeTopUpToRecordedRecipient]. Port of
+     * `platform_wallet_assign_identity_top_up_recipient`
+     * (packages/rs-platform-wallet-ffi/src/identity_registration_funded_with_signer.rs).
+     *
+     * The assignment is permanent. Rust looks the identity up on Platform
+     * first: one Platform does not know is
+     * [DashSdkError.NotFound][org.dashfoundation.dashsdk.errors.DashSdkError.NotFound]
+     * and nothing is assigned. A lock already recording another identity is
+     * [AssetLockRecipientMismatch][org.dashfoundation.dashsdk.errors.DashSdkError.PlatformWallet.AssetLockRecipientMismatch];
+     * the same identity again is a no-op, which also retries a failed store.
+     */
+    suspend fun assignTopUpRecipient(
+        walletHandle: Long,
+        lock: TrackedAssetLock,
+        identityId: ByteArray,
+    ): Unit = gate.op {
+        require(identityId.size == 32) {
+            "identityId must be exactly 32 bytes, got ${identityId.size}"
+        }
+        mapNativeErrors {
+            native.assignTopUpRecipient(
+                walletHandle,
+                lock.outpointTxid,
+                lock.outpointVout,
+                identityId,
             )
         }
     }
