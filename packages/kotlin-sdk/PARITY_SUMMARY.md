@@ -2,23 +2,23 @@
 # Kotlin/Swift executable parity summary
 
 Audit baseline: `PR #3999 @ 6dbc72a54df72d26eb9c4a014b425d2b95134e4e`
-Capabilities tracked: **31**
+Capabilities tracked: **32**
 
 ## Status counts
 
 | Host | Surface | Supported | Partial | Unsupported | Not applicable |
 | --- | --- | ---: | ---: | ---: | ---: |
-| Swift | SDK | 18 | 11 | 1 | 1 |
-| Swift | Example app | 5 | 14 | 3 | 9 |
-| Kotlin | SDK | 15 | 14 | 1 | 1 |
-| Kotlin | Example app | 6 | 13 | 2 | 10 |
+| Swift | SDK | 18 | 11 | 2 | 1 |
+| Swift | Example app | 5 | 14 | 4 | 9 |
+| Kotlin | SDK | 15 | 15 | 1 | 1 |
+| Kotlin | Example app | 6 | 14 | 2 | 10 |
 
 ## Restart coverage
 
 | Host | Tested | Required | Not applicable |
 | --- | ---: | ---: | ---: |
-| Swift | 2 | 10 | 19 |
-| Kotlin | 5 | 8 | 18 |
+| Swift | 2 | 11 | 19 |
+| Kotlin | 5 | 9 | 18 |
 
 ## Capability status
 
@@ -36,6 +36,7 @@ Capabilities tracked: **31**
 | `dashpay.private_contact_requests` | partial / partial / required | partial / partial / required |
 | `dashpay.private_contact_request_scan_state` | partial / partial / required | partial / not-applicable / required |
 | `identity.asset_lock_resume` | supported / partial / required | partial / partial / required |
+| `identity.top_up_any_identity_from_core` | unsupported / unsupported / required | partial / partial / required |
 | `core.compact_filter_rescan` | supported / partial / not_applicable | partial / partial / not_applicable |
 | `dpns.contested_names_by_identity` | supported / partial / not_applicable | partial / partial / required |
 | `persistence.sync_fault_latch` | supported / not-applicable / not_applicable | supported / not-applicable / not_applicable |
