@@ -2855,19 +2855,10 @@ mod tests {
         // int38: 61 went upstream to ErrorAssetLockRecipientMismatch (#5762).
         // int39: 77 went to ErrorIdentityLookupFailed (#5860), so 78.
         // int40: 77-79 are held for #5865; 80/81 went to #5860/#5931.
+        // int41 carries neither #5860 nor #5931 and keeps 82 to match int40.
         assert_eq!(
             PlatformWalletFFIResultCode::ErrorShieldedClaimUnconfirmed as i32,
             82
-        );
-        assert_eq!(
-            PlatformWalletFFIResultCode::ErrorIdentityLookupFailed as i32,
-            80,
-            "80 belongs to the external top-up's identity lookup failure (#5860)"
-        );
-        assert_eq!(
-            PlatformWalletFFIResultCode::ErrorAssetLockRecipientUnknown as i32,
-            81,
-            "81 belongs to the unknown top-up lock recipient (#5931)"
         );
         assert_eq!(
             PlatformWalletFFIResultCode::ErrorAssetLockRecipientMismatch as i32,
