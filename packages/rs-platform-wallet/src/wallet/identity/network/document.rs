@@ -27,6 +27,7 @@
 //!     post-broadcast GroveDB proof-verification recursion. The owner's
 //!     balance the proof carries (from protocol version 14) is kept.
 
+use super::signing_key::{require_available, AvailableSigningKey};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -36,9 +37,11 @@ use dpp::address_funds::AddressWitness;
 use dpp::data_contract::accessors::v0::DataContractV0Getters;
 use dpp::data_contract::document_type::accessors::DocumentTypeV0Getters;
 use dpp::data_contract::document_type::methods::DocumentTypeV0Methods;
+use dpp::data_contract::document_type::DocumentType;
 use dpp::document::document_methods::DocumentMethodsV0;
+use dpp::document::property_names::CREATED_AT;
 use dpp::document::Document;
-use dpp::document::DocumentV0Setters;
+use dpp::document::{DocumentV0Getters, DocumentV0Setters};
 use dpp::fee::Credits;
 use dpp::identity::accessors::IdentityGettersV0;
 use dpp::identity::identity_public_key::accessors::v0::IdentityPublicKeyGettersV0;
@@ -50,16 +53,16 @@ use dpp::state_transition::batch_transition::methods::StateTransitionCreationOpt
 use dpp::ProtocolError;
 
 use dash_sdk::platform::documents::transitions::{
-    DocumentDeleteResult, DocumentDeleteTransitionBuilder, DocumentPurchaseResult,
-    DocumentPurchaseTransitionBuilder, DocumentReplaceResult, DocumentReplaceTransitionBuilder,
-    DocumentSetPriceResult, DocumentSetPriceTransitionBuilder, DocumentTransferResult,
-    DocumentTransferTransitionBuilder,
+    DocumentDeleteResult, DocumentDeleteTransitionBuilder, DocumentEraseResult,
+    DocumentEraseTransitionBuilder, DocumentPurchaseResult, DocumentPurchaseTransitionBuilder,
+    DocumentReplaceResult, DocumentReplaceTransitionBuilder, DocumentSetPriceResult,
+    DocumentSetPriceTransitionBuilder, DocumentTransferResult, DocumentTransferTransitionBuilder,
 };
 use dash_sdk::platform::transition::put_document::PutDocument;
 use dash_sdk::platform::transition::put_settings::PutSettings;
 use dash_sdk::platform::{ContextProvider, DocumentQuery, Fetch};
 
-use crate::error::PlatformWalletError;
+use crate::error::{preserve_signer_key_unavailable_or, PlatformWalletError};
 
 use super::*;
 
@@ -68,7 +71,7 @@ use super::*;
 /// `Signer<IdentityPublicKey>` trait bound on the SDK's `PutDocument`
 /// extension be satisfied with a `&S` instead of forcing the caller to
 /// hand over ownership / wrap in an `Arc` per call.
-struct SignerRef<'a, S: ?Sized>(&'a S);
+pub(super) struct SignerRef<'a, S: ?Sized>(pub(super) &'a S);
 
 impl<'a, S: ?Sized> std::fmt::Debug for SignerRef<'a, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -272,36 +275,9 @@ impl IdentityWallet {
         //    AUTHENTICATION + ECDSA key whose security level satisfies
         //    the document type's requirement (NOT a fixed CRITICAL like
         //    the contract-create path).
-        let required_level = document_type.security_level_requirement();
-        let allowed_levels = allowed_signing_security_levels(required_level);
-        let signing_key = {
-            let wm = self.wallet_manager.read().await;
-            let info = wm.get_wallet_info(&self.wallet_id).ok_or_else(|| {
-                PlatformWalletError::WalletNotFound(
-                    "Wallet info not found in wallet manager".to_string(),
-                )
-            })?;
-            let manager = &info.identity_manager;
-            let identity = manager
-                .identity(owner_identity_id)
-                .map(|m| m.identity.clone())
-                .ok_or(PlatformWalletError::IdentityNotFound(*owner_identity_id))?;
-            identity
-                .get_first_public_key_matching(
-                    Purpose::AUTHENTICATION,
-                    allowed_levels.iter().copied().collect(),
-                    [KeyType::ECDSA_SECP256K1].into(),
-                    false,
-                )
-                .ok_or_else(|| {
-                    PlatformWalletError::InvalidIdentityData(format!(
-                        "No ECDSA authentication key at a security level satisfying \
-                         {required_level} found on owner identity {owner_identity_id} \
-                         (required to sign a {document_type_name} document state transition)"
-                    ))
-                })?
-                .clone()
-        };
+        let signing_key = self
+            .select_document_signing_key(owner_identity_id, &document_type, signer)
+            .await?;
 
         // 4. Broadcast via `PutDocument` on the platform-wallet 8 MB
         //    worker stack. `None` entropy -> the SDK generates entropy
@@ -314,30 +290,113 @@ impl IdentityWallet {
             }),
             ..Default::default()
         });
+        self.put_document_keeping_owner_balance(
+            &document,
+            document_type,
+            None,
+            signing_key,
+            signer,
+            settings,
+        )
+        .await
+        .map_err(|e| {
+            // Preserve a structured key-unavailable signer failure so the
+            // FFI boundary can still restore code 31; only genuine
+            // operation failures get stringified into `InvalidIdentityData`.
+            preserve_signer_key_unavailable_or(e, |e| {
+                PlatformWalletError::InvalidIdentityData(format!(
+                    "Failed to put document to platform: {e}"
+                ))
+            })
+        })
+    }
+
+    /// The key a `document_type` state transition of `owner_identity_id`
+    /// is signed with when the caller names none: the first
+    /// AUTHENTICATION + ECDSA_SECP256K1 key, by key id, of the owner
+    /// identity in the wallet manager whose security level satisfies the
+    /// type's requirement (see [`allowed_signing_security_levels`]) and
+    /// that `signer` can sign with. The wallet manager lock is released
+    /// before `signer` is asked.
+    pub(super) async fn select_document_signing_key<S>(
+        &self,
+        owner_identity_id: &Identifier,
+        document_type: &DocumentType,
+        signer: &S,
+    ) -> Result<IdentityPublicKey, PlatformWalletError>
+    where
+        S: Signer<IdentityPublicKey>,
+    {
+        let required_level = document_type.security_level_requirement();
+        let allowed_levels = allowed_signing_security_levels(required_level);
+        let identity = {
+            let wm = self.wallet_manager.read().await;
+            let info = wm.get_wallet_info(&self.wallet_id).ok_or_else(|| {
+                PlatformWalletError::WalletNotFound(
+                    "Wallet info not found in wallet manager".to_string(),
+                )
+            })?;
+            info.identity_manager
+                .identity(owner_identity_id)
+                .map(|m| m.identity.clone())
+                .ok_or(PlatformWalletError::IdentityNotFound(*owner_identity_id))?
+        };
+        let signing_key = identity
+            .available_signing_key(
+                signer,
+                Purpose::AUTHENTICATION,
+                &allowed_levels,
+                &[KeyType::ECDSA_SECP256K1],
+                false,
+            )?
+            .ok_or_else(|| {
+                PlatformWalletError::InvalidIdentityData(format!(
+                    "No ECDSA authentication key at a security level satisfying \
+                     {required_level} found on owner identity {owner_identity_id} \
+                     (required to sign a {} document state transition)",
+                    document_type.name()
+                ))
+            })?;
+        Ok(signing_key.clone())
+    }
+
+    /// Put `document` (a create at revision 1, a replace above it),
+    /// signed with `signing_key`, wait for the proof that it executed,
+    /// keep the owner's balance the proof carries (from protocol version
+    /// 14) and return the confirmed `Document`.
+    ///
+    /// The document goes out exactly as given: a replace carries its own
+    /// revision, which Platform takes only as the stored revision plus
+    /// one, so nothing here reads the document again or moves its
+    /// revision. `entropy` is read for a create only; `None` lets the SDK
+    /// generate it. Runs on the caller's runtime; the FFI drives it on the
+    /// platform-wallet 8 MB worker stack for the post-broadcast GroveDB
+    /// proof-verification recursion.
+    pub(super) async fn put_document_keeping_owner_balance<S>(
+        &self,
+        document: &Document,
+        document_type: DocumentType,
+        entropy: Option<[u8; 32]>,
+        signing_key: IdentityPublicKey,
+        signer: &S,
+        settings: Option<PutSettings>,
+    ) -> Result<Document, dash_sdk::Error>
+    where
+        S: Signer<IdentityPublicKey> + Send + Sync,
+    {
         let (confirmed, owner_balance, metadata) = document
             .put_to_platform_and_wait_for_response_with_owner_balance_and_metadata(
                 &self.sdk,
                 document_type,
-                None,
+                entropy,
                 signing_key,
                 None,
                 &SignerRef(signer),
                 settings,
             )
-            .await
-            .map_err(|e| {
-                // Preserve a structured key-unavailable signer failure so the
-                // FFI boundary can still restore code 31; only genuine
-                // operation failures get stringified into `InvalidIdentityData`.
-                crate::error::preserve_signer_key_unavailable_or(e, |e| {
-                    PlatformWalletError::InvalidIdentityData(format!(
-                        "Failed to put document to platform: {e}"
-                    ))
-                })
-            })?;
-        self.persist_proven_owner_balance(owner_identity_id, owner_balance, metadata)
+            .await?;
+        self.persist_proven_owner_balance(&document.owner_id(), owner_balance, metadata)
             .await;
-
         Ok(confirmed)
     }
 
@@ -435,6 +494,7 @@ impl IdentityWallet {
         &self,
         owner_identity_id: &Identifier,
         signing_key_id: u32,
+        signer: &impl Signer<IdentityPublicKey>,
     ) -> Result<IdentityPublicKey, PlatformWalletError> {
         let wm = self.wallet_manager.read().await;
         let info = wm.get_wallet_info(&self.wallet_id).ok_or_else(|| {
@@ -447,6 +507,7 @@ impl IdentityWallet {
             .identity(owner_identity_id)
             .map(|m| m.identity.clone())
             .ok_or(PlatformWalletError::IdentityNotFound(*owner_identity_id))?;
+        drop(wm);
         let key = identity
             .get_public_key_by_id(signing_key_id)
             .ok_or_else(|| {
@@ -469,6 +530,7 @@ impl IdentityWallet {
                 key.key_type()
             )));
         }
+        require_available(&key, signer)?;
         Ok(key)
     }
 
@@ -542,7 +604,7 @@ impl IdentityWallet {
         })?;
 
         let signing_key = self
-            .resolve_authentication_signing_key(owner_identity_id, signing_key_id)
+            .resolve_authentication_signing_key(owner_identity_id, signing_key_id, signer)
             .await?;
 
         let builder = DocumentReplaceTransitionBuilder::new(
@@ -591,7 +653,7 @@ impl IdentityWallet {
             .await?;
 
         let signing_key = self
-            .resolve_authentication_signing_key(owner_identity_id, signing_key_id)
+            .resolve_authentication_signing_key(owner_identity_id, signing_key_id, signer)
             .await?;
 
         // Delete is keyed by (document_id, owner_id); no current-document
@@ -617,6 +679,144 @@ impl IdentityWallet {
                 })
             })?;
         Ok(deleted_id)
+    }
+
+    /// Delete a document by its values and broadcast.
+    ///
+    /// The delete an `indexOnly` document type needs: such a type keeps no
+    /// document row, so its delete transition carries the values that
+    /// identify the entries, and [`Self::delete_document_with_signer`]
+    /// (ids only) is refused for it. Any other document type is refused
+    /// here before anything is signed: its delete goes by id and would not
+    /// look at the values. So is a type whose documents can not be deleted.
+    ///
+    /// `properties_json` is the document's own properties as they were
+    /// created, in the format [`Self::create_document_with_signer`] takes;
+    /// `document_id` is the id that create returned. A type whose entries
+    /// commit to `$createdAt` also needs that timestamp, as a
+    /// `"$createdAt"` number of milliseconds in the same object; no other
+    /// `$` field and no property the type does not declare is accepted, and
+    /// every required property has to be there. A changed value does not
+    /// match the stored entry and Platform rejects the delete.
+    ///
+    /// Signs with the explicit `signing_key_id` (AUTHENTICATION + ECDSA)
+    /// and broadcasts via `Sdk::document_delete` on the platform-wallet
+    /// 8 MB worker stack. Returns the deleted document's `Identifier` on
+    /// confirmation.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn delete_document_by_values_with_signer<S>(
+        &self,
+        owner_identity_id: &Identifier,
+        contract_id: &Identifier,
+        document_type_name: &str,
+        document_id: &Identifier,
+        properties_json: &str,
+        signing_key_id: u32,
+        signer: &S,
+    ) -> Result<Identifier, PlatformWalletError>
+    where
+        S: Signer<IdentityPublicKey> + Send + Sync,
+    {
+        let data_contract = self
+            .fetch_contract_arc_for_document_op(contract_id, document_type_name)
+            .await?;
+
+        let (values, created_at) = values_from_json(properties_json)?;
+        let builder = DocumentDeleteTransitionBuilder::from_values(
+            data_contract,
+            document_type_name.to_string(),
+            *document_id,
+            *owner_identity_id,
+            values,
+            created_at,
+            self.sdk.version(),
+        )
+        .map_err(delete_preparation_error)?;
+
+        let signing_key = self
+            .resolve_authentication_signing_key(owner_identity_id, signing_key_id, signer)
+            .await?;
+
+        let DocumentDeleteResult::Deleted(deleted_id) = self
+            .sdk
+            .document_delete(builder, &signing_key, &SignerRef(signer))
+            .await
+            .map_err(|e| {
+                preserve_signer_key_unavailable_or(e, |e| {
+                    PlatformWalletError::InvalidIdentityData(format!(
+                        "Failed to delete document: {e}"
+                    ))
+                })
+            })?;
+        Ok(deleted_id)
+    }
+
+    /// Erase a chunk of the retained revisions of an already deleted
+    /// document on `contract_id`'s `document_type_name` and broadcast.
+    ///
+    /// Sibling of `delete_document_with_signer`. The document type must
+    /// keep history and allow erasure, and the document must already be
+    /// deleted. The first erase must be signed by the document's owner
+    /// and commits the document to erasure; every erase after that may be
+    /// signed by any identity, so `owner_identity_id` is the identity
+    /// signing and paying for this chunk rather than necessarily the
+    /// document's owner. One transition removes a bounded chunk of
+    /// revisions; read the document's history to see how many remain and
+    /// submit another erase while there are any.
+    ///
+    /// Signs with the explicit `signing_key_id` (AUTHENTICATION +
+    /// ECDSA) and broadcasts via `Sdk::document_erase` on the
+    /// platform-wallet 8 MB worker stack. Returns the document's
+    /// `Identifier` once Platform has proved it absent from ordinary
+    /// reads. That absence predates the erase, so the return is an
+    /// observation of the affected state, not evidence that this erase
+    /// removed any revision; progress is read from the document's
+    /// history, whose lifecycle block carries the state and the exact
+    /// number of revisions still retained.
+    pub async fn erase_document_with_signer<S>(
+        &self,
+        owner_identity_id: &Identifier,
+        contract_id: &Identifier,
+        document_type_name: &str,
+        document_id: &Identifier,
+        signing_key_id: u32,
+        signer: &S,
+    ) -> Result<Identifier, PlatformWalletError>
+    where
+        S: Signer<IdentityPublicKey> + Send + Sync,
+    {
+        let data_contract = self
+            .fetch_contract_arc_for_document_op(contract_id, document_type_name)
+            .await?;
+
+        let signing_key = self
+            .resolve_authentication_signing_key(owner_identity_id, signing_key_id, signer)
+            .await?;
+
+        // Erase is keyed by (document_id, owner_id) like delete; the
+        // document is no longer visible to ordinary reads, so there is
+        // nothing to fetch first.
+        let builder = DocumentEraseTransitionBuilder::new(
+            data_contract,
+            document_type_name.to_string(),
+            *document_id,
+            *owner_identity_id,
+        );
+        let DocumentEraseResult::AbsentAsOfProof(absent_id) = self
+            .sdk
+            .document_erase(builder, &signing_key, &SignerRef(signer))
+            .await
+            .map_err(|e| {
+                // Preserve a structured key-unavailable signer failure so the
+                // FFI boundary can still restore code 31; only genuine
+                // operation failures get stringified into `InvalidIdentityData`.
+                preserve_signer_key_unavailable_or(e, |e| {
+                    PlatformWalletError::InvalidIdentityData(format!(
+                        "Failed to erase document: {e}"
+                    ))
+                })
+            })?;
+        Ok(absent_id)
     }
 
     /// Transfer an existing document on `contract_id`'s
@@ -655,7 +855,7 @@ impl IdentityWallet {
         })?;
 
         let signing_key = self
-            .resolve_authentication_signing_key(owner_identity_id, signing_key_id)
+            .resolve_authentication_signing_key(owner_identity_id, signing_key_id, signer)
             .await?;
 
         let builder = DocumentTransferTransitionBuilder::new(
@@ -718,7 +918,7 @@ impl IdentityWallet {
         })?;
 
         let signing_key = self
-            .resolve_authentication_signing_key(owner_identity_id, signing_key_id)
+            .resolve_authentication_signing_key(owner_identity_id, signing_key_id, signer)
             .await?;
 
         let builder = DocumentSetPriceTransitionBuilder::new(
@@ -784,7 +984,7 @@ impl IdentityWallet {
         })?;
 
         let signing_key = self
-            .resolve_authentication_signing_key(purchaser_identity_id, signing_key_id)
+            .resolve_authentication_signing_key(purchaser_identity_id, signing_key_id, signer)
             .await?;
 
         let builder = DocumentPurchaseTransitionBuilder::new(
@@ -815,9 +1015,99 @@ impl IdentityWallet {
     }
 }
 
+/// The values a delete-by-values names, parsed from `properties_json`, and
+/// its `$createdAt`, taken out of them.
+fn values_from_json(
+    properties_json: &str,
+) -> Result<(BTreeMap<String, Value>, Option<u64>), PlatformWalletError> {
+    let properties_value: serde_json::Value =
+        serde_json::from_str(properties_json).map_err(|e| {
+            PlatformWalletError::InvalidIdentityData(format!(
+                "Invalid document properties JSON: {e}"
+            ))
+        })?;
+    let mut properties: BTreeMap<String, Value> = serde_json::from_value(properties_value)
+        .map_err(|e| {
+            PlatformWalletError::InvalidIdentityData(format!(
+                "Document properties must be a JSON object keyed by property name: {e}"
+            ))
+        })?;
+    let created_at = match properties.remove(CREATED_AT) {
+        None => None,
+        Some(value) => Some(value.to_integer::<u64>().map_err(|e| {
+            PlatformWalletError::InvalidIdentityData(format!(
+                "{CREATED_AT} must be a number of milliseconds: {e}"
+            ))
+        })?),
+    };
+    Ok((properties, created_at))
+}
+
+/// A refusal of
+/// [`index_only_delete_document`](dash_sdk::platform::documents::transitions::index_only_delete_document)
+/// carries its own text; any other SDK error keeps its rendering.
+fn delete_preparation_error(error: dash_sdk::Error) -> PlatformWalletError {
+    match error {
+        dash_sdk::Error::Generic(message) => PlatformWalletError::InvalidIdentityData(message),
+        other => PlatformWalletError::InvalidIdentityData(other.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::signing_key::tests::{lock_checking_signer, wallet_with_signing_keys};
     use super::*;
+
+    #[tokio::test]
+    async fn should_reject_unavailable_explicit_document_key_outside_wallet_lock() {
+        let wallet = wallet_with_signing_keys().await;
+        let signer = lock_checking_signer(wallet.identity());
+        let error = wallet
+            .identity()
+            .resolve_authentication_signing_key(&Identifier::default(), 1, &signer)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, PlatformWalletError::Sdk(dash_sdk::Error::Protocol(dpp::ProtocolError::Generic(ref message)))
+                if message.starts_with(crate::error::SIGNER_KEY_UNAVAILABLE_PREFIX)),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn should_refuse_values_that_are_not_a_json_object() {
+        let error = values_from_json("[1, 2]").unwrap_err();
+        assert!(
+            matches!(error, PlatformWalletError::InvalidIdentityData(ref message)
+                if message.contains("JSON object")),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn should_take_the_creation_time_out_of_the_values() {
+        let mut properties = serde_json::json!({ "encryptedPayload": "33" });
+
+        let (values, created_at) = values_from_json(&properties.to_string()).expect("parses");
+        assert_eq!(created_at, None);
+        assert_eq!(
+            values.get("encryptedPayload"),
+            Some(&Value::Text("33".to_string()))
+        );
+
+        properties["$createdAt"] = serde_json::json!(1_700_000_000_000u64);
+        let (values, created_at) = values_from_json(&properties.to_string()).expect("parses");
+        assert_eq!(created_at, Some(1_700_000_000_000));
+        assert!(!values.contains_key("$createdAt"));
+
+        properties["$createdAt"] = serde_json::json!("yesterday");
+        let error = values_from_json(&properties.to_string()).unwrap_err();
+        assert!(
+            matches!(error, PlatformWalletError::InvalidIdentityData(ref message)
+                if message.contains("must be a number of milliseconds")),
+            "{error:?}"
+        );
+    }
 
     #[test]
     fn allowed_levels_high_requirement_admits_critical_and_high_only() {

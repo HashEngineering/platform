@@ -13,6 +13,8 @@ pub mod errors;
 pub mod extended_document;
 mod fields;
 pub mod generate_document_id;
+mod id_and_revision_from_bytes;
+pub mod lifecycle;
 pub mod serialization_traits;
 #[cfg(feature = "factories")]
 pub mod specialized_document_factory;
@@ -20,7 +22,7 @@ pub mod transfer;
 pub mod v0;
 
 pub use accessors::*;
-//pub use v0::*;
+pub use v0::DocumentV0;
 
 #[cfg(all(feature = "json-conversion", feature = "serde-conversion"))]
 use crate::serialization::JsonConvertible;
@@ -50,7 +52,6 @@ use derive_more::From;
 
 use std::fmt;
 use std::fmt::Formatter;
-use crate::document::v0::DocumentV0;
 
 #[derive(Clone, Debug, PartialEq, From)]
 #[cfg_attr(

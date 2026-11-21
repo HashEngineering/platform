@@ -34,6 +34,10 @@ use std::fmt;
 #[cfg_attr(feature = "value-conversion", derive(ValueConvertible))]
 #[ferment_macro::export]
 pub enum ResourceVoteChoice {
+    /// A vote for a contender, by the id the contest names its contenders by: the
+    /// contending identity's id, or, in a vote among documents
+    /// (`ContestedIndexResolution::MasternodeVoteOnDocuments`), the contending document's
+    /// id. The id of an identity that entered documents there names no contender.
     TowardsIdentity(Identifier),
     #[default]
     Abstain,

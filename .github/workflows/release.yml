@@ -46,6 +46,9 @@ jobs:
       - name: Check out repo
         uses: actions/checkout@v4
 
+      - name: Check Tenderdash seed snapshot freshness
+        run: node packages/dashmate/scripts/generate-tenderdash-seeds.js --check
+
       - name: Check package version matches tag
         uses: geritol/match-tag-to-package-version@0.2.0
         if: github.event_name == 'release'
@@ -310,6 +313,14 @@ jobs:
     needs: release-npm
     permissions:
       contents: read
+    # Read by packages/dashmate/scripts/deb-version.mjs when the deb is packed. Set them
+    # as repository variables, not here, so that a re-run of an existing release can use
+    # them: DASHMATE_DEB_REVISION to rebuild a version that was already published, and
+    # DASHMATE_DEB_EPOCH only to re-release a version that was published under oclif's
+    # git sha scheme. An epoch can never be removed again once a package carries it.
+    env:
+      DASHMATE_DEB_REVISION: ${{ vars.DASHMATE_DEB_REVISION || '1' }}
+      DASHMATE_DEB_EPOCH: ${{ vars.DASHMATE_DEB_EPOCH }}
     strategy:
       fail-fast: false
       matrix:
@@ -321,7 +332,7 @@ jobs:
           - package_type: deb
             os: ubuntu-24.04
           - package_type: macos
-            os: macos-14
+            os: macos-15
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
@@ -382,6 +393,8 @@ jobs:
           path: packages/dashmate/dist/**
           retention-days: 7
 
+      # Overwritten when a published release's packages are rebuilt by re-running
+      # this job; the artifact of the earlier attempt has the same name.
       - name: Upload Dashmate packages
         uses: actions/upload-artifact@v4
         with:
@@ -389,6 +402,7 @@ jobs:
           path: packages/dashmate/dist/**
           if-no-files-found: error
           retention-days: 7
+          overwrite: true
 
   release-dashmate-packages:
     name: Release Dashmate packages
@@ -416,7 +430,7 @@ jobs:
           - package_type: deb
             os: ubuntu-24.04
           - package_type: macos
-            os: macos-14
+            os: macos-15
     steps:
       # Treat finished installers as data. This job never installs or runs
       # package code and never restores caches from the build jobs. The macOS

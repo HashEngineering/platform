@@ -248,7 +248,7 @@ struct CreateIdentityView: View {
     @Query(sort: [SortDescriptor(\PersistentAssetLock.updatedAt, order: .reverse)])
     private var allAssetLocks: [PersistentAssetLock]
 
-    /// All wallets' unspent shielded notes. The shielded funding
+    /// All wallets' unspent account-0 shielded notes. The shielded funding
     /// picker spans multiple wallets, so this uses the all-wallets
     /// predicate and `shieldedPoolBalance(for:)` scopes by walletId in
     /// memory — a single-walletId `@Query` couldn't serve every row
@@ -256,8 +256,14 @@ struct CreateIdentityView: View {
     /// `modelContext.fetch`) makes the funding option and denomination
     /// list update live: rows arriving while this sheet is open
     /// re-render the view.
-    @Query(filter: PersistentShieldedNote.unspentPredicate)
+    @Query(filter: CreateIdentityView.shieldedFundingPredicate)
     private var unspentShieldedNotes: [PersistentShieldedNote]
+
+    static var shieldedFundingPredicate: Predicate<PersistentShieldedNote> {
+        #Predicate<PersistentShieldedNote> {
+            $0.accountIndex == 0 && $0.isSpent == false
+        }
+    }
 
     // MARK: - Selection state
 
@@ -480,7 +486,7 @@ struct CreateIdentityView: View {
             Section {
                 VStack(alignment: .leading, spacing: 8) {
                     Label(
-                        "Broadcast succeeded — confirmation pending",
+                        "Result not confirmed",
                         systemImage: "exclamationmark.triangle.fill"
                     )
                     .foregroundColor(.orange)
@@ -494,10 +500,10 @@ struct CreateIdentityView: View {
                         .foregroundColor(.primary)
                         .textSelection(.enabled)
                     Text(
-                        "The transition was broadcast and accepted, but its "
-                        + "execution-result proof couldn't be confirmed. The "
-                        + "identity will appear in the Identities tab after the "
-                        + "next sync. Do NOT re-register these keys — the slot "
+                        "The transition may have reached the network, but its "
+                        + "result couldn't be confirmed. If it went through, the "
+                        + "identity will appear in the Identities tab after a "
+                        + "later sync. Do NOT re-register these keys: the slot "
                         + "is held to prevent burning funds."
                     )
                     .font(.caption)
@@ -1541,8 +1547,8 @@ struct CreateIdentityView: View {
                     // the inline failure state.
                     return
                 case .unconfirmed:
-                    // Broadcast landed but its result couldn't be confirmed;
-                    // the identity is probably already live on chain. Mark the
+                    // The transition may have reached a node; its result is not
+                    // proved, and the identity may already be live on chain. Mark the
                     // slot used (same as `.completed`) — `usedIdentityIndices`
                     // unions the persisted `isUsed` reservation with the
                     // `PersistentIdentity` rows, so this is the reservation
@@ -1820,8 +1826,8 @@ struct CreateIdentityView: View {
             && shieldedFallbackAddressBytes(for: walletId) != nil
     }
 
-    /// Per-wallet shielded pool balance: sum of `walletId`'s unspent
-    /// `PersistentShieldedNote` values, filtered in memory from the
+    /// Per-wallet shielded funding balance: sum of `walletId`'s unspent
+    /// account-0 `PersistentShieldedNote` values, filtered in memory from the
     /// `unspentShieldedNotes` `@Query` (rather than the single-mirror
     /// `shieldedService.shieldedBalance`). Correct for ANY loaded
     /// wallet, not just the mirror's `firstWallet`.
@@ -2134,8 +2140,8 @@ struct CreateIdentityView: View {
     /// identity-registration account.
     ///
     /// The union matters for `.unconfirmed` Type-20 registrations: the
-    /// broadcast landed but no `PersistentIdentity` row exists until the
-    /// next sync confirms the identity, so `markIdentitySlotUsed`'s
+    /// transition may have reached a node, yet no `PersistentIdentity` row
+    /// exists until the next sync confirms it, so `markIdentitySlotUsed`'s
     /// persisted `isUsed` flag is the ONLY artifact holding the slot once
     /// the in-memory controller is gone. Without it the same index would
     /// be offered again and a duplicate submission would burn funds

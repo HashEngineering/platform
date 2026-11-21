@@ -118,7 +118,6 @@ pub(crate) fn apply_drive_operations_v0(
     block_info: &BlockInfo,
     transaction: TransactionArg,
     platform_version: &PlatformVersion,
-    previous_fee_versions: Option<&CachedEpochIndexFeeVersions>,
 ) -> Result<FeeResult, Error> {
     // ...
 
@@ -150,7 +149,7 @@ pub(crate) fn apply_drive_operations_v0(
     }
 
     // Step 5: Calculate fees
-    Drive::calculate_fee(/* ... */)
+    self.calculate_fee(/* ... */)
 }
 ```
 
@@ -179,6 +178,8 @@ The refresh closes this in two ways, both implemented in `DataContractCache` (`p
 
 - It marks the contract as **modified in the block**. From then until the block cache is cleared or promoted, a transactional read of that contract is served from the block cache or from state through the transaction, never from the global cache. This holds even if the seeded block-cache entry is evicted, and it is what the proposer relies on when it rolls a transition back: the rollback drops the modified contracts from the block cache, and the next read goes to the rolled-back transaction.
 - The block cache is **promoted into the global cache only after the block transaction is committed**, by the `finalize_block` handler, and every committed-state read carries a `CommittedGeneration` snapshot taken before it read state. A read that straddles a commit cannot publish what it read, so a query thread descheduled across the commit cannot clobber the promoted definition with the pre-block one.
+
+A third rule keeps readers of different protocol versions apart. A contract is parsed under the protocol version of the reader that loads it, and two versions can parse the same stored contract differently. A query thread reads at the version of the platform state it loaded, which on the first block of a new protocol version, and for a query that loaded the state just before the block's was published, is still the previous one. Every cache entry records the protocol version that parsed it, and from protocol version 15 (`get_contract_with_fetch_info` 1) a read is served only an entry parsed under its own version; anything else is a miss, read from state as a node with an empty cache reads it.
 
 ## When to Use Finalize Tasks
 

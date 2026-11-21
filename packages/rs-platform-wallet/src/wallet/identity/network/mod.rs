@@ -34,16 +34,24 @@ pub(crate) const DPNS_USERNAMES_MAX_PAGES: usize = 10;
 // Core handle + identity-lifecycle operations.
 mod balance;
 mod contract;
+mod decision_proposal;
 mod discovery;
 mod document;
+mod document_erase;
+pub(crate) use document_erase::DocumentEraseGate;
+pub use document_erase::{
+    DocumentEraseNotSubmittedReason, DocumentEraseOutcome, DocumentLifecycleObservation,
+};
 mod dpns;
 mod dpns_marketplace;
 mod identity_handle;
 mod key_limits;
 mod key_selection;
 mod loading;
+mod multiple_choice_proposal;
 mod register_from_addresses;
 mod registration;
+mod state_transition_summary;
 mod top_up;
 mod top_up_from_addresses;
 mod transfer;
@@ -56,11 +64,13 @@ pub(crate) use withdrawal::{select_owner_withdrawal_key, select_transfer_withdra
 // DashPay-contract operations, namespaced behind `IdentityWallet::dashpay()`.
 mod contact_info;
 mod contact_requests;
+mod contact_shielded_address;
 mod contacts;
 mod dashpay_view;
 mod invitation;
 pub use invitation::{
-    Invitation, MAX_INVITATION_DUFFS, MAX_INVITATION_TTL_SECS, MIN_INVITATION_DUFFS,
+    Invitation, InvitationClaimStatus, MAX_INVITATION_DUFFS, MAX_INVITATION_TTL_SECS,
+    MIN_INVITATION_DUFFS,
 };
 mod payment_handler;
 pub(crate) use payment_handler::DashPayPaymentHandler;
@@ -70,9 +80,22 @@ pub(crate) use payment_handler::DashPayPaymentHandler;
 pub(crate) use payment_handler::run_dashpay_payment_hooks;
 mod payments;
 pub(crate) use payments::{record_incoming_dashpay_payments, sent_payment_status_for_record};
+mod prepared_payment;
+pub use prepared_payment::PreparedDashPayPayment;
+mod private_contact_requests;
+#[cfg(feature = "shielded")]
+pub(crate) use private_contact_requests::{
+    restore_journaled_private_payments, JournaledPrivatePayment,
+};
+pub use private_contact_requests::{
+    PaymentStarted, PrivateContactReadiness, PrivateContactSyncReport, PrivateDocumentKeyPaths,
+};
 mod profile;
+mod public_keys;
+pub use public_keys::{fetch_identity_public_keys, FetchedIdentityPublicKeys};
 pub(crate) mod sdk_writer;
 mod seed_binding;
+mod signing_key;
 pub use seed_binding::SeedBindingVerification;
 
 // Token state-transition operations (same `IdentityWallet` impl blocks).
@@ -99,9 +122,15 @@ pub use dpns_marketplace::{
     DOCUMENT_TRANSITION_FEE_RESERVE_CREDITS,
 };
 pub use identity_handle::{
-    derive_ecdsa_identity_auth_keypair_from_master, derive_identity_auth_key_hash_from_master,
-    derive_identity_auth_keypair, identity_auth_derivation_path_for_type, DerivedIdentityAuthKey,
-    IdentityWallet, IDENTITY_GAP_LIMIT, MASTER_KEY_INDEX,
+    derive_connect_keypair_from_master, derive_ecdsa_identity_auth_keypair_from_master,
+    derive_identity_auth_key_hash_from_master, derive_identity_auth_keypair,
+    identity_auth_derivation_path_for_type, ConnectKey, DerivedIdentityAuthKey, IdentityWallet,
+    IDENTITY_GAP_LIMIT, MASTER_KEY_INDEX,
+};
+pub use state_transition_summary::{
+    check_document_type_name, decode_state_transition, summarize_state_transition,
+    BatchedTransitionSummary, BatchedTransitionTarget, DataContractSummary, StateTransitionSummary,
+    StateTransitionSummaryKind,
 };
 
 // Helpers declared on `identity_handle.rs` that siblings reach

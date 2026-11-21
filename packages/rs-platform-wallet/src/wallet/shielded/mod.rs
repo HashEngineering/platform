@@ -31,13 +31,22 @@
 //! `BTreeMap<u32, OrchardKeySet>` (with the spend authority);
 //! `PlatformWallet` doesn't need a wrapper struct around it.
 
+pub mod wallet_drain;
+pub use wallet_drain::{WalletDrainPreview, WalletDrainPreviewStatus};
 pub mod activity;
 pub mod activity_recorder;
 pub mod balance;
 #[cfg(test)]
 mod balance_tests;
+#[cfg(test)]
+mod cancelled_scan_tests;
+pub(crate) mod contact_address;
+#[cfg(test)]
+mod contact_address_tests;
 pub mod coordinator;
 pub mod file_store;
+#[cfg(test)]
+mod fresh_address_scan_tests;
 pub mod fund_from_asset_lock;
 pub mod keys;
 pub mod note_selection;
@@ -46,8 +55,14 @@ pub mod prover;
 pub mod seed_pool;
 pub mod store;
 pub mod sync;
+pub mod tips;
+pub use tips::{
+    is_shielded_identity_account, shielded_identity_account_index, SHIELDED_IDENTITY_ACCOUNT_BASE,
+};
 #[cfg(test)]
 mod viewing_key_bind_tests;
+#[cfg(test)]
+mod wallet_drain_tests;
 
 pub use activity::{
     compute_activity_id, derive_activity_from_scan_data, sort_activity_for_display,
@@ -58,13 +73,15 @@ pub use balance::{
     ShieldedBalanceSource, ShieldedLocalAccountBalance, ShieldedLocalBalanceSnapshot,
     ShieldedLocalBalanceState,
 };
+pub(crate) use contact_address::ContactShieldedAddresses;
 pub use coordinator::NetworkShieldedCoordinator;
 pub use file_store::{FileBackedShieldedStore, FileShieldedStoreError};
 pub use keys::{AccountViewingKeys, OrchardKeySet};
 pub use prover::CachedOrchardProver;
 pub use seed_pool::{SeedPoolOutcome, SeedPoolProgress, DEFAULT_SEED_POOL_TARGET_NOTES};
 pub use store::{
-    IdentityDebitRecoveryRecord, IdentityDebitRecoveryStatus, InMemoryShieldedStore, ShieldedNote,
+    IdentityDebitRecoveryRecord, IdentityDebitRecoveryStatus, InMemoryShieldedStore,
+    PrivateContactPayment, PrivatePaymentEntry, PrivatePaymentRecord, ShieldedNote,
     ShieldedOutgoingNote, ShieldedStore, SubwalletId,
 };
 pub use sync::{ShieldedSyncSummary, SyncNotesResult};
