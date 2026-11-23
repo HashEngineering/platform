@@ -371,16 +371,15 @@ fn insert_values_nested(
                             "properties must be a map".to_string(),
                         ))?;
 
-                // Nested properties are emitted below in source-map order (the
-                // `properties.iter()` loop), and that `IndexMap` insertion order is
-                // consensus-observable: historical contracts were committed in source-map
-                // order, so re-sorting nested properties by `position` would soft-fork any
-                // contract whose source order differs from its position order. A previous
-                // `position`-based `sort_by` here was dead code (its sorted result was never
-                // read) and read `position` with `.expect()`, which could panic on adversarial
-                // schema input during block execution. Removed (ordering unchanged). Do NOT
-                // reintroduce a nested-property sort — even a correct one — nor a panicking
-                // `position` read here.
+                // The members are inserted below in the schema's map order (the
+                // `properties.iter()` loop), and that `IndexMap` order is consensus-observable:
+                // the encoder writes an object's members in it, at every protocol version, and
+                // every stored document was written in it. Sorting them by `position` would read
+                // any stored document whose object lists its members out of position order
+                // differently, so no generation sorts them, and none reads `position` here. From
+                // protocol version 15 the objects a contract gains list their members at
+                // consecutive positions in map order (`MemberPositionOrder`, run at registration
+                // and on update), so for them the two orders agree.
 
                 // Create a new set with the prefix removed from the keys: an entry for
                 // a member of this object is the object's name, one separator byte, then
@@ -9168,9 +9167,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn should_reject_required_since_on_nested_property() {
-        let result = try_document_type_from_schema(json!({
+    /// An object whose member `inner` carries `requiredSince` 2, listed in the object's
+    /// `required` when `listed`.
+    fn nested_required_since_schema(listed: bool) -> serde_json::Value {
+        json!({
             "type": "object",
             "properties": {
                 "outer": {
@@ -9179,17 +9179,104 @@ mod tests {
                     "properties": {
                         "inner": {"type": "string", "position": 0, "maxLength": 60, "requiredSince": 2},
                     },
-                    "required": ["inner"],
+                    "required": if listed { json!(["inner"]) } else { json!([]) },
                     "additionalProperties": false
                 },
             },
             "required": [],
             "additionalProperties": false
-        }));
+        })
+    }
+
+    #[test]
+    fn should_reject_required_since_on_nested_property_at_protocol_version_14() {
+        let platform_version = PlatformVersion::get(14).expect("expected protocol version 14");
+        let result = try_document_type_from_schema_on_version(
+            nested_required_since_schema(true),
+            platform_version,
+        );
 
         assert!(
             result.is_err(),
-            "requiredSince on a nested property must be rejected"
+            "requiredSince on a nested property must be rejected at protocol version 14"
+        );
+    }
+
+    #[test]
+    fn should_parse_required_since_on_a_nested_property_its_object_requires() {
+        let document_type = try_document_type_from_schema(nested_required_since_schema(true))
+            .expect("a nested member its object requires may carry requiredSince");
+
+        let DocumentPropertyType::Object(members) =
+            &document_type.properties()["outer"].property_type
+        else {
+            panic!("expected outer to parse as an object");
+        };
+        let inner = &members["inner"];
+        assert!(inner.required);
+        assert_eq!(inner.required_since, Some(2));
+        assert!(
+            !inner.always_required(),
+            "a member required from a contract version is stored like an optional one"
+        );
+    }
+
+    /// A `$defs` definition's own `required` is not read for storage (its members are stored as
+    /// optional), so a member it alone lists may not carry `requiredSince`: the refusal says
+    /// where the list that may name it is written.
+    #[test]
+    fn should_reject_required_since_on_a_member_only_its_definition_requires() {
+        let platform_version = PlatformVersion::latest();
+        let config =
+            DataContractConfig::default_for_version(platform_version).expect("config should build");
+        let defs = BTreeMap::from([(
+            "m".to_string(),
+            platform_value::to_value(json!({
+                "type": "object",
+                "properties": {
+                    "x": {"type": "string", "position": 0, "maxLength": 60, "requiredSince": 1},
+                },
+                "required": ["x"],
+                "additionalProperties": false
+            }))
+            .expect("definition should convert"),
+        )]);
+        let schema = platform_value::to_value(json!({
+            "type": "object",
+            "properties": {
+                "meta": {"$ref": "#/$defs/m", "position": 0},
+            },
+            "additionalProperties": false
+        }))
+        .expect("schema should convert");
+
+        let error = DocumentType::try_from_schema(
+            Identifier::new([1; 32]),
+            1,
+            config.version(),
+            "msg",
+            schema,
+            Some(&defs),
+            &BTreeMap::new(),
+            &config,
+            false,
+            &mut vec![],
+            platform_version,
+        )
+        .expect_err("a member only its definition requires may not carry requiredSince");
+        assert!(
+            error.to_string().contains("beside the $ref"),
+            "the refusal should name where the list goes, got {error}"
+        );
+    }
+
+    #[test]
+    fn should_reject_required_since_on_a_nested_property_its_object_does_not_require() {
+        let result = try_document_type_from_schema(nested_required_since_schema(false));
+
+        assert!(
+            result.is_err(),
+            "requiredSince on a nested property its object does not require must be rejected"
         );
     }
 

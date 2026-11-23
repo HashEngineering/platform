@@ -3,8 +3,16 @@ package org.dashfoundation.dashsdk
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.Dispatchers
+import org.dashfoundation.dashsdk.ffi.AddressHistoryNative
+import org.dashfoundation.dashsdk.ffi.AddressPrivateKeyNative
+import org.dashfoundation.dashsdk.ffi.ContractModerationNative
+import org.dashfoundation.dashsdk.ffi.ContractUpdateNative
 import org.dashfoundation.dashsdk.ffi.DashSDKException
 import org.dashfoundation.dashsdk.ffi.DashpayNative
+import org.dashfoundation.dashsdk.ffi.DpnsGiveUpNative
+import org.dashfoundation.dashsdk.ffi.IdentityNative
+import org.dashfoundation.dashsdk.ffi.IdentityRemovalNative
+import org.dashfoundation.dashsdk.ffi.IdentityWithdrawalsNative
 import org.dashfoundation.dashsdk.ffi.NativePersistenceBridge
 import org.dashfoundation.dashsdk.ffi.NativeLoader
 import org.dashfoundation.dashsdk.ffi.SdkNative
@@ -32,6 +40,35 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class FfiSmokeTest {
 
+    /**
+     * The DPNS give-up exports bind with the descriptors
+     * `DpnsGiveUpNative` declares: bad input is refused at the JNI boundary
+     * (code 1), an unknown wallet handle is not found by Rust, and the pure
+     * main-name rule answers without a wallet.
+     */
+    @Test
+    fun dpnsGiveUpSymbolsBindAndRejectInvalidInput() {
+        NativeLoader.ensureLoaded()
+        val shortId = assertThrows(DashSDKException::class.java) {
+            DpnsGiveUpNative.choices(0L, ByteArray(31), "alice7")
+        }
+        assertEquals(1, shortId.code)
+        assertThrows(DashSDKException::class.java) {
+            DpnsGiveUpNative.choices(0L, ByteArray(32), "alice7")
+        }
+        val badMethod = assertThrows(DashSDKException::class.java) {
+            DpnsGiveUpNative.giveUp(0L, ByteArray(32), "alice7", ByteArray(32), 256, 1L)
+        }
+        assertEquals(1, badMethod.code)
+        val noSigner = assertThrows(DashSDKException::class.java) {
+            DpnsGiveUpNative.giveUp(0L, ByteArray(32), "alice7", ByteArray(32), 0, 0L)
+        }
+        assertEquals(1, noSigner.code)
+        assertTrue(DpnsGiveUpNative.clearsMainName("alice7.dash", "Alice7"))
+        assertFalse(DpnsGiveUpNative.clearsMainName("Keeper77", "Alice7"))
+        assertFalse(DpnsGiveUpNative.clearsMainName(null, "Alice7"))
+    }
+
     @Test
     fun documentEraseAndObserveBindsAndRejectsInvalidInput() {
         NativeLoader.ensureLoaded()
@@ -48,6 +85,101 @@ class FfiSmokeTest {
         NativeLoader.ensureLoaded()
         val version = SdkNative.version()
         assertTrue("version should be non-empty", version.isNotEmpty())
+    }
+
+    /**
+     * The contract moderation and fee pot reads (protocol version 14) bind with the
+     * descriptors `ContractModerationNative` declares: each export reaches its C function,
+     * which refuses a null SDK handle, and an argument the C type cannot carry (a list or
+     * status byte above 255, a limit that is neither -1 nor a `u32`) is refused by the JNI
+     * layer with code 1 before any C call. The reads themselves need a protocol version 14
+     * network; their Rust side is covered by the rs-sdk-ffi tests.
+     */
+    @Test
+    fun contractModerationSymbolsBindAndRejectInvalidInput() {
+        NativeLoader.ensureLoaded()
+        val contract = "11111111111111111111111111111111"
+        val noLimit = ContractModerationNative.NO_LIMIT
+        assertThrows(DashSDKException::class.java) {
+            ContractModerationNative.getStatus(0L, contract, contract, null)
+        }
+        assertThrows(DashSDKException::class.java) {
+            ContractModerationNative.getStatus(0L, contract, contract, ByteArray(0))
+        }
+        assertThrows(DashSDKException::class.java) {
+            ContractModerationNative.getEntries(0L, contract, 0, null, noLimit)
+        }
+        assertThrows(DashSDKException::class.java) {
+            ContractModerationNative.getDocumentRemovals(0L, contract, "note", null, 20)
+        }
+        assertThrows(DashSDKException::class.java) {
+            ContractModerationNative.getDocumentRemovalsByIds(
+                0L, contract, "note", arrayOf(contract),
+            )
+        }
+        assertThrows(DashSDKException::class.java) {
+            ContractModerationNative.getTeamActions(0L, contract, 0, null, false, noLimit)
+        }
+        assertThrows(DashSDKException::class.java) {
+            ContractModerationNative.getTeamActionSigners(0L, contract, 1, contract)
+        }
+        assertThrows(DashSDKException::class.java) {
+            ContractModerationNative.getActionCounts(0L, contract)
+        }
+        assertThrows(DashSDKException::class.java) {
+            ContractModerationNative.getFeePots(0L, contract)
+        }
+        val badList = assertThrows(DashSDKException::class.java) {
+            ContractModerationNative.getEntries(0L, contract, 256, null, noLimit)
+        }
+        assertEquals(1, badList.code)
+        val badStatus = assertThrows(DashSDKException::class.java) {
+            ContractModerationNative.getTeamActionSigners(0L, contract, -1, contract)
+        }
+        assertEquals(1, badStatus.code)
+        val badLimit = assertThrows(DashSDKException::class.java) {
+            ContractModerationNative.getDocumentRemovals(0L, contract, "note", null, -2)
+        }
+        assertEquals(1, badLimit.code)
+    }
+
+    @Test
+    fun devnetQuorumBaseUrlResolvesANameAndRefusesAReservedOne() {
+        NativeLoader.ensureLoaded()
+        assertEquals(
+            "https://quorums.palmatum.networks.dash.org",
+            SdkNative.devnetQuorumBaseUrl("palmatum"),
+        )
+        assertThrows(DashSDKException::class.java) {
+            SdkNative.devnetQuorumBaseUrl("mainnet")
+        }
+    }
+
+    @Test
+    fun spvStartTellsAnEmptyPeerListFromOneWithNoUsablePeer() {
+        NativeLoader.ensureLoaded()
+        // No manager (handle 0), so nothing starts: the peer check runs
+        // before the handle is looked up.
+        fun restrictedStart(peers: Array<String>) = assertThrows(DashSDKException::class.java) {
+            WalletManagerNative.spvStart(
+                managerHandle = 0,
+                dataDir = "/nonexistent",
+                network = 1,
+                userAgent = null,
+                peers = peers,
+                restrictToConfiguredPeers = true,
+                startFromHeight = 0,
+                devnetName = null,
+                llmqDevnetSize = 0,
+                llmqDevnetThreshold = 0,
+            )
+        }
+        // An empty list is an offline start: it passes the peer check and
+        // fails on the missing manager (platform-wallet NotFound, 98).
+        assertEquals(1098, restrictedStart(emptyArray()).code)
+        // A peer that cannot cross as a C string still counts as given, so
+        // the start is refused (platform-wallet ErrorInvalidParameter, 2).
+        assertEquals(1002, restrictedStart(arrayOf("192.0.2.1:19\u0000999")).code)
     }
 
     @Test
@@ -157,6 +289,70 @@ class FfiSmokeTest {
     }
 
     /**
+     * The core address private-key reveal binds, and an unknown wallet handle
+     * throws the mapped [DashSDKException] instead of crashing. The reveal on a
+     * real wallet is `CoreAddressPrivateKeyRevealTest`.
+     */
+    @Test
+    fun coreAddressPrivateKeySymbolBindsAndRejectsInvalidHandle() {
+        NativeLoader.ensureLoaded()
+        assertThrows(DashSDKException::class.java) {
+            AddressPrivateKeyNative.revealCoreAddressPrivateKey(
+                0L, 0L, "yMqShkrgjTRuReBGFpQr7FozEF1QcNBBYA",
+            )
+        }
+    }
+
+    /**
+     * The contract update review exports bind with the descriptors
+     * `ContractUpdateNative` declares, and `IdentityNative.updateDataContractAtReviewedVersion`
+     * with its `expectedCurrentVersion` slot. The split needs no wallet, so it
+     * runs for real: a contract JSON object splits into its sections in source
+     * order, and text that is not a JSON object is refused by Rust. The preview
+     * and the update refuse an unknown wallet handle; an expected version that
+     * does not fit a `u32` is refused with code 1 before any C call.
+     */
+    @Test
+    fun contractUpdateReviewSymbolsBindAndSplitASource() {
+        NativeLoader.ensureLoaded()
+        val documents = """{"note":{"type":"object","properties":{"b":{"type":"string","position":0}}}}"""
+        val sections = org.dashfoundation.dashsdk.identity.DataContractUpdateSource.split(
+            """{"documents":$documents,"description":"d"}""",
+        )
+        assertEquals(documents, sections.documents)
+        assertEquals("d", sections.description)
+        assertNull(sections.tokens)
+        assertFalse(sections.carriesSharedDefinitions)
+        assertThrows(DashSDKException::class.java) {
+            ContractUpdateNative.splitContractUpdateSource("[1,2]")
+        }
+        assertThrows(DashSDKException::class.java) {
+            ContractUpdateNative.previewDataContractUpdate(
+                0L, ByteArray(32), ByteArray(32), "{}", null, null, null, null, null,
+            )
+        }
+        val badVersion = assertThrows(DashSDKException::class.java) {
+            IdentityNative.updateDataContractAtReviewedVersion(
+                0L, ByteArray(32), ByteArray(32), "{}", null, null, null, null, null, -1L, 0L,
+            )
+        }
+        assertEquals(1, badVersion.code)
+    }
+
+    /**
+     * The live-wallet identity removal binds, and an unknown manager handle
+     * throws the mapped [DashSDKException] instead of crashing. The removal
+     * itself is covered by the platform-wallet and platform-wallet-ffi tests.
+     */
+    @Test
+    fun removeIdentityFromDeviceSymbolBindsAndRejectsInvalidHandle() {
+        NativeLoader.ensureLoaded()
+        assertThrows(DashSDKException::class.java) {
+            IdentityRemovalNative.removeIdentityFromDevice(0L, ByteArray(32))
+        }
+    }
+
+    /**
      * The #4069 watermark-freeze fault latch surfaced by PR #4314: the
      * `syncFaultDetected` JNI symbol binds, and an invalid manager handle
      * surfaces as the mapped [DashSDKException] rather than a crash. The
@@ -170,6 +366,68 @@ class FfiSmokeTest {
         assertThrows(DashSDKException::class.java) {
             WalletManagerNative.syncFaultDetected(0L)
         }
+    }
+
+    /**
+     * The six `AddressHistoryNative` exports bind with their descriptors and their arguments
+     * arrive in order, without touching the network: a negative height or count is refused in
+     * the JNI layer (code 1); a wallet handle Rust does not know reaches
+     * `platform_wallet_get_platform` and comes back as a platform-wallet code; a null SDK
+     * handle reaches each rs-sdk-ffi query, which refuses it (`InvalidParameter`, 1); a
+     * 31-byte expected hash is refused before the query; and the branch depth comes from Rust
+     * (0 for a null handle, within the platform version's 6..9 for a live one).
+     */
+    @Test
+    fun addressHistorySymbolsBindAndRejectInvalidInput() {
+        NativeLoader.ensureLoaded()
+        fun code(block: () -> Unit): Int = assertThrows(DashSDKException::class.java) { block() }.code
+
+        assertEquals(1, code { AddressHistoryNative.balanceHistory(1L, false, -1L) })
+        assertTrue(code { AddressHistoryNative.balanceHistory(Long.MAX_VALUE, true, 0L) } >= 1000)
+        assertEquals(1, code { AddressHistoryNative.recentBalanceChanges(0L, 0L) })
+        assertEquals(1, code { AddressHistoryNative.recentBalanceChanges(1L, -1L) })
+        assertEquals(1, code { AddressHistoryNative.compactedBalanceChanges(0L, 0L) })
+        assertEquals(1, code { AddressHistoryNative.trunkState(0L) })
+        assertEquals(1, code { AddressHistoryNative.branchState(0L, byteArrayOf(1), 6, ByteArray(31), 1L) })
+        assertEquals(1, code { AddressHistoryNative.branchState(0L, byteArrayOf(1), 6, ByteArray(32), 1L) })
+        assertEquals(0, AddressHistoryNative.branchQueryDepth(0L, 0L))
+
+        val sdk = SdkNative.createTrusted(
+            network = 1,
+            dapiAddresses = null,
+            quorumUrl = null,
+            skipAssetLockProofVerification = false,
+            requestRetryCount = 3,
+            requestTimeoutMs = 30_000,
+            platformVersion = 0,
+        )
+        try {
+            val depth = AddressHistoryNative.branchQueryDepth(sdk, 0L)
+            assertTrue("depth $depth", depth in 6..9)
+            assertTrue(AddressHistoryNative.branchQueryDepth(sdk, 1_000_000L) >= depth)
+        } finally {
+            SdkNative.destroy(sdk)
+        }
+    }
+
+    /**
+     * `identityWithdrawals` binds with the descriptor `(J[B)[B` and its arguments arrive in
+     * order: an identity id that is not 32 bytes is refused in the JNI layer (code 1), and a
+     * 32-byte id on a wallet handle Rust does not know reaches
+     * `platform_wallet_identity_withdrawals`, which answers `NotFound` (98, thrown shifted
+     * by the platform-wallet offset). Nothing reaches the network.
+     */
+    @Test
+    fun identityWithdrawalsSymbolBindsAndRejectsInvalidInput() {
+        NativeLoader.ensureLoaded()
+        val shortId = assertThrows(DashSDKException::class.java) {
+            IdentityWithdrawalsNative.identityWithdrawals(1L, ByteArray(31))
+        }
+        assertEquals(1, shortId.code)
+        val unknownWallet = assertThrows(DashSDKException::class.java) {
+            IdentityWithdrawalsNative.identityWithdrawals(Long.MAX_VALUE, ByteArray(32) { 7 })
+        }
+        assertEquals(1000 + 98, unknownWallet.code)
     }
 
     /**
@@ -230,6 +488,50 @@ class FfiSmokeTest {
     }
 
     /**
+     * The asset-lock operation ids need every override they depend on. JNI
+     * wires the two slots only for a bridge that overrides the operation id
+     * store, the operation id load and the asset lock upsert (the row an id
+     * is stored on), and Rust then attests the capability only when the
+     * bridge declares it. A wallet drain reads "no lock carries this id" as
+     * "not sent", so a bridge that inherits any of the three no-ops, or does
+     * not declare the bit, must not have it; one implementing all three and
+     * declaring it has it, and the Room handler has everything a wallet
+     * drain requires (`PersistenceCapabilities::WALLET_DRAIN`).
+     */
+    @Test
+    fun assetLockOperationIdCapabilityNeedsEveryOverride() {
+        NativeLoader.ensureLoaded()
+        val bit = NativePersistenceBridge.CAPABILITY_ASSET_LOCK_OPERATION_IDS
+        fun effective(bridge: NativePersistenceBridge): Boolean =
+            WalletManagerNative.nativeEffectivePersistenceCapabilityBits(bridge) and bit == bit
+
+        assertTrue("every override", effective(OperationIdBridge.Full()))
+        assertFalse("no operation id store", effective(OperationIdBridge.WithoutStore()))
+        assertFalse("no operation id load", effective(OperationIdBridge.WithoutLoad()))
+        assertFalse("no asset lock upsert", effective(OperationIdBridge.WithoutUpsert()))
+        assertFalse(
+            "every override, not declared",
+            effective(object : OperationIdBridge.Full() {
+                override fun persistenceCapabilitiesBits(): Long = TRACKED_ASSET_LOCKS or WALLET_RESTORE
+            }),
+        )
+
+        val db = DashDatabase.createInMemory(ApplicationProvider.getApplicationContext())
+        try {
+            val handlerBits = WalletManagerNative.nativeEffectivePersistenceCapabilityBits(
+                PlatformWalletPersistenceHandler(db, Dispatchers.Unconfined),
+            )
+            assertEquals(
+                "the Room handler attests everything a wallet drain requires",
+                WALLET_DRAIN,
+                handlerBits and WALLET_DRAIN,
+            )
+        } finally {
+            db.close()
+        }
+    }
+
+    /**
      * Rust↔Kotlin persistence-descriptor lockstep. The trampolines resolve
      * each bridge method by (name, descriptor) only when its slot first
      * fires — for the invitation upsert that would be mid-way through a
@@ -252,6 +554,105 @@ class FfiSmokeTest {
         } finally {
             db.close()
         }
+    }
+}
+
+/** `PersistenceCapabilities::TRACKED_ASSET_LOCKS`. */
+private const val TRACKED_ASSET_LOCKS: Long = 1L shl 9
+
+/** `PersistenceCapabilities::WALLET_RESTORE`. */
+private const val WALLET_RESTORE: Long = 1L shl 7
+
+/**
+ * `PersistenceCapabilities::WALLET_DRAIN` (0x2285): atomic changesets,
+ * asset-lock funding indices, wallet restore, tracked asset locks and
+ * asset-lock operation ids.
+ */
+private const val WALLET_DRAIN: Long = 0x2285
+
+/**
+ * Bridges declaring the asset-lock operation ids with some of the overrides
+ * they depend on, for [FfiSmokeTest.assetLockOperationIdCapabilityNeedsEveryOverride].
+ * Each concrete class declares exactly the overrides its name says.
+ */
+private abstract class OperationIdBridge : NativePersistenceBridge() {
+    override fun persistenceCapabilitiesVersion(): Int = 1
+
+    override fun persistenceCapabilitiesBits(): Long =
+        CAPABILITY_ASSET_LOCK_OPERATION_IDS or TRACKED_ASSET_LOCKS or WALLET_RESTORE
+
+    open class Full : OperationIdBridge() {
+        @Suppress("LongParameterList")
+        override fun onPersistAssetLockUpsert(
+            walletId: ByteArray,
+            outPoint: ByteArray,
+            transactionBytes: ByteArray,
+            accountIndex: Int,
+            fundingType: Byte,
+            identityIndex: Int,
+            amountDuffs: Long,
+            status: Byte,
+            proofBytes: ByteArray?,
+        ): Int = 0
+
+        override fun onPersistAssetLockOperationId(
+            walletId: ByteArray,
+            outPoint: ByteArray,
+            operationId: ByteArray,
+        ): Int = 0
+
+        override fun onLoadAssetLockOperationId(walletId: ByteArray, outPoint: ByteArray): ByteArray? =
+            null
+    }
+
+    class WithoutStore : OperationIdBridge() {
+        @Suppress("LongParameterList")
+        override fun onPersistAssetLockUpsert(
+            walletId: ByteArray,
+            outPoint: ByteArray,
+            transactionBytes: ByteArray,
+            accountIndex: Int,
+            fundingType: Byte,
+            identityIndex: Int,
+            amountDuffs: Long,
+            status: Byte,
+            proofBytes: ByteArray?,
+        ): Int = 0
+
+        override fun onLoadAssetLockOperationId(walletId: ByteArray, outPoint: ByteArray): ByteArray? =
+            null
+    }
+
+    class WithoutLoad : OperationIdBridge() {
+        @Suppress("LongParameterList")
+        override fun onPersistAssetLockUpsert(
+            walletId: ByteArray,
+            outPoint: ByteArray,
+            transactionBytes: ByteArray,
+            accountIndex: Int,
+            fundingType: Byte,
+            identityIndex: Int,
+            amountDuffs: Long,
+            status: Byte,
+            proofBytes: ByteArray?,
+        ): Int = 0
+
+        override fun onPersistAssetLockOperationId(
+            walletId: ByteArray,
+            outPoint: ByteArray,
+            operationId: ByteArray,
+        ): Int = 0
+    }
+
+    class WithoutUpsert : OperationIdBridge() {
+        override fun onPersistAssetLockOperationId(
+            walletId: ByteArray,
+            outPoint: ByteArray,
+            operationId: ByteArray,
+        ): Int = 0
+
+        override fun onLoadAssetLockOperationId(walletId: ByteArray, outPoint: ByteArray): ByteArray? =
+            null
     }
 }
 

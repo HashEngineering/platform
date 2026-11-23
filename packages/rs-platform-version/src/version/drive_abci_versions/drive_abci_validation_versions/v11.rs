@@ -110,6 +110,18 @@ use super::{
 ///   `TokenPurchaseFromShieldedPool` is verified over its kind's preimage followed by the fee
 ///   bundle's Orchard commitment (`dpp.methods.token_pool_paid_fee_binding`), the fee bundle being
 ///   rebuilt first.
+/// - contract create `basic_structure` 3: v2, then every object of the contract's document
+///   schemas and `$defs` must list its members at consecutive integer positions in map order,
+///   and every `$ref` must point into `$defs` at a schema whose objects do
+///   (`InvalidContractStructure`), so the order its members are stored in, the map's, is their
+///   position order (v15 note 49).
+/// - contract create `transform_into_action` 1 runs `transform_into_action` 0, and `state` 2
+///   runs `state` 1; each then requires the parsed contract to have `required` lists a document
+///   can meet, each member of a type required exactly when a list names it
+///   (`DataContract::validate_gained_requirements`, `DataContractInvalidRequiredFieldsUpdateError`,
+///   paid). check_tx builds a create's action in `transform_into_action`, a block in state
+///   validation, where the check follows the billed reads of the state, so a block charges a
+///   refused contract for them and reports a state refusal first (v15 note 49).
 ///
 /// v10 remains unchanged for `PROTOCOL_VERSION_14` chain replay.
 pub const DRIVE_ABCI_VALIDATION_VERSIONS_V11: DriveAbciValidationVersions =
@@ -146,6 +158,14 @@ pub const DRIVE_ABCI_VALIDATION_VERSIONS_V11: DriveAbciValidationVersions =
                 ..DRIVE_ABCI_VALIDATION_VERSIONS_V10
                     .state_transitions
                     .contract_user_moderation_state_transition
+            },
+            contract_create_state_transition: DriveAbciStateTransitionValidationVersion {
+                basic_structure: Some(3), // every object of a new contract lists its members at consecutive positions
+                state: 2, // a block holds the contract to required lists a document can meet
+                transform_into_action: 1, // check_tx holds the contract to required lists a document can meet
+                ..DRIVE_ABCI_VALIDATION_VERSIONS_V10
+                    .state_transitions
+                    .contract_create_state_transition
             },
             contract_update_state_transition: DriveAbciStateTransitionValidationVersion {
                 transform_into_action: 1, // check_tx holds the update to the compiled size cap

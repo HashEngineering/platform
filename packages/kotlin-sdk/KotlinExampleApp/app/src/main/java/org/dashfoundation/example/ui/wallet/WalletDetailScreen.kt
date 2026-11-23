@@ -64,11 +64,13 @@ import org.dashfoundation.example.navigation.ShieldedActivity
 import org.dashfoundation.example.navigation.ShieldedFund
 import org.dashfoundation.example.navigation.TransferPlatformAddress
 import org.dashfoundation.example.navigation.WalletTransactions
+import org.dashfoundation.example.navigation.PlatformBalanceHistory
 import org.dashfoundation.example.navigation.WithdrawPlatformAddress
 import androidx.compose.ui.text.font.FontWeight
 import org.dashfoundation.example.ui.components.ErrorAlertDialog
 import org.dashfoundation.example.ui.components.FormSection
 import org.dashfoundation.example.ui.components.LabeledContent
+import org.dashfoundation.example.ui.shielded.UnfinishedWalletDrainsList
 import org.dashfoundation.example.ui.theme.appStatusColors
 import org.dashfoundation.example.util.formatCredits
 import org.dashfoundation.example.util.formatDate
@@ -125,16 +127,28 @@ fun WalletDetailScreen(
             .map { rows -> rows.sumOf { it.balance } }
     }.collectAsStateWithLifecycle(initialValue = 0L)
 
-    // Shielded credits — unspent-note sum, only when compiled in.
+    // Shielded credits: the wallet's shielded balance as Rust computes it
+    // (spendable credits of its ordinary accounts; identity accounts are
+    // left out). Null until a local snapshot is known, and always null when
+    // shielded support is not compiled in.
     val hasShielded = remember { Sdk.hasShielded() }
     val shieldedBalance by remember(walletIdHex) {
+        container.shieldedService.ordinaryBalance(walletId)
+    }.collectAsStateWithLifecycle(initialValue = null)
+
+    // Whether the wallet holds any unspent shielded note, in any account.
+    // Only the empty-wallet check reads it: notes in an identity's shielded
+    // account leave the shielded balance at 0, and a balance not known yet
+    // is null, but either way the wallet is not empty.
+    val hasShieldedNotes by remember(walletIdHex) {
         if (hasShielded) {
             container.database.shieldedDao().observeUnspentNotesByWallet(walletId)
-                .map { notes -> notes.sumOf { it.value } }
+                .map { notes -> notes.isNotEmpty() }
         } else {
-            MutableStateFlow(0L)
+            MutableStateFlow(false)
         }
-    }.collectAsStateWithLifecycle(initialValue = 0L)
+        // Null until the first query result: not yet known to hold none.
+    }.collectAsStateWithLifecycle(initialValue = null)
 
     // Distinct on-chain transactions this wallet participates in — union
     // of every TXO's creating and spending tx (WalletDetailView's
@@ -235,12 +249,20 @@ fun WalletDetailScreen(
                 // Shielded shows the single label instead of three zero rows.
                 // Includes immature (a row this screen renders that the
                 // Swift surface doesn't) so mined-but-unmatured funds are
-                // never hidden behind the placeholder.
+                // never hidden behind the placeholder. A wallet holding any
+                // unspent shielded note is not empty even when its ordinary
+                // shielded balance is 0 (all its notes sit in identity
+                // accounts), so the shielded row and its actions stay shown.
+                // A shielded balance that is not known is not zero: with
+                // shielded support the wallet reads as empty only once Rust
+                // has announced a balance of 0.
+                val shieldedKnownEmpty = !hasShielded || shieldedBalance == 0L
                 val allZero = (core?.confirmed ?: 0) == 0L &&
                     (core?.unconfirmed ?: 0) == 0L &&
                     (core?.immature ?: 0) == 0L &&
                     platformBalance == 0L &&
-                    shieldedBalance == 0L
+                    shieldedKnownEmpty &&
+                    hasShieldedNotes == false
                 if (allZero) {
                     Text(
                         "Empty Wallet",
@@ -248,6 +270,12 @@ fun WalletDetailScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.testTag("walletDetail.emptyWallet"),
                     )
+                    // A drained wallet still has a Platform balance history (ADDR-10);
+                    // keep the way to it when the Platform row is hidden.
+                    TextButton(
+                        onClick = { navController.navigate(PlatformBalanceHistory(walletIdHex)) },
+                        modifier = Modifier.testTag("balanceCard.platform.history"),
+                    ) { Text("Balance History") }
                     return@FormSection
                 }
                 LabeledContent("Core Balance", formatDuffs(core?.confirmed ?: 0))
@@ -262,10 +290,11 @@ fun WalletDetailScreen(
                     onTopUp = { navController.navigate(FundFromAssetLock(walletIdHex)) },
                     onTransfer = { navController.navigate(TransferPlatformAddress(walletIdHex)) },
                     onWithdraw = { navController.navigate(WithdrawPlatformAddress(walletIdHex)) },
+                    onHistory = { navController.navigate(PlatformBalanceHistory(walletIdHex)) },
                 )
                 if (hasShielded) {
                     ShieldedBalanceRow(
-                        value = formatCredits(shieldedBalance),
+                        value = shieldedBalance?.let { formatCredits(it) } ?: "—",
                         onSeedPool = { navController.navigate(SeedShieldedPool(walletIdHex)) },
                         onFund = { navController.navigate(ShieldedFund(walletIdHex)) },
                         onActivity = { navController.navigate(ShieldedActivity(walletIdHex)) },
@@ -313,6 +342,20 @@ fun WalletDetailScreen(
                         Text("($transactionCount)")
                     }
                 }
+            }
+
+            // Saved Core to shielded Max transfers (← WalletDetailView's
+            // `UnfinishedWalletDrainsList`). Renders nothing when this
+            // wallet has none. Above the accounts, whose list is long: an
+            // unfinished transfer must not sit below the fold.
+            if (hasShielded) {
+                UnfinishedWalletDrainsList(
+                    walletIdHex = walletIdHex,
+                    walletId = walletId,
+                    network = network,
+                    manager = manager,
+                    navController = navController,
+                )
             }
 
             // Accounts (← the Accounts header + AccountListView).
@@ -510,6 +553,7 @@ private fun PlatformBalanceRow(
     onTopUp: () -> Unit,
     onTransfer: () -> Unit,
     onWithdraw: () -> Unit,
+    onHistory: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     Row(
@@ -569,6 +613,15 @@ private fun PlatformBalanceRow(
                         onWithdraw()
                     },
                     modifier = Modifier.testTag("walletDetail.withdrawPlatformButton"),
+                )
+                // Platform address balance change history (ADDR-10).
+                DropdownMenuItem(
+                    text = { Text("Balance History") },
+                    onClick = {
+                        menuOpen = false
+                        onHistory()
+                    },
+                    modifier = Modifier.testTag("balanceCard.platform.history"),
                 )
             }
         }

@@ -38,6 +38,9 @@ use dash_sdk::drive::query::{WhereClause, WhereOperator};
 use dash_sdk::platform::dashpay::{PrivateContactRequest, SignedContactRequest};
 use dash_sdk::platform::private_document_entries::PrivateDocumentEntries;
 use dash_sdk::platform::private_document_scan::PrivateDocumentScan;
+#[cfg(test)]
+use dash_sdk::platform::private_document_seal::seal_private_document;
+use dash_sdk::platform::private_document_seal::PrivateDocumentEntryRequest;
 use dash_sdk::platform::transition::outcome::{OutcomeEvidence, TransitionOutcome};
 use dash_sdk::platform::transition::waitable::Waitable;
 use dash_sdk::platform::{DocumentQuery, FetchMany};
@@ -69,6 +72,23 @@ pub trait ContactCryptoProvider {
         &self,
         path: &key_wallet::bip32::DerivationPath,
     ) -> Result<key_wallet::bip32::ExtendedPubKey, PlatformWalletError>;
+
+    /// Extended public keys at each of `paths`, in their order: what
+    /// [`Self::receiving_xpub`] derives, for several paths at once. A provider
+    /// backed by a seed it must resolve resolves it once for all of them.
+    ///
+    /// Defaulted to one [`Self::receiving_xpub`] call per path, so adding this
+    /// method is not a source-breaking change.
+    async fn extended_public_keys(
+        &self,
+        paths: &[key_wallet::bip32::DerivationPath],
+    ) -> Result<Vec<key_wallet::bip32::ExtendedPubKey>, PlatformWalletError> {
+        let mut keys = Vec::with_capacity(paths.len());
+        for path in paths {
+            keys.push(self.receiving_xpub(path).await?);
+        }
+        Ok(keys)
+    }
 
     /// ECDH shared secret between our key at `path` and the contact's `peer`
     /// pubkey. Returned in [`zeroize::Zeroizing`] so the DIP-15 friendship AES
@@ -243,6 +263,26 @@ pub trait ContactCryptoProvider {
     ) -> Result<BinaryData, PlatformWalletError> {
         Err(private_documents_unsupported())
     }
+
+    /// Seals `request`, an entry of any private document type, with the sender's encryption key,
+    /// the one at `sender_encryption_key_path`
+    /// ([`dash_sdk::platform::private_document_seal::seal_private_document`]): the entry is
+    /// sealed with that key's outgoing viewing key, and a deniable MAC is keyed with it. Its
+    /// secret key stays in the signer; only the sealed entry returns. `esk_seed` is 32 fresh
+    /// random bytes, never reused.
+    ///
+    /// Defaulted to an "unsupported" error, as [`Self::scan_private_document_page`].
+    async fn seal_private_document_entry(
+        &self,
+        _sender_encryption_key_path: &key_wallet::bip32::DerivationPath,
+        _request: &PrivateDocumentEntryRequest<'_>,
+        _esk_seed: &[u8; 32],
+        _platform_version: &dpp::version::PlatformVersion,
+    ) -> Result<BinaryData, PlatformWalletError> {
+        Err(PlatformWalletError::InvalidIdentityData(
+            "sealing private document entries is not supported by this crypto provider".to_string(),
+        ))
+    }
 }
 
 fn private_documents_unsupported() -> PlatformWalletError {
@@ -283,6 +323,8 @@ pub(crate) struct SeedCryptoProvider {
     /// How many times the private document scan keys were derived: once per scan call, a
     /// page's or a batch's.
     pub(crate) scan_key_derivations: std::sync::atomic::AtomicUsize,
+    /// How many `extended_public_keys` calls it answered, each for all its paths at once.
+    pub(crate) public_key_batches: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]
@@ -294,6 +336,7 @@ impl SeedCryptoProvider {
             wallet: Wallet::from_seed_bytes(seed, network, WalletAccountCreationOptions::None)
                 .expect("test seed wallet"),
             scan_key_derivations: std::sync::atomic::AtomicUsize::new(0),
+            public_key_batches: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -308,6 +351,25 @@ impl ContactCryptoProvider for SeedCryptoProvider {
         self.wallet.derive_extended_public_key(path).map_err(|e| {
             PlatformWalletError::InvalidIdentityData(format!("test receiving_xpub: {e}"))
         })
+    }
+
+    async fn extended_public_keys(
+        &self,
+        paths: &[key_wallet::bip32::DerivationPath],
+    ) -> Result<Vec<key_wallet::bip32::ExtendedPubKey>, PlatformWalletError> {
+        // Once for the batch, as a signer-backed provider resolves its seed once.
+        self.public_key_batches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        paths
+            .iter()
+            .map(|path| {
+                self.wallet.derive_extended_public_key(path).map_err(|e| {
+                    PlatformWalletError::InvalidIdentityData(format!(
+                        "test extended_public_keys: {e}"
+                    ))
+                })
+            })
+            .collect()
     }
 
     async fn ecdh_shared_secret(
@@ -492,6 +554,20 @@ impl ContactCryptoProvider for SeedCryptoProvider {
             esk_seed,
             platform_version,
         );
+        encryption_secret_key.non_secure_erase();
+        Ok(sealed?)
+    }
+
+    async fn seal_private_document_entry(
+        &self,
+        sender_encryption_key_path: &key_wallet::bip32::DerivationPath,
+        request: &PrivateDocumentEntryRequest<'_>,
+        esk_seed: &[u8; 32],
+        platform_version: &dpp::version::PlatformVersion,
+    ) -> Result<BinaryData, PlatformWalletError> {
+        let mut encryption_secret_key = self.secret_key_at(sender_encryption_key_path)?;
+        let sealed =
+            seal_private_document(request, &encryption_secret_key, esk_seed, platform_version);
         encryption_secret_key.non_secure_erase();
         Ok(sealed?)
     }
@@ -7681,7 +7757,7 @@ mod stamp_race_tests {
 }
 
 /// Where a contact request send's signing stands, for [`GatedSigner`].
-enum SigningGate {
+pub(super) enum SigningGate {
     /// The host has not signed yet: no gate is held.
     Unsigned,
     /// Signed, and the wallet generation's lifecycle gate is held from then
@@ -7693,19 +7769,29 @@ enum SigningGate {
     Removed,
 }
 
-/// The host's signer for a contact request send, taking the wallet
-/// generation's lifecycle gate once a signature returns and before it can
-/// leave: the SDK broadcasts right after signing, so the broadcast and the
-/// send's bookkeeping run under the gate, while the host's signing prompt
-/// does not. A signature made after the wallet was removed, or re-created
-/// under its id, is refused, so nothing is published.
-struct GatedSigner<'a, S: ?Sized, B: TransactionBroadcaster + ?Sized> {
-    signer: &'a S,
-    wallet: &'a IdentityWallet<B>,
-    gate: std::sync::Mutex<SigningGate>,
+/// The host's signer for a contact request send (and a key limits update, and the
+/// DPNS name writes),
+/// taking the wallet generation's lifecycle gate once a signature returns and
+/// before it can leave: the SDK broadcasts right after signing, so the
+/// broadcast and the send's bookkeeping run under the gate, while the host's
+/// signing prompt does not. A signature made after the wallet was removed, or
+/// re-created under its id, is refused, so nothing is published.
+pub(super) struct GatedSigner<'a, S: ?Sized, B: TransactionBroadcaster + ?Sized> {
+    pub(super) signer: &'a S,
+    pub(super) wallet: &'a IdentityWallet<B>,
+    pub(super) gate: std::sync::Mutex<SigningGate>,
 }
 
-impl<S: ?Sized, B: TransactionBroadcaster + ?Sized> GatedSigner<'_, S, B> {
+impl<'a, S: ?Sized, B: TransactionBroadcaster + ?Sized> GatedSigner<'a, S, B> {
+    /// `signer`, gated on `wallet`'s generation: nothing is held until a signature returns.
+    pub(super) fn new(signer: &'a S, wallet: &'a IdentityWallet<B>) -> Self {
+        Self {
+            signer,
+            wallet,
+            gate: std::sync::Mutex::new(SigningGate::Unsigned),
+        }
+    }
+
     fn gate(&self) -> std::sync::MutexGuard<'_, SigningGate> {
         self.gate
             .lock()
@@ -7714,7 +7800,7 @@ impl<S: ?Sized, B: TransactionBroadcaster + ?Sized> GatedSigner<'_, S, B> {
 
     /// Whether a signature was refused because the wallet was removed or
     /// replaced while the host signed.
-    fn removed(&self) -> bool {
+    pub(super) fn removed(&self) -> bool {
         matches!(*self.gate(), SigningGate::Removed)
     }
 

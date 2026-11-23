@@ -24,7 +24,10 @@ import org.dashfoundation.dashsdk.errors.DashSdkError
 import org.dashfoundation.dashsdk.errors.mapNativeErrors
 import org.dashfoundation.dashsdk.ffi.DashpayNative
 import org.dashfoundation.dashsdk.ffi.DpnsMarketplaceNative
+import org.dashfoundation.dashsdk.ffi.AddressPrivateKeyNative
 import org.dashfoundation.dashsdk.ffi.FundingNative
+import org.dashfoundation.dashsdk.ffi.IdentityRemovalNative
+import org.dashfoundation.dashsdk.ffi.ShieldedTokenPurchaseNative
 import org.dashfoundation.dashsdk.ffi.NativePersistenceBridge
 import org.dashfoundation.dashsdk.ffi.NativeWalletEventBridge
 import org.dashfoundation.dashsdk.ffi.WalletManagerNative
@@ -39,10 +42,14 @@ import org.json.JSONArray
 import org.dashfoundation.dashsdk.security.BiometricGate
 import org.dashfoundation.dashsdk.security.IdentityKeyPrivateKeyDeriver
 import org.dashfoundation.dashsdk.security.KeystoreSigner
+import org.dashfoundation.dashsdk.security.MasternodeVotingKeyNotStoredException
+import org.dashfoundation.dashsdk.security.MasternodeVotingKeyStore
+import org.dashfoundation.dashsdk.security.PendingIdentityKeyDelete
 import org.dashfoundation.dashsdk.security.MnemonicResolverAndPersister
 import org.dashfoundation.dashsdk.security.WalletStorage
 import org.dashfoundation.dashsdk.tokens.ContactRequestRef
 import org.dashfoundation.dashsdk.tokens.EstablishedContactRef
+import org.dashfoundation.dashsdk.voting.MasternodeVotingSigner
 import java.util.concurrent.atomic.AtomicLong
 
 /** Effective native persistence contract exposed for initialization diagnostics. */
@@ -88,6 +95,13 @@ data class PlatformWalletPersistenceCapabilities(
          */
         const val PRIVATE_CONTACT_REQUEST_SCAN_STATE: Long =
             NativePersistenceBridge.CAPABILITY_PRIVATE_CONTACT_REQUEST_SCAN_STATE
+        /**
+         * A tracked asset lock's operation id survives store and load, so a
+         * wallet drain ("Max") can be found again after a restart. Mirrors
+         * `PersistenceCapabilities::ASSET_LOCK_OPERATION_IDS`.
+         */
+        const val ASSET_LOCK_OPERATION_IDS: Long =
+            NativePersistenceBridge.CAPABILITY_ASSET_LOCK_OPERATION_IDS
     }
 }
 
@@ -268,8 +282,11 @@ class PlatformWalletManager(
      * builds; [closeSuspending] awaits it before freeing the signer /
      * resolver boxes (raw, non-refcounted `Box::from_raw` frees on the
      * Rust side).
+     *
+     * Internal, with [managerHandle], for the wrappers kept in their own
+     * files (`PlatformWalletManagerWalletDrain.kt`).
      */
-    private val teardownGate = TeardownGate()
+    internal val teardownGate = TeardownGate()
 
     /**
      * Typed sync events fanned from the native `EventHandlerCallbacks`
@@ -286,6 +303,34 @@ class PlatformWalletManager(
 
     /** Hot stream of Rust-owned sync events for the services to reduce. */
     val syncEvents: SharedFlow<WalletSyncEvent> = _syncEvents.asSharedFlow()
+
+    private val _shieldedBalances =
+        MutableStateFlow<Map<String, ShieldedBalanceUpdate>>(emptyMap())
+
+    /**
+     * The latest shielded balance update of each wallet, by hex wallet id,
+     * as Rust announced it (`on_shielded_balance_changed_fn`). Rust sends an
+     * update whenever a wallet's balance state changes, so this is the
+     * balance to show: nothing reads or adds one up on the Kotlin side. A
+     * wallet without an entry has not been announced yet. A state, not an
+     * event stream, so a collector that starts late still sees the latest.
+     * Each update is the latest state Rust read, not one per ledger change.
+     * Emptied when the manager closes: a closed manager's balances are no
+     * longer anyone's.
+     */
+    val shieldedBalances: StateFlow<Map<String, ShieldedBalanceUpdate>> =
+        _shieldedBalances.asStateFlow()
+
+    /**
+     * Guards [shieldedBalances] together with [shieldedBalancesClosed]: an
+     * update is published and teardown empties the map under it, so an
+     * update that arrives while the manager closes cannot refill the map,
+     * also when the map was empty before and after.
+     */
+    private val shieldedBalancesLock = Any()
+
+    /** Set when teardown starts. Read and written under [shieldedBalancesLock]. */
+    private var shieldedBalancesClosed = false
 
     // ── Children (retained for the manager's lifetime) ────────────────
     //
@@ -414,6 +459,37 @@ class PlatformWalletManager(
         override fun onShieldedTreeProgress(leavesCommitted: Long, totalTarget: Long) {
             _syncEvents.tryEmit(WalletSyncEvent.ShieldedTreeProgress(leavesCommitted, totalTarget))
         }
+
+        override fun onShieldedBalanceChanged(
+            walletId: ByteArray,
+            revision: Long,
+            status: Int,
+            ordinarySpendableCredits: Long,
+            ordinaryBalanceEstablished: Boolean,
+            accounts: LongArray,
+        ) {
+            // Runs on a native thread: an exception must not travel back
+            // into Rust. An update that cannot be read is dropped, and the
+            // wallet keeps the last one that could.
+            val update = try {
+                decodeShieldedBalanceUpdate(
+                    walletId,
+                    revision,
+                    status,
+                    ordinarySpendableCredits,
+                    ordinaryBalanceEstablished,
+                    accounts,
+                )
+            } catch (e: IllegalStateException) {
+                android.util.Log.w("PlatformWalletManager", "Dropped a shielded balance update: ${e.message}")
+                return
+            }
+            synchronized(shieldedBalancesLock) {
+                if (!shieldedBalancesClosed) {
+                    _shieldedBalances.value = latestShieldedBalances(_shieldedBalances.value, update)
+                }
+            }
+        }
     }
 
     /**
@@ -510,6 +586,14 @@ class PlatformWalletManager(
                 database = database,
                 privateKeyDeriver = deriver,
                 network = network,
+                recordRemovedIdentityKeys = { deletes ->
+                    walletStorage.withPrivateKeyExclusion { recordPendingIdentityKeyDeletes(deletes) }
+                },
+                settlePendingKeyDeletesAfterRound = { inFlight ->
+                    walletStorage.withPrivateKeyExclusion {
+                        settlePendingIdentityKeyDeletes(database, this, inFlight)
+                    }
+                },
             )
             CoreChildren(resolver, keySigner, deriver, handler)
         } catch (constructionFailure: Throwable) {
@@ -560,6 +644,71 @@ class PlatformWalletManager(
 
     /** `SignerHandle` for FFI calls that need signatures. */
     val signerHandle: Long get() = signer.nativeHandle
+
+    /**
+     * Runs [block] with a signer that can sign with the masternode voting key stored under
+     * [identifier], and with nothing else. Port of Swift `MasternodeVoteCall.run`
+     * (`MasternodeVoterSection.swift`), which builds a `KeychainSigner` for each vote, and of
+     * `KeychainSigner.withStoredMasternodeVotingKey(identityId:isolation:perform:)`
+     * (`FFI/KeychainSigner.swift`).
+     *
+     * A masternode vote is signed with the voting key Rust builds from the voting address
+     * (ECDSA_HASH160, data = the address), so the signer is asked for exactly those 20
+     * bytes. This creates a [KeystoreSigner] for this call only, on this manager's
+     * [walletStorage], bound to exactly that request: the voting address with key type
+     * ECDSA_HASH160 reads the identity's own voting entry ([MasternodeVotingKeyStore]), and
+     * every other key, wallet keys and platform addresses included, is refused. This
+     * manager's own signer never resolves the address to the voting key, so a vote cannot
+     * change what a concurrent wallet operation signs with. Pass the [MasternodeVotingSigner] to a signer vote, for example
+     * `sdk.decisionProposals.castVote(proposalId, choice, proTxHash, voter)`. When [block]
+     * returns or throws, votes still in flight are awaited and the dedicated signer is
+     * freed; the voter cannot be used afterwards.
+     *
+     * The manager's teardown waits for the whole call.
+     *
+     * @param identifier the identity's `IdentityEntity.votingPrivateKeyIdentifier`, as
+     *   [MasternodeVotingKeyStore.store] returned it.
+     * @throws MasternodeVotingKeyNotStoredException when no identity row names [identifier],
+     *   no readable voting key is stored under it, or it is not a voting key identifier.
+     * @throws IllegalStateException once the manager is closing; and whatever [block] throws.
+     */
+    suspend fun <T> withStoredMasternodeVotingKey(
+        identifier: String,
+        block: suspend (voter: MasternodeVotingSigner) -> T,
+    ): T = teardownGate.withOp {
+        val keys = MasternodeVotingKeyStore(walletStorage)
+        val votingAddress = try {
+            keys.votingAddressOf(identifier)
+        } catch (_: IllegalArgumentException) {
+            throw MasternodeVotingKeyNotStoredException()
+        }
+        // An entry no identity row names is not a loaded voter (a clear or an interrupted
+        // write left it), however readable it is.
+        if (!database.identityDao().existsByVotingPrivateKeyIdentifier(identifier) ||
+            !keys.isStored(identifier)
+        ) {
+            throw MasternodeVotingKeyNotStoredException()
+        }
+        // Bound to the one voting key: no fallback to wallet keys, no platform address
+        // derivation, and no invalidation hook (that bookkeeping is for wallet keys).
+        val dedicated = KeystoreSigner.forBoundKey(
+            walletStorage, network, biometricGate, database.platformAddressDao(),
+            KeystoreSigner.BoundKey(votingAddress, KeystoreSigner.KEY_TYPE_ECDSA_HASH160, identifier),
+        )
+        try {
+            val voter = MasternodeVotingSigner.create(votingAddress, dedicated)
+            try {
+                block(voter)
+            } finally {
+                withContext(NonCancellable) { voter.end() }
+            }
+        } finally {
+            dedicated.close()
+        }
+    }
+
+    /** This manager's own signer, for tests that check what it can sign. */
+    internal val signerForTesting: KeystoreSigner get() = signer
 
     /**
      * Re-derive the canonical identity-authentication private key for
@@ -629,6 +778,26 @@ class PlatformWalletManager(
                 // rules out the wrong-key-behind-locked-gate ambiguity because
                 // the blob was written under the captured public key).
                 walletStorage.probeIdentityKeyRecoverability(pubkeyHex)
+            },
+            // The identity this key was repaired for was removed meanwhile:
+            // record the key, then settle it like an identity removal would
+            // (kept while another identity uses it, this wallet's claim
+            // released), so a failed delete is retried by the next removal.
+            // Under the callback exclusion first, as settling requires: an
+            // in-flight round that stores the alias for this wallet commits its
+            // row before or after the settle, never between its read and its
+            // release.
+            abandonStoredKey = { pubkeyHex ->
+                persistenceHandler.withCallbackExclusion {
+                    walletStorage.withPrivateKeyExclusion {
+                        recordPendingIdentityKeyDeletes(listOf(PendingIdentityKeyDelete(pubkeyHex, walletId)))
+                        settlePendingIdentityKeyDeletes(
+                            database,
+                            this,
+                            persistenceHandler.aliasesStagedInOpenRounds(),
+                        )
+                    }
+                }
             },
         )
     }
@@ -898,7 +1067,7 @@ class PlatformWalletManager(
     private val bundleRef: AtomicLong = AtomicLong(nativeInitialization.bundle)
 
     /** Raw native manager `Handle` (for the sync / wallet-accessor calls). */
-    private val managerHandle: Long = nativeInitialization.managerHandle
+    internal val managerHandle: Long = nativeInitialization.managerHandle
 
     /** Effective persistence contract captured during native initialization. */
     val persistenceCapabilities: PlatformWalletPersistenceCapabilities =
@@ -1272,6 +1441,39 @@ class PlatformWalletManager(
         walletStorage.deleteMnemonic(walletId)
     }
 
+    /**
+     * Remove one identity from this device. Port of SwiftExampleApp's
+     * `IdentitiesContentView.removeIdentityLocally` (#6084), with the live
+     * wallet removal of dashpay/platform#6098 done first. Nothing is
+     * broadcast and the identity stays on Platform; it can be loaded again.
+     *
+     * Rust removes the identity from every running wallet that manages it
+     * (`platform_wallet_manager_remove_identity_from_device`), so no later
+     * sync stores it again, or refuses while its DashPay contact request
+     * channel is held. A refusal throws the platform-wallet
+     * [org.dashfoundation.dashsdk.errors.DashSdkError] and nothing on the
+     * device is deleted. Then the identity's Room rows go in one transaction,
+     * then its stored private keys and masternode voting key; a secret the
+     * secure storage refuses to delete after the rows are gone is reported in
+     * [IdentityDeviceRemovalResult.keysLeft] instead of thrown. A key another
+     * identity row references, or another wallet's owner index claims, is
+     * kept. See [deleteIdentityFromDevice] for the order.
+     *
+     * @param identityId the 32-byte identity id.
+     */
+    suspend fun removeIdentityFromDevice(identityId: ByteArray): IdentityDeviceRemovalResult =
+        teardownGate.op {
+            deleteIdentityFromDevice(
+                identityId,
+                persistenceHandler,
+                database,
+                walletStorage,
+                removeFromLiveWallets = { id ->
+                    mapNativeErrors { IdentityRemovalNative.removeIdentityFromDevice(managerHandle, id) }
+                },
+            )
+        }
+
     // ── Watch-only restore ────────────────────────────────────────────
 
     /**
@@ -1313,6 +1515,21 @@ class PlatformWalletManager(
                 "PlatformWalletManager",
                 "pending-identity-key reconstruction failed on load; repair signals will be " +
                     "rebuilt on the next launch",
+                t,
+            )
+        }
+
+        // Finish identity-key deletes an identity removal recorded but could
+        // not settle before (a failed round-end settle, a process death):
+        // best effort, retried on the next launch or removal.
+        try {
+            persistenceHandler.settlePendingIdentityKeyDeletesNow()
+        } catch (cancellation: kotlin.coroutines.cancellation.CancellationException) {
+            throw cancellation
+        } catch (t: Throwable) {
+            android.util.Log.w(
+                "PlatformWalletManager",
+                "pending identity-key deletes not settled on load; retried later",
                 t,
             )
         }
@@ -1368,6 +1585,49 @@ class PlatformWalletManager(
         // exist, independent of whether the sweep service was started.
         if (restored.isNotEmpty()) startDashPayStatusPolling()
         restored
+    }
+
+    /**
+     * Reveal the private key of [address], one of the tracked core addresses
+     * of the wallet [walletId], as hex and WIF. Port of Swift's
+     * `ManagedPlatformWallet.coreAddressPrivateKey(address:)`
+     * (`ManagedPlatformWallet.swift`), bridging
+     * `platform_wallet_address_private_key`.
+     *
+     * Rust finds the address in the wallet's account pools, reads the mnemonic
+     * through this manager's resolver and derives the key; Kotlin only decodes
+     * the result. Which addresses have a key to reveal is Rust's answer: an
+     * empty or malformed address, one the wallet does not track, or a DashPay
+     * contact's external address whose key the wallet never held, throws the
+     * [org.dashfoundation.dashsdk.errors.DashSdkError] Rust reports.
+     *
+     * Swift builds a resolver per call; here the call borrows this manager's
+     * resolver under this manager's teardown gate, so the wallet and the
+     * resolver always come from the same live manager and no caller-supplied
+     * handle reaches native code.
+     *
+     * Gate this behind device authentication before calling it. The caller
+     * owns the result and should [CoreAddressPrivateKey.clear] it when the key
+     * leaves the screen. If the calling coroutine is cancelled after the native
+     * call returns, the key is cleared here instead of being handed back.
+     *
+     * @throws org.dashfoundation.dashsdk.errors.DashSdkError.NotFound when no
+     *   wallet with [walletId] is loaded in this manager.
+     */
+    suspend fun coreAddressPrivateKey(
+        walletId: ByteArray,
+        address: String,
+    ): CoreAddressPrivateKey = teardownGate.opWithCleanupOnCancellation(cleanup = { it.clear() }) {
+        val wallet = wallet(forWalletId = walletId)
+            ?: throw DashSdkError.NotFound("wallet ${walletId.toHex()} is not loaded")
+        val blob = mapNativeErrors {
+            AddressPrivateKeyNative.revealCoreAddressPrivateKey(
+                wallet.handle,
+                mnemonicResolverHandle,
+                address,
+            )
+        }
+        CoreAddressPrivateKey.decodeAndWipe(blob)
     }
 
     /** The managed wallet with the given 32-byte id, or null if not loaded. */
@@ -2160,6 +2420,109 @@ class PlatformWalletManager(
     }
 
     /**
+     * Buy [tokenCount] tokens at their direct purchase price from this
+     * wallet's shielded notes: the Type 28 `TokenPurchaseFromShieldedPool`
+     * transition. Port of Swift's
+     * `PlatformWalletManager.shieldedTokenPurchaseFromPool`
+     * (`PlatformWalletManagerShieldedSync.swift`).
+     *
+     * The notes of [account] pay [totalAgreedPrice] plus the pool-paid fee
+     * ([ShieldedProver.FeeKind.TokenPurchaseFromPool]), and the tokens are
+     * minted as a note to the account's own address in the token's shielded
+     * pool. No identity is involved. Rust checks the token count, the
+     * network's protocol version, the token's shielded pool and the note
+     * count, selects the notes, builds, broadcasts, records the activity
+     * and requests the shielded sync that looks for it.
+     *
+     * Returning means SUBMITTED, not confirmed: Platform accepted the
+     * purchase, but its result proof does not show that it executed. It
+     * stays pending, with its notes reserved, until a shielded sync finds
+     * it. Do not show it as complete and do not retry it.
+     *
+     * Throws [DashSdkError.PlatformWallet.ShieldedSpendUnconfirmed] once the
+     * purchase may have reached a node and its result is not known: it may
+     * already be on chain or may still execute, so the caller must NOT
+     * retry. That is the error Rust reports this case with. A caller should
+     * read [DashSdkError.PlatformWallet.TransactionBroadcastUnconfirmed] and
+     * [DashSdkError.StateTransitionResultUnconfirmed] the same way, as the
+     * example app does for every shielded operation: they also say a result
+     * is not known. Any other error means nothing was sent.
+     *
+     * @param walletId the 32-byte wallet id.
+     * @param contractId the 32-byte id of the token's data contract.
+     * @param tokenPosition the token's position in that contract.
+     * @param tokenCount tokens to buy, in the token's base units.
+     * @param totalAgreedPrice credits the buyer agrees to pay; Platform
+     *   refuses the purchase unless it covers the token's configured price
+     *   for [tokenCount].
+     * @param account the ZIP-32 shielded account to spend from (usually 0).
+     */
+    suspend fun shieldedTokenPurchaseFromPool(
+        walletId: ByteArray,
+        contractId: ByteArray,
+        tokenPosition: Int,
+        tokenCount: ULong,
+        totalAgreedPrice: ULong,
+        account: Int = 0,
+    ): Unit = teardownGate.op {
+        require(account >= 0) { "account must be non-negative, got $account" }
+        require(walletId.size == 32) { "walletId must be exactly 32 bytes, got ${walletId.size}" }
+        require(contractId.size == 32) {
+            "contractId must be exactly 32 bytes, got ${contractId.size}"
+        }
+        requireTokenPosition(tokenPosition)
+        mapNativeErrors {
+            ShieldedTokenPurchaseNative.purchaseFromPool(
+                managerHandle,
+                walletId,
+                mnemonicResolver.nativeHandle,
+                account,
+                contractId,
+                tokenPosition,
+                tokenCount.toLong(),
+                totalAgreedPrice.toLong(),
+            )
+        }
+    }
+
+    /**
+     * A token position is a u16 on the Rust side: refuse one that does not
+     * fit before the native call, with the same error `Tokens` raises.
+     */
+    private fun requireTokenPosition(tokenPosition: Int) {
+        require(tokenPosition in 0..0xFFFF) {
+            "tokenPosition must be in 0..65535, got $tokenPosition"
+        }
+    }
+
+    /**
+     * Whether the token at [tokenPosition] of [contractId] can be bought
+     * with [shieldedTokenPurchaseFromPool], from the same verified read of
+     * its configuration that purchase refuses on. Port of Swift's
+     * `PlatformWalletManager.shieldedTokenPurchaseAvailability` (same file).
+     * A purchase form offers the shielded payment on
+     * [ShieldedTokenPurchaseAvailability.Available] only.
+     *
+     * Throws when the question itself could not be asked (a closed
+     * manager); a configuration that could not be read is the
+     * [ShieldedTokenPurchaseAvailability.ConfigurationUnreadable] answer.
+     */
+    suspend fun shieldedTokenPurchaseAvailability(
+        contractId: ByteArray,
+        tokenPosition: Int,
+    ): ShieldedTokenPurchaseAvailability = teardownGate.op {
+        require(contractId.size == 32) {
+            "contractId must be exactly 32 bytes, got ${contractId.size}"
+        }
+        requireTokenPosition(tokenPosition)
+        ShieldedTokenPurchaseAvailability.fromNative(
+            mapNativeErrors {
+                ShieldedTokenPurchaseNative.availability(managerHandle, contractId, tokenPosition)
+            },
+        )
+    }
+
+    /**
      * Send a DashPay private contact request (protocol version 15) from
      * [senderIdentityId] to [recipientIdentityId], paying for it from
      * [account]'s shielded notes on [walletId], so nothing on chain names
@@ -2927,6 +3290,12 @@ class PlatformWalletManager(
     }
 
     private suspend fun closeInternal(bundle: Long) {
+        // The native emitter stops with the manager, so what it last sent
+        // would otherwise stay on screen for good.
+        synchronized(shieldedBalancesLock) {
+            shieldedBalancesClosed = true
+            _shieldedBalances.value = emptyMap()
+        }
         // Stop the progress poll loops + event fan-out scope before teardown
         // so no collector touches a destroyed handle.
         progressPollJob?.cancel()
