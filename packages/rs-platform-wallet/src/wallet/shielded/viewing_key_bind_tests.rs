@@ -800,7 +800,10 @@ async fn finish_removal(
     teardown: tokio::sync::OwnedRwLockWriteGuard<()>,
 ) {
     wallet.mark_shielded_detached();
-    coordinator.unregister_wallet(wallet.wallet_id()).await;
+    coordinator
+        .unregister_wallet(wallet.wallet_id())
+        .await
+        .expect("unregister");
     drop(teardown);
 }
 
