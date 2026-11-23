@@ -448,6 +448,26 @@ fn reserved_action_count(
         .map_err(|e| PlatformWalletError::ShieldedBuildError(e.to_string()))
 }
 
+/// The action count `fee_kind`'s fee is computed at for `num_spends` notes.
+///
+/// A `TokenPurchaseFromShieldedPool` fee bundle has `max(notes, 2)` actions and is not a
+/// shielded transfer bundle, so the transfer-shaped size check of [`reserved_action_count`]
+/// does not describe it: its size bound is [`max_token_purchase_fee_notes`], which the purchase
+/// applies to the selection and refuses with `ShieldedTooManyNotes`. Every other kind is priced
+/// by [`reserved_action_count`].
+fn fee_action_count(
+    fee_kind: ShieldedFeeKind,
+    num_spends: usize,
+    num_outputs: usize,
+    platform_version: &PlatformVersion,
+) -> Result<usize, PlatformWalletError> {
+    if matches!(fee_kind, ShieldedFeeKind::TokenPurchase) {
+        Ok(num_spends.max(num_outputs))
+    } else {
+        reserved_action_count(num_spends, num_outputs, platform_version)
+    }
+}
+
 /// Select unspent notes to cover `amount + fee` using a greedy algorithm.
 ///
 /// Notes are sorted by value descending and accumulated until the target is met.
@@ -561,7 +581,7 @@ pub fn select_notes_with_fee<'a>(
     let min_change = change.min_change_credits();
     let mut fee_estimate = fee_kind
         .compute(
-            reserved_action_count(1, num_outputs, platform_version)?,
+            fee_action_count(fee_kind, 1, num_outputs, platform_version)?,
             platform_version,
         )
         .map_err(|e| PlatformWalletError::ShieldedBuildError(e.to_string()))?;
@@ -595,7 +615,8 @@ pub fn select_notes_with_fee<'a>(
     for _ in 0..5 {
         let selected = select_notes(unspent, amount, selection_target(fee_estimate)?)?;
         let total: u64 = selected.iter().map(|n| n.value).sum();
-        let num_actions = reserved_action_count(selected.len(), num_outputs, platform_version)?;
+        let num_actions =
+            fee_action_count(fee_kind, selected.len(), num_outputs, platform_version)?;
         let exact_fee = fee_kind
             .compute(num_actions, platform_version)
             .map_err(|e| PlatformWalletError::ShieldedBuildError(e.to_string()))?;
@@ -610,7 +631,7 @@ pub fn select_notes_with_fee<'a>(
     // Final attempt with last computed fee
     let selected = select_notes(unspent, amount, selection_target(fee_estimate)?)?;
     let total: u64 = selected.iter().map(|n| n.value).sum();
-    let num_actions = reserved_action_count(selected.len(), num_outputs, platform_version)?;
+    let num_actions = fee_action_count(fee_kind, selected.len(), num_outputs, platform_version)?;
     let exact_fee = fee_kind
         .compute(num_actions, platform_version)
         .map_err(|e| PlatformWalletError::ShieldedBuildError(e.to_string()))?;

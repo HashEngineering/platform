@@ -422,7 +422,10 @@ async fn should_emit_an_unregistered_wallet_before_bound_ones_wait_for_the_store
         .save_note(SubwalletId::new(last, 0), &note(1, 10))
         .expect("save");
     pause.wait_entered().await;
-    coordinator.unregister_wallet(unregistered).await;
+    coordinator
+        .unregister_wallet(unregistered)
+        .await
+        .expect("unregister");
     let held = coordinator.store().write().await;
     pause.release();
 
@@ -552,7 +555,10 @@ async fn should_emit_unbound_when_a_wallet_is_unregistered() {
     let mut emitter = Emitter::start(&coordinator);
     assert_eq!(ordinary_credits(&emitter.next().await), 0);
 
-    coordinator.unregister_wallet(wallet).await;
+    coordinator
+        .unregister_wallet(wallet)
+        .await
+        .expect("unregister");
     let update = emitter.next().await;
     assert_eq!(update.revision, 2);
     assert_eq!(update.state, ShieldedLocalBalanceState::Unbound);
@@ -829,7 +835,10 @@ async fn should_deliver_nothing_after_shutdown_returns() {
         .await
         .save_note(SubwalletId::new(wallet, 0), &note(1, 100))
         .expect("save");
-    coordinator.unregister_wallet(wallet).await;
+    coordinator
+        .unregister_wallet(wallet)
+        .await
+        .expect("unregister");
     tokio::time::sleep(QUIET).await;
     assert_eq!(recorder.count(), delivered, "nothing after shutdown");
 

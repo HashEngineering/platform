@@ -6094,7 +6094,10 @@ mod tests {
             .record_token_pool_watch(wallet_id, watch)
             .await
             .expect("watch again");
-        coordinator.unregister_wallet(wallet_id).await;
+        coordinator
+            .unregister_wallet(wallet_id)
+            .await
+            .expect("unregister");
         let left = coordinator
             .store()
             .read()
