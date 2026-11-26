@@ -58,14 +58,25 @@ pub mod prover;
 pub mod seed_pool;
 pub mod store;
 pub mod sync;
+pub mod tip_payment;
+#[cfg(test)]
+mod tip_payment_tests;
+mod tip_recipients;
 pub mod tips;
 pub mod token_pool;
 pub mod wallet_drain_recovery;
+pub use tip_payment::{
+    parse_shielded_tip_amount, ShieldedIdentityBalance, ShieldedTipAdmission, ShieldedTipRecipient,
+    ShieldedTipRecipientChange, ShieldedTipReview, ShieldedTipSource,
+    SHIELDED_IDENTITY_BALANCE_WAIT,
+};
 pub use tips::{
     is_shielded_identity_account, shielded_identity_account_index, SHIELDED_IDENTITY_ACCOUNT_BASE,
 };
 #[cfg(test)]
-mod viewing_key_bind_tests;
+mod spend_admission_tests;
+#[cfg(test)]
+pub(crate) mod viewing_key_bind_tests;
 #[cfg(test)]
 mod wallet_drain_tests;
 
@@ -82,7 +93,11 @@ pub(crate) use contact_address::ContactShieldedAddresses;
 pub use coordinator::NetworkShieldedCoordinator;
 pub use file_store::{FileBackedShieldedStore, FileShieldedStoreError};
 pub use keys::{AccountViewingKeys, OrchardKeySet};
-pub use operations::{ShieldedTokenPurchaseAvailability, ShieldedTokenPurchaseOutcome};
+pub use note_selection::TokenPoolSpendKind;
+pub use operations::{
+    ShieldedTokenPurchaseAvailability, ShieldedTokenPurchaseOutcome, ShieldedTokenSpendOutcome,
+    ShieldedTokenSpendPreview,
+};
 pub use prover::CachedOrchardProver;
 pub use seed_pool::{SeedPoolOutcome, SeedPoolProgress, DEFAULT_SEED_POOL_TARGET_NOTES};
 pub use store::{

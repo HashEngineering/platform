@@ -27,6 +27,7 @@ import org.dashfoundation.dashsdk.ffi.DpnsMarketplaceNative
 import org.dashfoundation.dashsdk.ffi.AddressPrivateKeyNative
 import org.dashfoundation.dashsdk.ffi.FundingNative
 import org.dashfoundation.dashsdk.ffi.IdentityRemovalNative
+import org.dashfoundation.dashsdk.ffi.ShieldedTokenPoolNative
 import org.dashfoundation.dashsdk.ffi.ShieldedTokenPurchaseNative
 import org.dashfoundation.dashsdk.ffi.NativePersistenceBridge
 import org.dashfoundation.dashsdk.ffi.NativeWalletEventBridge
@@ -95,6 +96,14 @@ data class PlatformWalletPersistenceCapabilities(
          */
         const val PRIVATE_CONTACT_REQUEST_SCAN_STATE: Long =
             NativePersistenceBridge.CAPABILITY_PRIVATE_CONTACT_REQUEST_SCAN_STATE
+        /**
+         * The Orchard recipient of a shielded asset-lock funding survives
+         * store and load with its row, so a resume after a restart pays the
+         * recipient the user confirmed. Mirrors
+         * `PersistenceCapabilities::ASSET_LOCK_SHIELDED_RECIPIENTS`.
+         */
+        const val ASSET_LOCK_SHIELDED_RECIPIENTS: Long =
+            NativePersistenceBridge.CAPABILITY_ASSET_LOCK_SHIELDED_RECIPIENTS
         /**
          * A tracked asset lock's operation id survives store and load, so a
          * wallet drain ("Max") can be found again after a restart. Mirrors
@@ -1005,7 +1014,7 @@ class PlatformWalletManager(
      * wallet handle + [signerHandle] into each call.
      */
     val identityUpdates: org.dashfoundation.dashsdk.identity.IdentityUpdates =
-        org.dashfoundation.dashsdk.identity.IdentityUpdates(teardownGate)
+        org.dashfoundation.dashsdk.identity.IdentityUpdates(teardownGate) { signerHandle }
 
     /**
      * Document purchase + set-price bridge — the document state-transition
@@ -1903,10 +1912,45 @@ class PlatformWalletManager(
      * fail closed and keep its rows rather than orphan a still-populated
      * tree. Only meaningful on a shielded build ([Sdk.hasShielded]); the
      * native entry point is absent otherwise and this throws.
+     *
+     * Does not wait for a shielded operation in flight (a bind, an added
+     * account, a token pool transfer or unshield, a profile write, a tip
+     * address preparation, a shielded tip being sent): while one runs this
+     * throws
+     * [DashSdkError.PlatformWallet.ShieldedOperationInProgress] at once,
+     * with nothing changed and the sync loop still running. Keep the Room
+     * rows and call it again once the operation has finished.
      */
     suspend fun clearShieldedStorage() = withContext(Dispatchers.IO) {
         mapNativeErrors { WalletManagerNative.shieldedClear(managerHandle) }
     }
+
+    /**
+     * The ordinary ZIP-32 shielded accounts Rust holds for [walletId], in
+     * ascending order: the accounts of its last [bindShielded], without the
+     * identity accounts Rust adds to a bind by itself. Empty for a wallet
+     * that was never bound on this manager.
+     *
+     * The list survives [clearShieldedStorage], which drops the wallet's
+     * registration on the coordinator but not the keys Rust holds for it. So
+     * it is what to pass to [bindShielded] to register the wallet again
+     * with the accounts it had. Rust is the source: the host keeps no copy
+     * of its own.
+     *
+     * Swift has no counterpart: its Clear registers nothing again, and its
+     * next Sync Now registers the other wallets with the default account.
+     * Only meaningful on a shielded build ([Sdk.hasShielded]); the native
+     * entry point is absent otherwise and this throws.
+     */
+    suspend fun shieldedOrdinaryAccounts(walletId: ByteArray): List<Int> =
+        withContext(Dispatchers.IO) {
+            require(walletId.size == 32) {
+                "walletId must be exactly 32 bytes, got ${walletId.size}"
+            }
+            mapNativeErrors {
+                WalletManagerNative.shieldedOrdinaryAccounts(managerHandle, walletId)
+            }.toList()
+        }
 
     // ── Shielded funding submits ──────────────────────────────────────
     //
@@ -2292,6 +2336,249 @@ class PlatformWalletManager(
         }
     }
 
+    // ── Identity shielded accounts ─────────────────────────────────────
+
+    /**
+     * Prepare the dedicated shielded account of the wallet-owned identity
+     * [identityId] on [walletId] and return the account's default 43-byte raw
+     * Orchard address. Port of Swift's
+     * `PlatformWalletManager.prepareShieldedIdentityAddress(walletId:identityId:resolver:)`
+     * (`PlatformWalletManagerShieldedSync.swift`). Publishes nothing and
+     * moves no funds.
+     *
+     * Rust proves the identity's slot with the seed this manager's mnemonic
+     * resolver supplies, binds the identity's account next to the wallet's
+     * bound accounts and records the preparation for this session. A contact
+     * request sent afterwards carries the sender's per-contact shielded
+     * address only once this preparation stands. Requires a prior
+     * [bindShielded] of [walletId]. Repeated calls are idempotent. Only
+     * meaningful on a shielded build ([Sdk.hasShielded]); the native entry
+     * point is absent otherwise and this throws.
+     *
+     * Throws [DashSdkError.NotFound] when the wallet holds no identity
+     * [identityId], [DashSdkError.PlatformWallet.ShieldedRecoveryCorrupted] or
+     * [DashSdkError.PlatformWallet.ShieldedRecoveryKeysRequired] when the bind
+     * meets unusable persisted shielded state, and
+     * [DashSdkError.PlatformWallet.WalletOperation] for every other failure
+     * (an unbound wallet, a seed that does not derive the identity's key),
+     * with the wallet's reason in the message.
+     */
+    suspend fun prepareShieldedIdentityAddress(
+        walletId: ByteArray,
+        identityId: ByteArray,
+    ): ByteArray = teardownGate.op {
+        mapNativeErrors {
+            FundingNative.prepareShieldedIdentityAddress(
+                managerHandle,
+                walletId,
+                mnemonicResolver.nativeHandle,
+                identityId,
+            )
+        }
+    }
+
+    // ── Shielded tips to a DashPay username ────────────────────────────
+    //
+    // A tip is an ordinary shielded transfer to the shielded address a
+    // name's DashPay profile publishes. Rust
+    // (`platform-wallet`'s `wallet/shielded/tip_payment.rs`) decides
+    // everything a payment screen would otherwise decide for itself: what
+    // the typed amount is, whom the name pays, whether that changed, whether
+    // an earlier payment is unresolved, which account pays, whether the tip
+    // may be sent now and whether an identity's balance is known. These
+    // wrappers pass the arguments in and the results out, as the Swift
+    // ones in `PlatformWalletManagerShieldedTips.swift` do.
+
+    /**
+     * Parse a tip amount the user typed in DASH into exact credits. Port of
+     * Swift's `PlatformWalletManager.parseShieldedTipAmount`. A pure parse:
+     * no wallet, no network, and it does not wait.
+     *
+     * Rust accepts ASCII digits with one optional decimal separator, `.` or
+     * `,`, ignoring surrounding whitespace, and refuses everything else (a
+     * sign, digit grouping, an exponent, zero, digits finer than one
+     * credit). Show the returned amount in the confirmation, not the typed
+     * text: `1,000` is one DASH. Do not parse the text on the host.
+     *
+     * Throws [DashSdkError.PlatformWallet.Generic] with native code 2
+     * (`ErrorInvalidParameter`) and Rust's reason for a text it refuses, and
+     * [DashSdkError.InvalidParameter] for an amount past what a `Long` of
+     * credits carries.
+     */
+    fun parseShieldedTipAmount(text: String): Long =
+        mapNativeErrors { FundingNative.parseShieldedTipAmount(text) }
+
+    /**
+     * Resolve [username] for the user to confirm a shielded tip from
+     * [walletId]: whom it pays now (the identity the DPNS name resolves to
+     * and the shielded address its DashPay profile publishes, both fetched
+     * with proof), how that compares with the recipient this wallet last
+     * confirmed for the name, and whether an earlier shielded payment to
+     * that recipient is still unresolved. Port of Swift's
+     * `PlatformWalletManager.reviewShieldedTip`. Changes nothing and moves
+     * no funds. Accepts `alice` and `alice.dash`.
+     *
+     * Show [ShieldedTipReview.recipient] and [ShieldedTipReview.change],
+     * then pass the recipient back to [sendShieldedTip] unchanged. While
+     * [ShieldedTipReview.unresolved] is set a send is refused. Requires a
+     * prior [bindShielded] of [walletId].
+     *
+     * When the tip starts from a saved contact, pass the contact's 32-byte
+     * identity id as [contactIdentityId]: Rust refuses the review with
+     * [DashSdkError.PlatformWallet.ShieldedTipRecipientMismatch] when the
+     * name now belongs to another identity, instead of showing that
+     * identity as a first tip to the contact. Leave it null when the user
+     * typed the name. Do not compare the ids on the host.
+     *
+     * Throws [DashSdkError.PlatformWallet.ShieldedRecoveryCorrupted] or
+     * [DashSdkError.PlatformWallet.ShieldedRecoveryKeysRequired] when the
+     * wallet cannot tell whom a saved shielded spend pays, and
+     * [DashSdkError.PlatformWallet.WalletOperation] for every other failure
+     * (a name that does not exist, a profile that publishes no valid
+     * shielded address, an unbound wallet), with the wallet's reason in the
+     * message.
+     */
+    suspend fun reviewShieldedTip(
+        walletId: ByteArray,
+        username: String,
+        contactIdentityId: ByteArray? = null,
+    ): ShieldedTipReview = teardownGate.op {
+        decodeShieldedTipReview(
+            mapNativeErrors {
+                FundingNative.reviewShieldedTip(
+                    managerHandle,
+                    walletId,
+                    username,
+                    contactIdentityId,
+                )
+            },
+        )
+    }
+
+    /**
+     * Send a shielded tip of [amount] credits from [walletId] to [username],
+     * paid from [source], with [memo] on the recipient's note. Port of
+     * Swift's `PlatformWalletManager.sendShieldedTip`. Blocks for the Halo 2
+     * proof.
+     *
+     * The tip pays [expectedRecipient], the [ShieldedTipReview.recipient]
+     * the user confirmed, and nothing else: Rust resolves the name and its
+     * profile again and refuses a recipient that differs, for the user to
+     * review again. There is no fallback to a transparent address.
+     *
+     * Throws:
+     * - [DashSdkError.PlatformWallet.ShieldedSpendUnconfirmed]: the tip may
+     *   have left the wallet and may still execute. Never send it again; a
+     *   shielded sync resolves it. Read
+     *   [DashSdkError.PlatformWallet.TransactionBroadcastUnconfirmed] and
+     *   [DashSdkError.StateTransitionResultUnconfirmed] the same way, as
+     *   for [shieldedTransfer].
+     * - [DashSdkError.PlatformWallet.ShieldedTipPending]: this call sent
+     *   nothing. Another tip from this wallet is being sent, or an earlier
+     *   shielded payment to the recipient may still execute. That earlier
+     *   payment may be this same tip and may pay the recipient: a shielded
+     *   sync resolves it as executed or as unable to execute, and the
+     *   refusal ends either way. Do not send again because the refusal
+     *   ended; send again only once the earlier payment is known to have
+     *   failed (its shielded activity entry reads failed, not confirmed).
+     *   This call returns no id for that entry, so when the exact attempt
+     *   cannot be identified, treat its outcome as unknown and do not send
+     *   again.
+     * - [DashSdkError.NotFound]: the wallet holds no identity
+     *   [ShieldedTipSource.Identity.identityId]. Nothing was sent.
+     * - [DashSdkError.PlatformWallet.ShieldedTipRecipientMismatch]:
+     *   [contactIdentityId] was given and the reviewed recipient is another
+     *   identity. Nothing was sent.
+     * - any other error: this call sent nothing (for example
+     *   [DashSdkError.PlatformWallet.WalletOperation] for a recipient that
+     *   changed since the review).
+     *
+     * A caller cancelled while the native call runs still gets its outcome
+     * when the call completes ([opReturningCompletedResult]): native code
+     * cannot see the cancellation, so the tip can be sent after it, and a
+     * sent tip must never read as a cancelled one. Handle the result before
+     * suspending again.
+     *
+     * @param amount credits to send, as [parseShieldedTipAmount] returned
+     *   them.
+     * @param memo optional UTF-8 memo on the recipient's note (null or
+     *   empty: no memo; Rust refuses more than 32 UTF-8 bytes).
+     * @param contactIdentityId the saved contact's 32-byte identity id when
+     *   the tip starts from a contact, as for [reviewShieldedTip]; null when
+     *   the user typed the name.
+     */
+    suspend fun sendShieldedTip(
+        walletId: ByteArray,
+        source: ShieldedTipSource,
+        username: String,
+        expectedRecipient: ShieldedTipRecipient,
+        amount: Long,
+        memo: String? = null,
+        contactIdentityId: ByteArray? = null,
+    ): Unit = teardownGate.opReturningCompletedResult {
+        // The C call takes the source as a nullable identity id beside an
+        // account number that it ignores when the id is present.
+        val sourceIdentityId: ByteArray?
+        val sourceAccount: Int
+        when (source) {
+            is ShieldedTipSource.Identity -> {
+                sourceIdentityId = source.identityId
+                sourceAccount = 0
+            }
+            is ShieldedTipSource.Account -> {
+                sourceIdentityId = null
+                sourceAccount = source.account
+            }
+        }
+        mapNativeErrors {
+            FundingNative.sendShieldedTip(
+                managerHandle,
+                walletId,
+                mnemonicResolver.nativeHandle,
+                sourceIdentityId,
+                sourceAccount,
+                username,
+                expectedRecipient.identityId,
+                expectedRecipient.address,
+                contactIdentityId,
+                amount,
+                memo,
+            )
+        }
+    }
+
+    /**
+     * The shielded balance of the wallet identity [identityId]'s own account
+     * on [walletId], with what the wallet knows about it. Port of Swift's
+     * `PlatformWalletManager.shieldedIdentityBalance`. Reads local state
+     * only.
+     *
+     * Show the returned state; do not add up stored notes, which cannot
+     * tell an empty account from one whose ledger was cleared.
+     * [ShieldedIdentityBalance.Unverified] stands until
+     * [prepareShieldedIdentityAddress] has proved the identity's account in
+     * this session.
+     *
+     * Throws [DashSdkError.PlatformWallet.ShieldedBalanceBusy] when the read
+     * did not finish within its wait budget, because the wallet's state or
+     * its shielded store was held, and while a shielded Clear is running:
+     * the only error of this call that means keep the last state and read
+     * again later. Any other error is a
+     * failure to show: [DashSdkError.NotFound] when the wallet holds no
+     * identity [identityId], [DashSdkError.PlatformWallet.WalletOperation]
+     * with the reason in the message otherwise.
+     */
+    suspend fun shieldedIdentityBalance(
+        walletId: ByteArray,
+        identityId: ByteArray,
+    ): ShieldedIdentityBalance = teardownGate.op {
+        decodeShieldedIdentityBalance(
+            mapNativeErrors {
+                FundingNative.shieldedIdentityBalance(managerHandle, walletId, identityId)
+            },
+        )
+    }
+
     // ── Shielded outgoing spends (types 16/17/19) ──────────────────────
     //
     // Manager-handle FFI calls like the funding submits above; each signs
@@ -2518,6 +2805,205 @@ class PlatformWalletManager(
         ShieldedTokenPurchaseAvailability.fromNative(
             mapNativeErrors {
                 ShieldedTokenPurchaseNative.availability(managerHandle, contractId, tokenPosition)
+            },
+        )
+    }
+
+    // ── Token shielded pools (types 26/27) ─────────────────────────────
+    //
+    // The wallet's notes in token shielded pools, kept by Rust in the
+    // shielded store's own SQLite file (no Room table). The watched pools
+    // are scanned by the ordinary shielded sync ([syncShieldedNow] and the
+    // background loop); a type 28 purchase watches its token's pool by
+    // itself. Ports of the same-named Swift methods in
+    // `PlatformWalletManagerShieldedSync.swift`.
+
+    /**
+     * Watch the shielded pool of the token at [tokenPosition] of
+     * [contractId] for [walletId], so every later shielded sync scans it for
+     * the wallet's notes. Returns the token's 32-byte id. Rust reads the
+     * token's configuration from Platform with proofs first and refuses a
+     * token without a shielded pool, or one whose configuration cannot be
+     * read (asking again may succeed), with its reason in the error message.
+     * Watching a watched pool again changes nothing.
+     */
+    suspend fun shieldedTokenPoolWatch(
+        walletId: ByteArray,
+        contractId: ByteArray,
+        tokenPosition: Int,
+    ): ByteArray = teardownGate.op {
+        require(walletId.size == 32) { "walletId must be exactly 32 bytes, got ${walletId.size}" }
+        require(contractId.size == 32) {
+            "contractId must be exactly 32 bytes, got ${contractId.size}"
+        }
+        requireTokenPosition(tokenPosition)
+        mapNativeErrors {
+            ShieldedTokenPoolNative.watch(managerHandle, walletId, contractId, tokenPosition)
+        }
+    }
+
+    /**
+     * Stop watching [tokenId]'s shielded pool for [walletId], forgetting the
+     * wallet's notes and scan state there. Unwatching a pool not watched
+     * changes nothing.
+     */
+    suspend fun shieldedTokenPoolUnwatch(walletId: ByteArray, tokenId: ByteArray): Unit =
+        teardownGate.op {
+            require(walletId.size == 32) { "walletId must be exactly 32 bytes, got ${walletId.size}" }
+            require(tokenId.size == 32) { "tokenId must be exactly 32 bytes, got ${tokenId.size}" }
+            mapNativeErrors { ShieldedTokenPoolNative.unwatch(managerHandle, walletId, tokenId) }
+        }
+
+    /**
+     * [walletId]'s tokens in every shielded pool it watches, one row per
+     * watched pool and bound account, in Rust's order, from the local scan
+     * alone (no network read). Empty when the wallet watches no pool.
+     */
+    suspend fun shieldedTokenPoolBalances(walletId: ByteArray): List<ShieldedTokenPoolBalance> =
+        teardownGate.op {
+            require(walletId.size == 32) { "walletId must be exactly 32 bytes, got ${walletId.size}" }
+            mapNativeErrors {
+                ShieldedTokenPoolNative.balances(managerHandle, walletId)
+                    .map { ShieldedTokenPoolBalance.fromNative(it) }
+            }
+        }
+
+    /**
+     * Send [amount] of the token at [tokenPosition] of [contractId] from the
+     * notes of [account] in that token's shielded pool to the Orchard
+     * address [recipientRaw43] in the same pool: the Type 26
+     * `TokenShieldedTransferWithShieldedFee` transition. The change goes
+     * back to the account and the fee is paid from the account's notes in
+     * the credit pool. Rust checks the amount, the token, the network and
+     * the note counts, selects both note sets, builds, broadcasts, records a
+     * Token Transfer activity row (kind tag 11, amount in the token's
+     * smallest unit) and requests a shielded sync.
+     *
+     * Returning means SUBMITTED, not confirmed: the transfer stays pending,
+     * its notes reserved ([ShieldedTokenPoolBalance.reservedBalance]), until
+     * a shielded sync confirms it. Do not show it as complete and do not
+     * retry it. A caller cancelled while the native call runs still gets
+     * this return once the call finished ([opReturningCompletedResult]), so
+     * a submitted transfer is never reported as a cancellation. Errors are
+     * read as for [shieldedTokenPurchaseFromPool]:
+     * [DashSdkError.PlatformWallet.ShieldedSpendUnconfirmed] (and the other
+     * "result not known" errors) mean it may have gone through.
+     *
+     * @param amount tokens to send, in the token's smallest unit, exactly as
+     *   the user typed them.
+     * @param recipientRaw43 the recipient's raw 43-byte Orchard payment
+     *   address, the shape [shieldedDefaultAddress] returns.
+     */
+    @Suppress("LongParameterList")
+    suspend fun shieldedTokenTransfer(
+        walletId: ByteArray,
+        contractId: ByteArray,
+        tokenPosition: Int,
+        recipientRaw43: ByteArray,
+        amount: ULong,
+        account: Int = 0,
+    ): Unit = teardownGate.opReturningCompletedResult {
+        require(account >= 0) { "account must be non-negative, got $account" }
+        require(walletId.size == 32) { "walletId must be exactly 32 bytes, got ${walletId.size}" }
+        require(contractId.size == 32) {
+            "contractId must be exactly 32 bytes, got ${contractId.size}"
+        }
+        require(recipientRaw43.size == 43) {
+            "recipientRaw43 must be exactly 43 bytes, got ${recipientRaw43.size}"
+        }
+        requireTokenPosition(tokenPosition)
+        mapNativeErrors {
+            ShieldedTokenPoolNative.transfer(
+                managerHandle,
+                walletId,
+                mnemonicResolver.nativeHandle,
+                account,
+                contractId,
+                tokenPosition,
+                recipientRaw43,
+                amount.toLong(),
+            )
+        }
+    }
+
+    /**
+     * Move [amount] of the token at [tokenPosition] of [contractId] from the
+     * notes of [account] in that token's shielded pool into the token
+     * balance of the existing identity [recipientIdentityId]: the Type 27
+     * `TokenUnshieldWithShieldedFee` transition. The change goes back to the
+     * account and the fee is paid from the account's credit pool notes.
+     * Rust checks and selects as for [shieldedTokenTransfer] and records a
+     * Token Unshield activity row (kind tag 12).
+     *
+     * Submitted, never confirmed, exactly as for [shieldedTokenTransfer]
+     * (including its cancellation rule): do not retry it.
+     */
+    @Suppress("LongParameterList")
+    suspend fun shieldedTokenUnshield(
+        walletId: ByteArray,
+        contractId: ByteArray,
+        tokenPosition: Int,
+        recipientIdentityId: ByteArray,
+        amount: ULong,
+        account: Int = 0,
+    ): Unit = teardownGate.opReturningCompletedResult {
+        require(account >= 0) { "account must be non-negative, got $account" }
+        require(walletId.size == 32) { "walletId must be exactly 32 bytes, got ${walletId.size}" }
+        require(contractId.size == 32) {
+            "contractId must be exactly 32 bytes, got ${contractId.size}"
+        }
+        require(recipientIdentityId.size == 32) {
+            "recipientIdentityId must be exactly 32 bytes, got ${recipientIdentityId.size}"
+        }
+        requireTokenPosition(tokenPosition)
+        mapNativeErrors {
+            ShieldedTokenPoolNative.unshield(
+                managerHandle,
+                walletId,
+                mnemonicResolver.nativeHandle,
+                account,
+                contractId,
+                tokenPosition,
+                recipientIdentityId,
+                amount.toLong(),
+            )
+        }
+    }
+
+    /**
+     * What a token pool spend of [kind] moving [amount] would take from
+     * [account]'s notes, chosen as the spend chooses them: the fee in
+     * credits (paid from the credit pool) and the token and credit note
+     * counts. Local state only: no network read, nothing reserved, no seed.
+     * Throws Rust's refusal when the spend would be refused on these notes
+     * (a zero amount, too few tokens, too few credits for the fee, too many
+     * notes); a form shows that message in place of the fee.
+     */
+    suspend fun shieldedTokenSpendPreview(
+        walletId: ByteArray,
+        contractId: ByteArray,
+        tokenPosition: Int,
+        kind: ShieldedTokenPoolSpendKind,
+        amount: ULong,
+        account: Int = 0,
+    ): ShieldedTokenSpendPreview = teardownGate.op {
+        require(account >= 0) { "account must be non-negative, got $account" }
+        require(walletId.size == 32) { "walletId must be exactly 32 bytes, got ${walletId.size}" }
+        require(contractId.size == 32) {
+            "contractId must be exactly 32 bytes, got ${contractId.size}"
+        }
+        requireTokenPosition(tokenPosition)
+        ShieldedTokenSpendPreview.fromNative(
+            mapNativeErrors {
+                ShieldedTokenPoolNative.spendPreview(
+                    managerHandle,
+                    walletId,
+                    account,
+                    contractId,
+                    tokenPosition,
+                    kind.raw,
+                    amount.toLong(),
+                )
             },
         )
     }

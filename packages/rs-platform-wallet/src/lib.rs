@@ -143,6 +143,17 @@ pub use key_wallet_manager;
 // (`set_dashpay_profile`, `record_dashpay_payment`, `add_identity`, …).
 pub use wallet::persister::WalletPersister;
 
+pub use wallet::identity::types::dashpay::payment_address::{
+    profile_payment_address_from_string, profile_payment_address_to_string,
+    ProfilePaymentAddressKind, ProfilePaymentAddressSupport,
+};
+
+#[cfg(feature = "shielded")]
+pub use wallet::shielded::tip_payment::{
+    parse_shielded_tip_amount, ShieldedIdentityBalance, ShieldedTipAdmission, ShieldedTipRecipient,
+    ShieldedTipRecipientChange, ShieldedTipReview, ShieldedTipSource,
+    SHIELDED_IDENTITY_BALANCE_WAIT,
+};
 #[cfg(feature = "shielded")]
 pub use wallet::shielded::tips::{
     is_shielded_identity_account, shielded_identity_account_index, SHIELDED_IDENTITY_ACCOUNT_BASE,

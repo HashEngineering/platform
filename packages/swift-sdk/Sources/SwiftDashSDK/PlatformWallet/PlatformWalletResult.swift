@@ -329,6 +329,31 @@ public enum PlatformWalletResultCode: Int32, Sendable {
     /// history was returned; the read can be made again later. SDK errors
     /// (stale-node rejection, transport or proof failures) are not this code.
     case errorBalanceHistoryInconsistentHeights = 83
+    /// A shielded Clear was refused because a shielded operation (a bind, an
+    /// account being added, a token pool transfer or unshield, a DashPay
+    /// profile write, a tip address preparation or a shielded tip being
+    /// sent, or another Clear) is in flight. Clear does not wait for it:
+    /// nothing was changed and sync keeps
+    /// running, so the host keeps its rows. Retry once it has finished.
+    case errorShieldedOperationInProgress = 84
+    /// A shielded tip was refused before anything was selected, built or
+    /// sent: another tip from this wallet is being sent, or an earlier
+    /// shielded payment to the same recipient may still execute. This call
+    /// sent nothing. A shielded sync resolves the earlier payment as executed
+    /// or as unable to execute, so the refusal ending is not a reason to send
+    /// again: reconcile the earlier payment first, and send again only once
+    /// it is known to have failed. Not `errorShieldedSpendUnconfirmed` (18).
+    case errorShieldedTipPending = 85
+    /// A shielded tip started from a saved contact was refused because the
+    /// username now belongs to another identity than the contact's. Nothing
+    /// was sent; the user picks the recipient again.
+    case errorShieldedTipRecipientMismatch = 86
+    /// A local shielded balance read did not finish within its wait budget
+    /// (the wallet's state or its shielded store was held, by a scan for
+    /// instance), or a shielded Clear was running. Nothing failed and
+    /// nothing changed: keep the last state shown and read again later. The
+    /// only code of that read that means retry.
+    case errorShieldedBalanceBusy = 87
     /// The named thing does not exist. Besides the handle/lookup failures this
     /// has always covered, BOTH deferred-send paths report the
     /// wallet-was-REMOVED case here.
@@ -482,6 +507,14 @@ public enum PlatformWalletResultCode: Int32, Sendable {
             self = .errorPublicContactRequestUnconfirmed
         case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_BALANCE_HISTORY_INCONSISTENT_HEIGHTS:
             self = .errorBalanceHistoryInconsistentHeights
+        case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_SHIELDED_OPERATION_IN_PROGRESS:
+            self = .errorShieldedOperationInProgress
+        case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_SHIELDED_TIP_PENDING:
+            self = .errorShieldedTipPending
+        case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_SHIELDED_TIP_RECIPIENT_MISMATCH:
+            self = .errorShieldedTipRecipientMismatch
+        case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_SHIELDED_BALANCE_BUSY:
+            self = .errorShieldedBalanceBusy
         case PLATFORM_WALLET_FFI_RESULT_CODE_NOT_FOUND:
             self = .notFound
         case PLATFORM_WALLET_FFI_RESULT_CODE_ERROR_UNKNOWN:
@@ -763,6 +796,34 @@ public enum PlatformWalletError: LocalizedError {
     /// failures) keep their existing mapping. Nothing changed; load the
     /// history again later.
     case balanceHistoryInconsistentHeights(String)
+    /// `PlatformWalletManager.clearShielded()` was refused at once because a
+    /// shielded operation (a bind, an account being added, a token pool
+    /// transfer or unshield, a DashPay profile write or a tip address
+    /// preparation, or another Clear) is in flight. Clear does not wait for
+    /// it. Nothing was changed: sync keeps running and no shielded state was
+    /// reset, so the host must not wipe its own rows. Clear again once the
+    /// operation has finished.
+    case shieldedOperationInProgress(String)
+    /// `sendShieldedTip` refused the tip with nothing sent: another tip from
+    /// this wallet is being sent, or an earlier shielded payment to the
+    /// recipient may still execute. This call sent nothing, unlike
+    /// `shieldedSpendUnconfirmed`. The earlier payment may be the same tip
+    /// and may pay the recipient: a shielded sync resolves it as executed or
+    /// as unable to execute, so do not send again because the refusal
+    /// ended, only once that payment is known to have failed.
+    case shieldedTipPending(String)
+    /// A shielded tip started from a saved contact was refused because the
+    /// username now belongs to another identity than the contact's: the name
+    /// moved since the contact was saved. Nothing was sent. The user picks
+    /// the recipient again; a tip to the name's new owner starts from the
+    /// name, not from the contact.
+    case shieldedTipRecipientMismatch(String)
+    /// `shieldedIdentityBalance` did not finish within its wait budget (the
+    /// wallet's state or its shielded store was held, by a scan for
+    /// instance), or a shielded Clear was running. Nothing failed and
+    /// nothing changed: keep the last state shown and read again later. The
+    /// only error of that read that means retry.
+    case shieldedBalanceBusy(String)
     case walletAlreadyExists(String)
     /// Definitive shielded-broadcast failure: the shielded transition never
     /// left the wallet (refused before anything was sent), so it cannot
@@ -998,6 +1059,9 @@ public enum PlatformWalletError: LocalizedError {
              .privateContactStoreNotRead(let m), .sdkPinnedBelowProtocolVersion(let m),
              .publicContactRequestUnconfirmed(let m),
              .balanceHistoryInconsistentHeights(let m),
+             .shieldedOperationInProgress(let m),
+             .shieldedTipPending(let m), .shieldedTipRecipientMismatch(let m),
+             .shieldedBalanceBusy(let m),
              .walletAlreadyExists(let m), .shieldedBroadcastFailed(let m),
              .shieldedBroadcastUnconfirmed(let m), .shieldedSpendUnconfirmed(let m),
              .shieldedNoRecordedAnchor(let m), .shieldedInsufficientBalance(let m),
@@ -1137,6 +1201,14 @@ public enum PlatformWalletError: LocalizedError {
             self = .publicContactRequestUnconfirmed(detail)
         case .errorBalanceHistoryInconsistentHeights:
             self = .balanceHistoryInconsistentHeights(detail)
+        case .errorShieldedOperationInProgress:
+            self = .shieldedOperationInProgress(detail)
+        case .errorShieldedTipPending:
+            self = .shieldedTipPending(detail)
+        case .errorShieldedTipRecipientMismatch:
+            self = .shieldedTipRecipientMismatch(detail)
+        case .errorShieldedBalanceBusy:
+            self = .shieldedBalanceBusy(detail)
         case .errorWalletAlreadyExists: self = .walletAlreadyExists(detail)
         case .errorShieldedBroadcastFailed: self = .shieldedBroadcastFailed(detail)
         case .errorShieldedBroadcastUnconfirmed: self = .shieldedBroadcastUnconfirmed(detail)
