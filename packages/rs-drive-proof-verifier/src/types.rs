@@ -43,7 +43,7 @@ use dpp::block::block_info::BlockInfo;
 use dpp::core_types::validator_set::ValidatorSet;
 use dpp::data_contract::document_type::{DecodedValueBudget, DocumentType};
 use dpp::fee::Credits;
-use dpp::platform_value::Value;
+use platform_value::Value;
 use dpp::prelude::{AddressNonce, IdentityNonce, TimestampMillis};
 use dpp::tokens::token_pricing_schedule::TokenPricingSchedule;
 use dpp::version::PlatformVersion;
